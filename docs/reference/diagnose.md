@@ -116,7 +116,7 @@ Manifolds (`phase_diagram`, `stability_map`, `dome`):
 | key | meaning |
 |---|---|
 | `x_grid`, `iso_x_grid` | the path's fractions, and the coarser grid `iso_s` is reported on |
-| `binodal_route` | `convex_hull`: the lower-hull facet that brackets `x_bar` |
+| `binodal_route` | `convex_hull` (the only route this stage runs): the lower-hull facet that brackets `x_bar`. Any other value, `mu_roots` included, is refused by name before anything is written; `mu_roots` is the one-field read-off (`one_field["readoff"]`) |
 | `x_bar` | the lever anchor, a fraction or `"auto"` (the most unstable interior point) |
 | `min_path_points`, `min_tie_gap` | as `binodal_on_isobar` |
 | `tc_method` | `dome_apex`, `ising_fit` or `bracket` |

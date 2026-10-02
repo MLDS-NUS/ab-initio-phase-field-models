@@ -122,6 +122,26 @@ def request_T_grid(declared: Mapping[str, Any], stages: Sequence[str],
     return given, "override"
 
 
+#: The binodal routes the ``phase_diagram`` stage admits for ``binodal_route``. ``thermo.binodal``
+#: also has ``mu_roots``, which needs a ``mu`` and a symmetry point the isobaric ``g(x)`` of a
+#: two-species system does not have; the one-field stage reads it (``one_field["readoff"]``).
+PHASE_DIAGRAM_BINODAL_ROUTES = ("convex_hull",)
+
+
+def check_declared(declared: Mapping[str, Any], stages: Sequence[str]) -> None:
+    """The declaration refusals made before anything is written; ``ValueError`` naming the key.
+
+    ``phase_diagram``: ``binodal_route`` is one of :data:`PHASE_DIAGRAM_BINODAL_ROUTES`."""
+    if "phase_diagram" in stages and "binodal_route" in declared:
+        route = declared["binodal_route"]
+        if route not in PHASE_DIAGRAM_BINODAL_ROUTES:
+            raise ValueError(
+                f"binodal_route={route!r} is not a route the phase_diagram stage runs: it "
+                f"admits {PHASE_DIAGRAM_BINODAL_ROUTES}. 'mu_roots' needs mu and a symmetry "
+                f"point, which an isobaric g(x) does not have; it is the one-field read-off "
+                f"(defaults['diagnose']['one_field']['readoff'], stage one_field_phase_diagram)")
+
+
 def resolve_checkpoint(system: System, ckpt: Any) -> Path:
     """The file to diagnose: a :class:`~aipf.system.Checkpoint` is digest-verified, a path only
     checked to exist."""
@@ -645,6 +665,7 @@ def _phase_diagram(model, system: System, pressures: Sequence[float],
     unit = float(_need(declared, "pressure_unit"))
     degree = int(_need(declared, "poly_degree"))
     route = _need(declared, "binodal_route")
+    check_declared(declared, ("phase_diagram",))
     x_bar = _need(declared, "x_bar")
     x_bar = x_bar if x_bar == "auto" else float(x_bar)  # "auto": thermo.binodal_convex_hull
     x = declared_grid(_need(declared, "x_grid"))
@@ -882,6 +903,7 @@ def run(system: System, ckpt: Any, *, stages: Sequence[str],
         raise ValueError(f"no stage asked for; one or more of {STAGES}")
     T_grid, T_grid_source = request_T_grid(declared, stages, pressures, T_grid,
                                            override_declared=override_declared)
+    check_declared(declared, stages)
 
     path = resolve_checkpoint(system, ckpt)
     digest = hashlib.md5(path.read_bytes()).hexdigest()
