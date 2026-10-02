@@ -117,13 +117,14 @@ does not read them, except the kernel hinge's four shape keys in `extra_experime
 | `L_P` | the pressure `P = mu . rho - f` against the equation-of-state table, relative to `max(abs(P_target), pressure_floor)` |
 | `L_conv` | the hinge `lambda_min(H) >= conv_margin` at points drawn in the trust domain |
 | `L_Gamma` | the hinge `d^2 Gamma / dx^2 >= 0` along the measured equation-of-state paths |
-| `L_W` | the kernel hinge `lambda_min(W(k) - W(0)) >= margin + kappa k^2` on `n_k` wavenumbers `linspace(k_max / n_k, k_max, n_k)`, scored `mean(relu(margin + kappa k^2 - lambda_min)^2)`; two channels take the closed-form smallest eigenvalue |
+| `L_W` | the kernel hinge `lambda_min(W(k) - W(0)) >= margin + kappa k^2` on `n_k` wavenumbers `linspace(k_max / n_k, k_max, n_k)`, scored `mean(relu(margin + kappa k^2 - lambda_min)^2)`; two channels take the closed-form smallest eigenvalue (of a symmetric kernel). Why: the floor gives the kernel a positive square-gradient stiffness at every k, so instability can only start at k = 0, and with `W(k_max) ~ 0` it pins `W(0) <= -kappa k_max^2` (about -18 for the Fe-B declaration), the attractive kernel that carries the miscibility gap. It is not an optional regulariser: weighed at 0, Fe-B loses its gap |
 
 `L_W` needs no data and is computed once a step from the kernel alone. A system declares it the way
 a saved checkpoint spells it: the weight `lambda_wpsd`, which the driver maps to `lambda_W`, and the
 shape `wpsd_kappa`, `wpsd_k_max`, `wpsd_n_k` and `wpsd_margin`, which it keeps in
 `extra_experiment_config`. A non-zero weight without all four shape keys is refused, and so is a
-model without a pair kernel. `MANIFEST.json` names the terms a run trained.
+model without a pair kernel. `MANIFEST.json` names the terms a run trained, and its `kernel_hinge`
+records the hinge's shape.
 
 ## Anchor tables
 

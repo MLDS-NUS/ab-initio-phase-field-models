@@ -1,4 +1,9 @@
-"""L_W: a non-canonical extra, the square-gradient hinge ``W_hat(k) - W_hat(0) >= kappa k^2``."""
+"""L_W: a non-canonical extra, the square-gradient hinge ``W_hat(k) - W_hat(0) >= kappa k^2``.
+
+The ``kappa k^2`` floor gives the pair kernel a positive square-gradient stiffness at every ``k``, so
+instability can only start at ``k = 0``; with ``W_hat(k_max) ~ 0`` it pins
+``W_hat(0) <= -kappa k_max^2``, the attractive kernel that carries a miscibility gap (Fe-B: ``-18``).
+A run that weighs it at 0 loses that gap (:mod:`aipf.train.kernel_hinge`)."""
 from __future__ import annotations
 
 import torch
@@ -10,7 +15,11 @@ EIGMIN_SQRT_FLOOR = 1e-30
 
 def eigmin_sym2(D: torch.Tensor) -> torch.Tensor:
     """Smaller eigenvalue of symmetric ``(..., 2, 2)`` matrices, ``(a + c)/2 - sqrt(((a - c)/2)^2 + b^2)``:
-    one expression on every device, where ``eigvalsh`` at a near-degenerate ``D`` depends on the backend."""
+    one expression on every device, where ``eigvalsh`` at a near-degenerate ``D`` depends on the backend.
+
+    Symmetry is assumed, not checked: ``b`` is ``D[..., 0, 1]`` and ``D[..., 1, 0]`` is never read, so
+    the gradient reaches the upper off-diagonal entry only. A pair kernel's ``W_hat`` is assembled
+    symmetric, so the two entries are one value."""
     if D.shape[-2:] != (2, 2):
         raise ValueError(f"eigmin_sym2 takes (..., 2, 2) matrices, got {tuple(D.shape)}")
     a = D[..., 0, 0]

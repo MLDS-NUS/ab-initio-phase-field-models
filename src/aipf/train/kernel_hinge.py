@@ -1,6 +1,13 @@
 """``L_W``, the pair kernel's square-gradient hinge (:func:`aipf.losses.extras.l_w`) on ``n_k``
 wavenumbers ``linspace(k_max / n_k, k_max, n_k)``, trained once a step when a system weighs it.
 
+Why it exists: the floor ``W_hat(k) - W_hat(0) >= kappa k^2`` gives the pair kernel a positive
+square-gradient stiffness at every ``k``, so a homogeneous state can only lose stability at ``k = 0``
+(no finite-``k`` checkerboard). With ``W_hat(k_max) ~ 0`` it also pins ``W_hat(0) <= -kappa k_max^2``
+(``-18`` for the Fe-B declaration, ``kappa = 2``, ``k_max = 3``): an attractive ``k = 0`` kernel, and
+for Fe-B that kernel is what carries the miscibility gap, at a measurable cost to the ``L_S`` and
+``L_bulk`` fit. It is not an optional regulariser: a run that sets the weight to 0 loses the gap.
+
 A declaration spells it as a saved checkpoint does (``lambda_wpsd``; ``wpsd_kappa``, ``wpsd_k_max``,
 ``wpsd_n_k``, ``wpsd_margin``), and :func:`declared_fields` maps it as ``ckpt_compat`` maps that
 checkpoint: the weight to ``lambda_W``, the shape into ``extra_experiment_config``."""
@@ -102,6 +109,7 @@ class KernelHinge:
         return l_w(W[1:] - W[0], k, kappa=self.kappa, margin=self.margin)
 
     def provenance(self) -> Dict[str, Any]:
+        """What ``MANIFEST.json`` records under ``kernel_hinge``: the term and its shape."""
         return {"term": HINGE_TERM, "kappa": self.kappa, "k_max": self.k_max,
                 "n_k": int(self.n_k), "margin": self.margin}
 
