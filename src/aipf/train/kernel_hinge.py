@@ -4,7 +4,8 @@ wavenumbers ``linspace(k_max / n_k, k_max, n_k)``, trained once a step when a sy
 Why it exists: the floor ``W_hat(k) - W_hat(0) >= kappa k^2`` gives the pair kernel a positive
 square-gradient stiffness at every ``k``, so a homogeneous state can only lose stability at ``k = 0``
 (no finite-``k`` checkerboard). With ``W_hat(k_max) ~ 0`` it also pins ``W_hat(0) <= -kappa k_max^2``
-(``-18`` for the Fe-B declaration, ``kappa = 2``, ``k_max = 3``): an attractive ``k = 0`` kernel, and
+(about ``-18`` for the Fe-B declaration, ``kappa = 2``, ``k_max = 3``; the published kernel
+has ``W_hat(0)`` eigenvalues of about -17.5): an attractive ``k = 0`` kernel, and
 for Fe-B that kernel is what carries the miscibility gap, at a measurable cost to the ``L_S`` and
 ``L_bulk`` fit. It is not an optional regulariser: a run that sets the weight to 0 loses the gap.
 

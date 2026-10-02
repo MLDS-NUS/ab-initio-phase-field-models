@@ -2,7 +2,7 @@
 
 The ``kappa k^2`` floor gives the pair kernel a positive square-gradient stiffness at every ``k``, so
 instability can only start at ``k = 0``; with ``W_hat(k_max) ~ 0`` it pins
-``W_hat(0) <= -kappa k_max^2``, the attractive kernel that carries a miscibility gap (Fe-B: ``-18``).
+``W_hat(0) <= -kappa k_max^2``, the attractive kernel that carries a miscibility gap (Fe-B: about ``-18``).
 A run that weighs it at 0 loses that gap (:mod:`aipf.train.kernel_hinge`)."""
 from __future__ import annotations
 

@@ -279,7 +279,8 @@ def run(args: argparse.Namespace) -> int:
             try:
                 check_optimizer_resumable(system, init_from, init_path)
             except (OptimizerLayoutMismatch, KeyError) as refused:
-                print(f"--resume-optimizer yes: {refused.args[0]}", file=sys.stderr)
+                print(f"aipf train: --resume-optimizer yes: {str(refused.args[0]).rstrip('.')}.",
+                      file=sys.stderr)
                 return 2
         return _submit(args, system)
 
@@ -309,7 +310,7 @@ def run(args: argparse.Namespace) -> int:
                       anchors=anchors, log_every_step=args.log_every_step,
                       device=args.device, deterministic=args.deterministic)
     except OptimizerLayoutMismatch as refused:
-        print(f"--resume-optimizer yes: {refused}", file=sys.stderr)
+        print(f"aipf train: --resume-optimizer yes: {str(refused).rstrip('.')}.", file=sys.stderr)
         return 2
     print(run_dir)
     return 0

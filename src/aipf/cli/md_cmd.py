@@ -83,8 +83,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                    help="also import the accelerated kernels (seconds to minutes)")
     d.add_argument("--system", default=None,
                    help="check the MACE potential this system runs ([site.mace_potential] <system>, "
-                        "else the bare fact); default: one report per system that declares an "
-                        "ML-IAP potential, or the bare fact when none does")
+                        "else the plain key mace_potential); default: one report per system that "
+                        "declares an ML-IAP potential, or the plain key when none does")
     d.set_defaults(func=_doctor)
 
 

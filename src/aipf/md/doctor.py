@@ -1357,7 +1357,7 @@ def system_potential(site: Any, system: str) -> tuple[Path | None, str]:
     try:
         return Path(site.for_system("mace_potential", system)), ""
     except MissingSiteFact as missing:
-        return None, f"{missing} (needed for {system!r}'s ML-IAP decks only)"
+        return None, str(missing)
 
 
 def examine_site(site: Any, *, device: str = "auto", deep: bool = False,

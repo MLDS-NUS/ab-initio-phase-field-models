@@ -39,8 +39,8 @@ Hydrogen-helium:
   tests/unit/test_md_analysis.py.
 
 The iron-boron and hydrogen-helium checks solve the model's own isobar on the equation-of-state
-manifold under the system's raw root, so they are marked ``env``; every check skips, naming the
-checkpoint, on a checkout without the published checkpoints. Every comparison runs on the CPU, one
+manifold tracked under ``experiments/<system>/eos/``, so they need no raw root; every check skips,
+naming the checkpoint, on a checkout without the published checkpoints. Every comparison runs on the CPU, one
 thread. NaN masks must be equal; each bound is at most
 three times the largest deviation measured, with its cause.
 """
@@ -212,10 +212,8 @@ ISOPLETH_BOUND = {"binodal": 200.0, "spinodal": 30.0}
 X_PROTOSOLAR = 0.089
 
 
-@pytest.mark.env
 def test_feb_gamma_map_is_the_stability_map_stage(tmp_path):
     declared_roots.published_or_skip("feb")
-    declared_roots.raw_or_skip("feb")  # the equation-of-state manifold
     from aipf.cli.main import main
     argv = ["diagnose", "--system", "feb", "--ckpt", "published", "--stage", "stability_map",
             "--T-grid", FEB_T_GRID, "--out", str(tmp_path)]
@@ -262,28 +260,22 @@ def _dgmix_deviation(name, figdir, x_key, pressures, x):
     return worst, n
 
 
-@pytest.mark.env
 def test_feb_dgmix_is_the_isobar_free_energy():
     declared_roots.published_or_skip("feb")
-    declared_roots.raw_or_skip("feb")  # the equation-of-state manifold
     worst, n = _dgmix_deviation("feb", "ed3_feb_dgmix", "x_Fe", (0, 5, 10),
                                 np.linspace(1e-3, 1 - 1e-3, 601))
     assert n == 24 and worst <= DGMIX_BOUND["feb"], worst
 
 
-@pytest.mark.env
 def test_hhe_dgmix_is_the_isobar_free_energy():
     declared_roots.published_or_skip("hhe")
-    declared_roots.raw_or_skip("hhe")  # the equation-of-state manifold
     worst, n = _dgmix_deviation("hhe", "ed5_hhe_dgmix_gamma", "x_He", (200, 400, 600, 800),
                                 np.linspace(0.002, 0.998, 601))
     assert n == 44 and worst <= DGMIX_BOUND["hhe"], worst
 
 
-@pytest.mark.env
 def test_hhe_gamma_is_the_stability_map_stage(tmp_path):
     declared_roots.published_or_skip("hhe")
-    declared_roots.raw_or_skip("hhe")  # the equation-of-state manifold
     system = load("hhe")
     declared = dict(system.defaults["diagnose"])
     declared["stability_map"] = {"x_points": (0.02, 0.98, 97), "min_points": 1,
@@ -311,10 +303,8 @@ def _isopleth(x_of_T, T, x_target):
     return float(np.interp(x_target, xs[o], Ts[o]))
 
 
-@pytest.mark.env
 def test_hhe_domes_and_isopleth_are_the_phase_diagram_stage(tmp_path):
     declared_roots.published_or_skip("hhe")
-    declared_roots.raw_or_skip("hhe")  # the equation-of-state manifold
     from aipf.diagnose.run import run
     system = load("hhe")
     domes = dict(np.load(FIGDATA / "fig5_hhe" / "figdata" / "domes.npz"))
