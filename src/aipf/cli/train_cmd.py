@@ -1,0 +1,300 @@
+"""``aipf train`` -- train a declared system's functional.
+
+Run name, seed, length and sources are flags with no default; everything else comes off ``system.defaults``."""
+from __future__ import annotations
+
+import argparse
+import sys
+from typing import Optional, Sequence, Tuple, Union
+
+from aipf.cli import variant
+from aipf.paths import PUBLISHED_DIRNAME
+
+#: How one training source is spelled; SUBDIR is relative to the system's declared source root.
+SOURCE_SPELLING = "NAME=SUBDIR:PATTERN:GX,GY,GZ"
+
+#: ``--source declared``: the system's own ``defaults["training"]["sources"]``, exclusions included.
+DECLARED = "declared"
+
+#: A field grid is three lengths. A source that gives fewer has not said
+#: what shape its fields are.
+_GRID_RANK = 3
+
+
+def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
+    """One ``--source`` argument as the ``(name, subdir, pattern, grid)`` row
+    ``aipf.train.fit._specs_from`` takes, or :data:`DECLARED`."""
+    if text == DECLARED:
+        return DECLARED
+    name, sep, rest = text.partition("=")
+    parts = rest.split(":")
+    if not sep or not name or len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a source. Spell it {SOURCE_SPELLING}: a name, "
+            f"the subdirectory of the fields root it is cut from, the glob "
+            f"that selects its files, and its grid")
+    subdir, pattern, grid_text = parts
+    try:
+        grid = tuple(int(g) for g in grid_text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{grid_text!r} is not a grid: {_GRID_RANK} integers, "
+            f"comma-separated, as in {SOURCE_SPELLING}")
+    if subdir.startswith("/"):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} names an absolute tree {subdir!r}; SUBDIR is relative "
+            f"to the system's declared source root "
+            f"(defaults['training']['source_root'])")
+    if len(grid) != _GRID_RANK or not subdir or not pattern:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a source. Spell it {SOURCE_SPELLING}: the "
+            f"subdirectory, the glob and {_GRID_RANK} grid lengths are all "
+            f"required")
+    return (name, subdir, pattern, grid)
+
+
+def add_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "train", help="train this system's declared functional",
+        description="Train the functional a system declares and write a "
+                    "signed run directory. Nothing below has a default: a "
+                    "run that did not state one of these is not a run "
+                    "anyone can reproduce.")
+    p.add_argument("--system", required=True,
+                   help="the system to train, by name or by folder")
+    variant.add_argument(p)
+    p.add_argument("--run", required=True, dest="run_name",
+                   help="the run's name, and the directory it writes to "
+                        "under this system's checkpoint tier")
+    p.add_argument("--seed", required=True, type=int,
+                   help="the one seed every stream of the run is derived "
+                        "from: the parameters, the batch order, the draws")
+    length = p.add_mutually_exclusive_group(required=True)
+    length.add_argument("--steps", type=int,
+                        help="how long to train, in optimiser steps "
+                             "(exactly one of --steps and --epochs)")
+    length.add_argument("--epochs", type=int,
+                        help="how long to train, in epochs "
+                             "(exactly one of --steps and --epochs)")
+    p.add_argument("--source", required=True, action="append",
+                   type=source_row, metavar=SOURCE_SPELLING,
+                   help="a training source, repeatable and needed at least "
+                        "once; SUBDIR is relative to the system's declared "
+                        "source root. Its loss weight is the system's declared one. "
+                        "`--source declared` alone trains on the system's declared "
+                        "sources (defaults['training']['sources'])")
+    p.add_argument(f"--init-from-{PUBLISHED_DIRNAME}", dest="init_from_published",
+                   action="store_true",
+                   help="start from the weights of the checkpoint this "
+                        "system declares (the repository's tracked copy "
+                        "first, then the raw root), digest-checked "
+                        "before it is read")
+    p.add_argument("--resume-optimizer", required=True, choices=("yes", "no"),
+                   help="whether to continue the optimizer and schedule "
+                        "saved in --init-from-published's checkpoint ('yes') "
+                        "or build both fresh ('no'). REQUIRED, because the "
+                        "two are different experiments and not two settings "
+                        "of one: a fresh schedule starts in its linear "
+                        "warm-up, where a step moves no float32 parameter, "
+                        "and a resumed one starts at the rate the saved run "
+                        "had reached")
+    p.add_argument("--anchors", required=True, choices=("declared", "none"),
+                   help="whether to train the measured anchor tables this "
+                        "system declares ('declared') or the drift term "
+                        "alone ('none'). REQUIRED, because the anchors are "
+                        "most of the loss -- 94 per cent of it at step 0 on "
+                        "the first system measured -- so a run without them "
+                        "is a different experiment and not a cheaper "
+                        "version of the same one. A system that declares no "
+                        "tables trains the drift term whichever is passed")
+    p.add_argument("--log-every-step", action="store_true",
+                   help="also write the per-step loss series")
+    p.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"),
+                   help="where to train (default auto: cuda when torch sees a GPU, else cpu); "
+                        "cuda without one is refused before the run directory is made")
+    p.add_argument("--deterministic", action="store_true",
+                   help="ask torch for deterministic kernels for this run (slower; what a "
+                        "bit-for-bit comparison needs). Off by default, and then no switch is touched")
+    p.add_argument("--pbs", action="store_true",
+                   help="do not train here: write job.pbs in the run directory, which runs this same "
+                        "command without --pbs in this environment, and submit it to the site's queue "
+                        "([site] pbs_queue, pbs_project, pbs_gpus, pbs_walltime_h); print the job id")
+    p.add_argument("--walltime-h", type=float, default=None,
+                   help="with --pbs: the job's wall-clock limit in hours (default: [site] pbs_walltime_h)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --pbs: write the job file and submit nothing")
+    p.set_defaults(func=run)
+
+
+def unmatched_sources(system, table) -> list:
+    """One refusal per source whose glob selects no directory of the archive once its excluded runs
+    (a row's optional fifth field) are removed, naming its root."""
+    from aipf.train.fit import source_root
+    root = source_root(system)
+    refusals = []
+    for name, subdir, pattern, *rest in table:
+        tree = root / subdir
+        excluded = set(rest[1]) if len(rest) > 1 else set()
+        if not any(p.is_dir() and p.name not in excluded for p in tree.glob(pattern)):
+            also = (f", once its {len(excluded)} excluded run(s) are removed"
+                    if excluded else "")
+            refusals.append(
+                f"--source {name}: {pattern!r} matches no run directory "
+                f"under {tree}{also} (the archive root is {root})")
+    return refusals
+
+
+def _source_table(system, given) -> Optional[Sequence[Tuple]]:
+    """The ``--source`` rows as given, or the system's declared ones for ``--source declared``;
+    ``None`` after printing a refusal."""
+    if DECLARED not in given:
+        return tuple(given)
+    if len(given) > 1:
+        print(f"--source {DECLARED} stands alone: it names the system's whole declared set, "
+              f"so it cannot be combined with another --source", file=sys.stderr)
+        return None
+    from aipf.train.fit import declared_source_table
+    try:
+        return declared_source_table(system)
+    except (KeyError, ValueError) as refused:
+        print(f"--source {DECLARED}: {refused.args[0]}", file=sys.stderr)
+        return None
+
+
+def _absolute_if_path(text: str) -> str:
+    """A ``--system`` given as a folder, made absolute (the job runs in another directory); a name as is."""
+    from pathlib import Path
+
+    from aipf.system import _looks_like_a_path
+    return str(Path(text).resolve()) if _looks_like_a_path(text) else text
+
+
+def _job_command(args: argparse.Namespace) -> list:
+    """This command as the batch job runs it: no ``--pbs``, no ``--walltime-h``, no ``--dry-run``."""
+    command = ["aipf", "train", "--system", _absolute_if_path(args.system)]
+    if args.variant is not None:
+        command += ["--variant", args.variant]
+    command += ["--run", args.run_name, "--seed", str(args.seed)]
+    command += (["--steps", str(args.steps)] if args.steps is not None
+                else ["--epochs", str(args.epochs)])
+    for row in args.source:
+        if row == DECLARED:
+            command += ["--source", DECLARED]
+            continue
+        name, subdir, pattern, grid = row
+        command += ["--source", f"{name}={subdir}:{pattern}:{','.join(str(g) for g in grid)}"]
+    if args.init_from_published:
+        command.append(f"--init-from-{PUBLISHED_DIRNAME}")
+    command += ["--resume-optimizer", args.resume_optimizer, "--anchors", args.anchors]
+    if args.log_every_step:
+        command.append("--log-every-step")
+    command += ["--device", args.device]
+    if args.deterministic:
+        command.append("--deterministic")
+    return command
+
+
+def _submit(args: argparse.Namespace, system) -> int:
+    """Write ``<run directory>/job.pbs`` and submit it unless ``--dry-run``; print the file and the job id.
+
+    The job is handed the data root and the system's raw root this submission resolved."""
+    from aipf import paths
+    from aipf.data import index
+    from aipf.md.scheduler import PbsSpec, SchedulerError, batch_job, job_name
+    from aipf.site import Site
+    spec = PbsSpec.from_site(Site.load(), walltime_h=args.walltime_h)
+    env = {"AIPF_DATA": str(paths.data_root())}
+    try:
+        env[paths.raw_env_name(system.name)] = str(system.paths.raw())
+    except paths.MissingLocation:
+        pass                                      # the job refuses the same way, naming it
+    workdir = index.ckpt_dir(system) / args.run_name
+    job = batch_job(spec, name=job_name(f"train-{args.run_name}"), command=_job_command(args),
+                    workdir=workdir, env=env)
+    try:
+        backend = spec.backend()
+        if args.dry_run:
+            print(backend.write(job))
+            return 0
+        handle = backend.submit(job)
+    except SchedulerError as refused:
+        print(f"aipf train --pbs: {refused}", file=sys.stderr)
+        return 2
+    print(job.script_path)
+    print(handle.job_id)
+    return 0
+
+
+def run(args: argparse.Namespace) -> int:
+    system = variant.load_system(args)
+    if system is None:
+        return 2
+    if (args.walltime_h is not None or args.dry_run) and not args.pbs:
+        print("--walltime-h and --dry-run belong to a batch submission and need --pbs",
+              file=sys.stderr)
+        return 2
+
+    init_from = None
+    if args.init_from_published:
+        init_from = system.checkpoint
+        if init_from is None:
+            print(f"--init-from-{PUBLISHED_DIRNAME}: system {system.name!r} declares no "
+                  f"checkpoint, so there are no weights to start from",
+                  file=sys.stderr)
+            return 2
+
+    # fit's own refusals, made before anything is written (and before a job is submitted):
+    # a reserved run name, the starting weights found and digest-checked
+    from aipf.train.fit import ReservedRunName, pre_run_checks
+    try:
+        pre_run_checks(system, args.run_name, init_from)
+    except ReservedRunName as refused:
+        print(f"aipf train: {refused}", file=sys.stderr)
+        return 2
+    except (FileNotFoundError, ValueError) as refused:
+        print(f"--init-from-{PUBLISHED_DIRNAME}: the checkpoint system {system.name!r} "
+              f"declares is refused: {refused}", file=sys.stderr)
+        return 2
+
+    resume_optimizer = args.resume_optimizer == "yes"
+    # refused here, by name: the two flags contradict each other (`fit` refuses it too)
+    if resume_optimizer and init_from is None:
+        print("--resume-optimizer yes needs --init-from-published: there is "
+              "no saved optimizer to continue without a checkpoint to read "
+              "it from", file=sys.stderr)
+        return 2
+
+    table = _source_table(system, args.source)
+    if table is None:
+        return 2
+    refusals = unmatched_sources(system, table)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return 2
+
+    if args.pbs:
+        return _submit(args, system)
+
+    # refused here, by name, before any run directory exists (`fit` refuses it too)
+    from aipf.train.fit import DeviceUnavailable, resolve_device
+    try:
+        resolve_device(args.device)
+    except DeviceUnavailable as refused:
+        print(f"--device {args.device}: {refused}", file=sys.stderr)
+        return 2
+
+    # the driver's own helper assembles the specs, so the CLI and a Python caller agree
+    from aipf.train.anchors import NO_ANCHORS
+    from aipf.train.fit import _specs_from, fit
+    sources = _specs_from(system, table, [row[0] for row in table])
+
+    # "declared" -> None (the declaration answers); "none" -> NO_ANCHORS (drift-only)
+    anchors = None if args.anchors == "declared" else NO_ANCHORS
+
+    run_dir = fit(system, run_name=args.run_name, sources=sources,
+                  seed=args.seed, steps=args.steps, epochs=args.epochs,
+                  init_from=init_from, resume_optimizer=resume_optimizer,
+                  anchors=anchors, log_every_step=args.log_every_step,
+                  device=args.device, deterministic=args.deterministic)
+    print(run_dir)
+    return 0

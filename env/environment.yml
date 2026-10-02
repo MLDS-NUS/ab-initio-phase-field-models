@@ -1,0 +1,21 @@
+# env/environment.yml -- the aipf environment, portable: Python and pip, nothing of any host.
+# Build: bash env/build-env.sh [-p PREFIX | -n NAME] [--with-lammps]. The Python dependencies
+# are pyproject.toml's, installed by that script with pip install -e ".[md,figures,dev]",
+# then MACE and, with --with-lammps, LAMMPS (env/build-lammps.sh).
+# Exact versions of a known-good environment: env/environment-lock.yml.
+# matplotlib and freetype come from conda-forge at the versions the figures were drawn with
+# (figures/common/BUILD.txt): the pixel tests compare against those renders, and pip's wheels of
+# matplotlib carry a different freetype. pymupdf rasterises the PDFs for those tests; nbconvert,
+# ipykernel and jupyter_core execute the figures notebook.
+name: aipf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - matplotlib-base=3.10.8
+  - freetype=2.14.1
+  - pymupdf
+  - nbconvert
+  - ipykernel
+  - jupyter_core

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ab-initio-phase-field-models"
+version = "0.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mengyi Chen", email = "chenmengyi@u.nus.edu" }]
+description = "Ab initio phase-field models: learned mesoscopic free-energy functionals and mobilities from short molecular-dynamics trajectories"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "torch>=2.4",
+    "lightning>=2.2",
+    "torchmetrics>=1.0",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# [md]: the MACE potential's runtime. mace-torch itself is NOT listed: it declares
+# `Requires-Dist: e3nn==0.4.4`, and the published potential deserialises only under
+# e3nn==0.5.1, so no resolver can satisfy both. env/build-env.sh installs it afterwards with
+# `pip install --no-deps mace-torch==0.3.16`; that skips all its declared requirements, so
+# the six it needs at run time (torch-ema, matscipy, h5py, gitpython, lmdb, orjson; without
+# torch-ema every `import mace.*` fails) are pinned here, with cuequivariance, without which
+# the published ML-IAP potential does not load. Its CUDA kernels and their cuBLAS are
+# platform wheels, installed by the script too.
+md = [
+    "e3nn==0.5.1",
+    "ase>=3.26",
+    "torch-ema==0.3",
+    "matscipy==1.2.0",
+    "h5py==3.16.0",
+    "gitpython==3.1.46",
+    "lmdb==1.7.5",
+    "orjson==3.11.5",
+    "cuequivariance==0.9.1",
+    "cuequivariance-torch==0.9.1",
+]
+# matplotlib: pinned to the version the figures were drawn with (figures/common/BUILD.txt), which
+# env/environment.yml installs from conda-forge with its freetype; the pin keeps pip from replacing it.
+figures = ["matplotlib==3.10.8", "cmcrameri"]
+# matplotlib: tests/unit draws the MD analysis rows (aipf.md.analysis).
+dev = ["pytest", "pandas", "tqdm", "matplotlib==3.10.8"]
+
+[project.scripts]
+aipf = "aipf.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["data", "experiments/*/figdata", ".git"]
+# A plain `pytest` runs everything but the checks that take minutes; `-m slow` selects those, and a
+# command-line -m replaces this one. A check marked `env` runs by default and skips, naming what is
+# missing, where this machine has no raw data root, simulator binary or GPU.
+addopts = ["-m", "not slow"]
+markers = [
+    "slow: minutes: draws every figure, trains two steps. Deselected by default; select with -m slow.",
+    "env: needs a raw data root, a simulator binary or a GPU; skips naming it.",
+]

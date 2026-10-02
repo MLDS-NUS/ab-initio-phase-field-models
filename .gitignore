@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# The symlink farm at the repository root, rebuilt from the manifest rather than
+# tracked. The leading slash is required: a bare "data/" matches at any depth and
+# would also exclude the package's own src/aipf/data/ module.
+# One exception: the published checkpoints are real files, tracked, at
+# data/<system>/ckpt/published/final.ckpt and .../published/<variant>/final.ckpt.
+# Git cannot re-include a file below an ignored directory, so each level is
+# ignored by its contents (/data/*) and the directories on the way re-included.
+/data/*
+!/data/*/
+/data/*/*
+!/data/*/ckpt/
+/data/*/ckpt/*
+!/data/*/ckpt/published/
+
+# The maintainers' own scripts and notes; not part of the package.
+/bin/
+
+# Rendered figures. Each figures/<fig>/draw.py writes them from its committed
+# figures/<fig>/figdata/, so they are a product and not a source; the
+# published copies they must match are committed in figures/reference/. The
+# leading slash anchors it to the figures directory at the repository root.
+/figures/out/
+
+# Site configuration: where this machine keeps the raw data and its programs. Never
+# tracked; the template is aipf.toml.example.
+/aipf.toml

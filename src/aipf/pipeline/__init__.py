@@ -1,0 +1,95 @@
+"""From a trajectory to the data a model is trained on: fields, modes, QC verdicts, anchor tables.
+
+Conventions: arrays in and out, channel first, any channel count, choices named and never flagged,
+an unhonourable parameter refused, nothing physical defaulted.
+"""
+from .kde import (  # noqa: F401
+    DEVICES,
+    METHODS,
+    binder_cumulant,
+    channel_atom_types,
+    density_field,
+)
+from .extract_modes import (  # noqa: F401
+    ORDERINGS,
+    REFERENCE_BOXES,
+    ROUTES,
+    frames_to_skip,
+    mode_amplitudes,
+    mode_series,
+    mode_set,
+    reference_box,
+    wavevectors,
+)
+from .coarse_grain import (  # noqa: F401
+    COMPOSITION_FORMS,
+    EDGE_MODES,
+    SPACINGS,
+    Frame,
+    box_lengths,
+    composition_field,
+    density_series,
+    emit_indices,
+    grid_for_spacing,
+    read_dump,
+    read_timesteps,
+    smooth_in_time,
+)
+from .qc import (  # noqa: F401
+    FLAGS,
+    PARTITIONS,
+    VERDICTS,
+    band_growth,
+    block_means,
+    burn_in_frames,
+    channel_occupancy,
+    displacement_series,
+    excursion_stop,
+    expected_frames,
+    frame_inventory,
+    frozen_stop,
+    mode_power_ratio,
+    observable_report,
+    settle_time,
+    uniformity_deviation,
+    usable_window,
+    verdict,
+)
+from .anchors import (  # noqa: F401
+    SCALINGS,
+    SHAPE_SETS,
+    AnchorTable,
+    KernelShape,
+    RunMobility,
+    anchor_rows,
+    anchor_table,
+    band_average,
+    concentration_series,
+    concentration_weights,
+    condensing,
+    extrapolate_to_zero,
+    kernel_shape,
+    lag_intercept,
+    mobility_spectrum,
+    quarter_growth,
+    run_mobility,
+    shape_amplitude,
+    shell_index,
+    shell_intercepts,
+    single_phase,
+    time_fifths,
+)
+# ``modes.modes`` is not re-exported: the name would shadow the submodule.
+# Reach it as ``from aipf.pipeline.modes import modes``.
+from .modes import (  # noqa: F401
+    ARCHIVE_KEYS,
+    DEVICE,
+    REFERENCE_BOX,
+    SCHEMA,
+    SIDE_KEYS,
+    STEP_COUNT_KEYS,
+    ModesRecord,
+    composition_label,
+    frames_prepared,
+    modes_from_dump,
+)

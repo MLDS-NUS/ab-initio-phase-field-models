@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Ab initio phase-field models"
+type: software
+authors:
+  - family-names: Chen
+    given-names: Mengyi
+    email: chenmengyi@u.nus.edu
+    affiliation: National University of Singapore
+repository-code: https://github.com/mengyi-chen/ab-initio-phase-field-models
+license: MIT
+version: 0.1.0
+date-released: 2026-10-01
+identifiers:
+  - type: doi
+    value: 10.48550/arXiv.2610.01432
+    description: The arXiv preprint describing the method and the three systems.
+preferred-citation:
+  type: article
+  title: "Learning ab initio phase-field models"
+  authors:
+    - family-names: Chen
+      given-names: Mengyi
+    - family-names: Zhong
+      given-names: Peichen
+    - family-names: Zhang
+      given-names: Zihan
+    - family-names: Li
+      given-names: Qianxiao
+  year: 2026
+  journal: arXiv
+  doi: 10.48550/arXiv.2610.01432
+  url: https://arxiv.org/abs/2610.01432
+  identifiers:
+    - type: other
+      value: arXiv:2610.01432

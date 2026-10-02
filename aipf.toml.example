@@ -1,0 +1,47 @@
+# Copy to aipf.toml at the repository root (it is gitignored) and fill in what this machine has.
+# Every key is optional. An AIPF_<KEY> environment variable wins over the key, and the key wins
+# over the default. A relative path is taken relative to the repository root.
+
+[paths]
+# The data farm, data/<system>/{md,modes,ckpt,diagnose}. AIPF_DATA. Default: data
+data = "data"
+# Where the experiment folders (experiments/<system>/system.py) live. AIPF_EXPERIMENTS. Default: experiments
+experiments = "experiments"
+# A directory holding one raw-data directory per system, <raw_parent>/<system>. AIPF_RAW. No default.
+# raw_parent = "/path/to/raw"
+
+[paths.raw]
+# Each system's MD archives (trajectories, logs, coarse-grained fields), read only. AIPF_RAW_<SYSTEM>.
+# No default: a command that needs one refuses, naming the variable and this key.
+# hhe = "/path/to/hhe"
+# feb = "/path/to/feb"
+# lj = "/path/to/lj"
+
+[site]
+# The LAMMPS binary aipf md run and aipf md doctor use (ML-IAP and its python module for MACE). AIPF_LAMMPS
+# lammps = "/path/to/lmp"
+# The interpreter LAMMPS's python module lives in, when it is not this one. AIPF_LAMMPS_PYTHON
+# lammps_python = "/path/to/python"
+# The latexmk that typesets figure labels. AIPF_LATEXMK
+# latexmk = "/path/to/latexmk"
+# A site CUDA library directory to put on the loader path. AIPF_CUDA_LIB
+# cuda_lib = "/path/to/cuda/lib64"
+# A MACE model converted for ML-IAP (the .pt aipf md run loads); its md5 must be the one the system
+# declares under defaults["md"]["potential"]. AIPF_MACE_POTENTIAL serves every system; per system,
+# AIPF_MACE_POTENTIAL_<SYSTEM> or the [site.mace_potential] table below wins over it. TOML has room
+# for one of the two spellings: the key here, or the table.
+# mace_potential = "/path/to/model-mliap.pt"
+# The batch queue, project code, GPUs and wall-clock hours of a --pbs job (aipf md run, aipf train).
+# AIPF_PBS_QUEUE, AIPF_PBS_PROJECT, AIPF_PBS_GPUS, AIPF_PBS_WALLTIME_H
+# pbs_queue = "gpu"
+# pbs_project = "<project code>"
+# pbs_gpus = 1
+# pbs_walltime_h = 24
+# CPU cores and memory per job, when the queue's defaults are too small. AIPF_PBS_NCPUS, AIPF_PBS_MEM
+# pbs_ncpus = 16
+# pbs_mem = "110gb"
+
+# The ML-IAP potential per system (AIPF_MACE_POTENTIAL_FEB, ...), as [paths.raw] does for raw roots.
+# [site.mace_potential]
+# feb = "/path/to/feb-model-mliap.pt"
+# hhe = "/path/to/hhe-model-mliap.pt"
