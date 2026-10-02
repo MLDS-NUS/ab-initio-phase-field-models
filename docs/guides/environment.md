@@ -76,13 +76,14 @@ and the file over the default:
     hhe = "/path/to/hhe-model-mliap.pt"             # AIPF_MACE_POTENTIAL_HHE
 
 One potential for every system is the plain key `mace_potential = "..."` under `[site]`, or
-`AIPF_MACE_POTENTIAL`; TOML holds either that key or the table, not both. `aipf md doctor` reads the
-plain key. The full list, with the locations (`[paths]`, `[paths.raw]`), is in
+`AIPF_MACE_POTENTIAL`; TOML holds either that key or the table, not both. `aipf md doctor` checks the
+potential of every system that declares one (the per-system entry, else the plain key), or of
+`--system NAME` alone. The full list, with the locations (`[paths]`, `[paths.raw]`), is in
 [../reference/cli.md](../reference/cli.md#configuration).
 
 ## aipf md doctor
 
-    aipf md doctor [--device auto|cpu|cuda] [--deep]
+    aipf md doctor [--device auto|cpu|cuda] [--deep] [--system NAME]
 
 reads the site and checks, by running them: `import lammps` (`python_module`), the `mliap` pair style
 in the module and the binary (`mliap_style`), the declared potential loads (`potential_loads`), two

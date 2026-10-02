@@ -81,6 +81,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                    help="where the ten steps run (default auto: cuda when a GPU is visible)")
     d.add_argument("--deep", action="store_true",
                    help="also import the accelerated kernels (seconds to minutes)")
+    d.add_argument("--system", default=None,
+                   help="check the MACE potential this system runs ([site.mace_potential] <system>, "
+                        "else the bare fact); default: one report per system that declares an "
+                        "ML-IAP potential, or the bare fact when none does")
     d.set_defaults(func=_doctor)
 
 
@@ -97,9 +101,12 @@ def _site_lammps(given: str | None, verb: str) -> str | None:
 
 
 def _doctor(args: argparse.Namespace) -> int:
-    from aipf.md.doctor import examine_site
+    from aipf.md.doctor import examine_site, systems_with_potential
     from aipf.site import Site
-    diagnosis = examine_site(Site.load(), device=args.device, deep=args.deep)
+    # the potential each system runs (Site.for_system), every declaring system unless one is named
+    names = [args.system] if args.system is not None else (systems_with_potential() or None)
+    diagnosis = examine_site(Site.load(), device=args.device, deep=args.deep,
+                             potential_systems=names)
     print(diagnosis)
     return 0 if diagnosis.can_run is True else 1
 

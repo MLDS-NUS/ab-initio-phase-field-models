@@ -112,13 +112,13 @@ command prints the job file and the job id. `aipf train --pbs` writes the same k
 
 ## aipf md doctor
 
-    aipf md doctor [--device auto|cpu|cuda] [--deep]
+    aipf md doctor [--device auto|cpu|cuda] [--deep] [--system NAME]
 
 | check | asks |
 |---|---|
 | `python_module` | `import lammps` starts in the declared interpreter (`lammps_python`, else this one), and which packages it has |
 | `mliap_style` | the module and the binary list the `mliap` pair style |
-| `potential_loads` | the declared `mace_potential` loads |
+| `potential_loads` | the `mace_potential` each system runs loads: `Site.for_system` (`AIPF_MACE_POTENTIAL_<SYSTEM>`, `[site.mace_potential] <system>`, then the plain fact), for every system that declares an ML-IAP potential (`defaults["md"]["potential"]`) or for `--system NAME`. One file for all of them is one `potential_loads`/`ten_steps` pair; several files are one pair each, suffixed `:<system>` |
 | `ten_steps` | two atoms of its elements run ten steps through the `in_process` route on cuda |
 | `kokkos_device` | on cuda: Kokkos has a CUDA backend and a device is visible |
 | `accelerator_kernels` | with `--deep`: the fast kernels import |
@@ -127,9 +127,8 @@ command prints the job file and the job id. `aipf train --pbs` writes the same k
 Each check is `ok`, `degraded` (the right numbers at extra cost), `broken` (with what to do),
 `unknown` (not inspected, with why) or `n/a` (it does not apply to what the site declared or the
 device asked for). On `cpu` the model is never started: `[n/a] ten_steps: ML-IAP runs on cuda only,
-use --device cuda`. With no plain `mace_potential` declared (the key under `[site]` or
-`AIPF_MACE_POTENTIAL`; the doctor does not read the per-system table), `potential_loads` and
-`ten_steps` are `n/a`, and a broken `python_module` or `mliap_style` is reported as `n/a`, so a site
+use --device cuda`. With no `mace_potential` declared for the systems checked (and none when no
+system declares an ML-IAP potential), `potential_loads` and `ten_steps` are `n/a`, and a broken `python_module` or `mliap_style` is reported as `n/a`, so a site
 with only pair-potential decks passes on a CPU. The command exits 1 only when a check the site needs is broken or unknown; `n/a` never fails.
 The heavy checks run in one child process, so a crash is a finding, not a failure of the command.
 
@@ -139,4 +138,5 @@ The heavy checks run in one child process, so a crash is a finding, not a failur
 campaign=None, dt_equil_ps=None, device="auto", pbs=None, job_command=None)` is the command's
 body and returns a `RunRecord` (`deck_path`, `command`, `diagnosis`, `result`, `route`, `job_path`,
 `job_id`). `aipf.md.templates.DECKS` maps `(geometry, ensemble)` to each `Deck`; `fill(deck, point,
-system, values)` renders one. `aipf.md.doctor.examine_site(site, device=..., deep=...)` is the doctor.
+system, values)` renders one. `aipf.md.doctor.examine_site(site, device=..., deep=..., potential_systems=None)` is the doctor
+(`potential_systems=None` checks the plain fact only).

@@ -1237,9 +1237,10 @@ def _mliap_finding(facts: dict | None, binary: Path | None, help_text: str | Non
     return Finding("mliap_style", Verdict.OK, "; ".join(seen))
 
 
-def _potential_finding(path: Path | None, facts: dict | None, reason: str) -> Finding:
+def _potential_finding(path: Path | None, facts: dict | None, reason: str,
+                       absent: str = NO_POTENTIAL) -> Finding:
     if path is None:
-        return Finding("potential_loads", Verdict.NOT_APPLICABLE, NO_POTENTIAL)
+        return Finding("potential_loads", Verdict.NOT_APPLICABLE, absent)
     if facts is None:
         return _not_inspected("potential_loads", f"not inspected: {reason}")
     found = facts.get("potential") or {}
@@ -1336,9 +1337,33 @@ def deck_families(systems: Sequence[str] | None = None) -> list[tuple[str, str]]
     return out
 
 
+def systems_with_potential() -> list[str]:
+    """The systems :func:`aipf.system.available` lists that declare an ML-IAP potential
+    (``defaults["md"]["potential"]``), sorted."""
+    from aipf import system as systems_module
+    return [name for name in systems_module.available()
+            if ((systems_module.load(name).defaults or {}).get("md") or {}).get("potential")]
+
+
+def system_potential(site: Any, system: str) -> tuple[Path | None, str]:
+    """``(the MACE model file system runs, why there is none)``: ``Site.for_system("mace_potential",
+    system)`` when ``system`` declares an ML-IAP potential (``defaults["md"]["potential"]``)."""
+    from aipf import system as systems_module
+    from aipf.site import MissingSiteFact
+    declared = ((systems_module.load(system).defaults or {}).get("md") or {}).get("potential")
+    if not declared:
+        return None, (f"system {system!r} declares no ML-IAP potential (defaults['md']"
+                      f"['potential']), so it runs no ML-IAP deck")
+    try:
+        return Path(site.for_system("mace_potential", system)), ""
+    except MissingSiteFact as missing:
+        return None, f"{missing} (needed for {system!r}'s ML-IAP decks only)"
+
+
 def examine_site(site: Any, *, device: str = "auto", deep: bool = False,
                  python: str | Path | None = None,
                  systems: Sequence[str] | None = None,
+                 potential_systems: Sequence[str] | None = None,
                  env: Mapping[str, str] | None = None,
                  runner: Callable[..., Any] | None = None,
                  tool_runner: Callable[..., Any] | None = None,
@@ -1356,6 +1381,11 @@ def examine_site(site: Any, *, device: str = "auto", deep: bool = False,
     ``deep``, the fast kernels import (``accelerator_kernels``); then the binary lists every style
     of every deck family (``deck_styles:<family>``, :func:`deck_families`). The heavy checks run in
     one child of the interpreter, with :func:`site_environment`, so a crash is a finding.
+
+    ``potential_systems=None`` checks the bare ``mace_potential`` fact. A list of systems checks the
+    potential each runs (:func:`system_potential`: ``[site.mace_potential] <system>``, then the bare
+    fact): one ``potential_loads``/``ten_steps`` pair when they all resolve to one file, else one pair
+    per file, suffixed ``:<system>[,<system>...]``.
     """
     if device not in DEVICES:
         raise ValueError(f"device is one of {DEVICES}, got {device!r}")
@@ -1380,33 +1410,58 @@ def examine_site(site: Any, *, device: str = "auto", deep: bool = False,
         except OSError as exc:
             help_problem = f"{binary} could not be run: {exc}"
 
+    # (suffix, potential, why none, systems): one plan per distinct potential file
+    if not potential_systems:
+        plans = [("", site.mace_potential, NO_POTENTIAL, ())]
+    else:
+        groups: dict = {}
+        for name in potential_systems:
+            path, why = system_potential(site, name)
+            entry = groups.setdefault(path, ([], []))
+            entry[0].append(name)
+            if why:
+                entry[1].append(why)
+        plans = [("" if len(groups) == 1 else ":" + ",".join(names), path,
+                  "; ".join(whys) or NO_POTENTIAL, tuple(names))
+                 for path, (names, whys) in groups.items()]
     # The model is started only on cuda with a declared potential and a visible device.
     blocked = ""
     if resolved == "cuda" and not visible:
         blocked = f"--device cuda and no device is visible ({seen})"
-    run = resolved == "cuda" and site.mace_potential is not None and not blocked
-    want = {"potential": None if site.mace_potential is None else str(site.mace_potential),
-            "run": run, "device": resolved}
-    facts, reason, raw, answered = _site_child(interpreter, want, env=child_env,
-                                               timeout=timeout, runner=runner)
-    findings = [
-        _module_finding(facts, reason, raw),
-        _mliap_finding(facts, binary, help_text, help_problem),
-    ]
-    if site.mace_potential is None:
+    findings, first = [], None
+    for suffix, potential, absent, names in plans:
+        run = resolved == "cuda" and potential is not None and not blocked
+        want = {"potential": None if potential is None else str(potential),
+                "run": run, "device": resolved}
+        answer = _site_child(interpreter, want, env=child_env, timeout=timeout, runner=runner)
+        facts, reason, raw, answered = answer
+        if first is None:
+            first = answer
+            findings += [
+                _module_finding(facts, reason, raw),
+                _mliap_finding(facts, binary, help_text, help_problem),
+            ]
+        found = _potential_finding(potential, facts, reason, absent)
+        if resolved == "cpu":
+            steps = Finding("ten_steps", Verdict.NOT_APPLICABLE, CPU_TEN_STEPS)
+        elif potential is None:
+            steps = Finding("ten_steps", Verdict.NOT_APPLICABLE, absent)
+        else:
+            steps = _ten_steps_finding(resolved, facts, reason, raw, answered, blocked)
+        for item in (found, steps):
+            detail = f"{item.detail} [{', '.join(names)}]" if names else item.detail
+            findings.append(Finding(item.check + suffix, item.verdict, detail, item.remedy,
+                                    item.raw))
+    if all(potential is None for _, potential, _, _ in plans):
         # No potential declared: the site runs no ML-IAP deck, so what only that route needs
         # (the python module, the mliap style) is reported and does not stop the pair decks.
-        findings = [Finding(f.check, Verdict.NOT_APPLICABLE,
-                            f"{f.detail} (needed for ML-IAP decks only; {NO_POTENTIAL})",
-                            f.remedy, f.raw)
-                    if f.verdict in (Verdict.BROKEN, Verdict.UNKNOWN) else f for f in findings]
-    findings.append(_potential_finding(site.mace_potential, facts, reason))
-    if resolved == "cpu":
-        findings.append(Finding("ten_steps", Verdict.NOT_APPLICABLE, CPU_TEN_STEPS))
-    elif site.mace_potential is None:
-        findings.append(Finding("ten_steps", Verdict.NOT_APPLICABLE, NO_POTENTIAL))
-    else:
-        findings.append(_ten_steps_finding(resolved, facts, reason, raw, answered, blocked))
+        absent = plans[0][2] if len(plans) == 1 else NO_POTENTIAL
+        findings[:2] = [Finding(f.check, Verdict.NOT_APPLICABLE,
+                                f"{f.detail} (needed for ML-IAP decks only; {absent})",
+                                f.remedy, f.raw)
+                        if f.verdict in (Verdict.BROKEN, Verdict.UNKNOWN) else f
+                        for f in findings[:2]]
+    facts, reason, raw, answered = first
     if resolved == "cuda":
         findings.append(_kokkos_finding(facts, reason, visible, seen, help_text, binary))
     if deep:
