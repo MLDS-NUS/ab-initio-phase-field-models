@@ -40,21 +40,24 @@ metadata come from, in order:
    preparation: `n_prod`, `n_equil`), the thermostat's temperature and seed, the dump cadence, the
    atom count (the last of `create_atoms`, `read_data` and `delete_atoms`).
 
-Without a run record, the geometry and ensemble come from the tag's prefix:
+A run `aipf md run` wrote takes its ensemble from its `run.json` request. Without a run record, the
+geometry comes from the tag's prefix, and so does the ensemble, except that a bare geometry prefix
+(`cube`, `slab`, `ball`, `column`, `vext`) takes the ensemble of the system's declared md deck of
+that geometry (`defaults["md"][<deck>]["point"]`) when it declares one:
 
 | prefix | geometry | ensemble |
 |---|---|---|
 | `slab_overdamped` | slab | langevin_overdamped |
 | `slab_meltfirst` | slab | NVT |
 | `homogeneous_brownian`, `nucleation_seed`, `spinodal_cube` | cube | langevin_overdamped |
-| `cube` | cube | NVT |
+| `cube` | cube | NPT |
 | `slab` | slab | NPT_z |
 | `ball`, `column`, `vext` | ball, column, vext | NVT |
 | `quench` | quench | langevin_overdamped |
 
-The archived cube decks of the two-species systems run a barostat; the label above is what the
-index writes for a run without `run.json`, and a run `aipf md run` wrote records the ensemble of its
-request (`NPT` for `cube-npt`). The tag is the run directory's name, or with `tag_from_path` its path below the raw root (without
+Every archived cube of the two-species systems ran a barostat (`fix npt ... iso`), so `cube` reads
+`NPT`: Fe-B's from its declared `cube-npt` deck, H/He's (no cube deck) from the table. The label is
+metadata: `aipf train` and `aipf diagnose` read no manifest field. The tag is the run directory's name, or with `tag_from_path` its path below the raw root (without
 `tag_path_root`) joined by `_`. Runs under a top-level directory named in
 `constants["md_exclude_dirs"]` are skipped. A run that fails validation, or whose partition field is
 null, is skipped with the reason; two runs with one `farm_dir` stop the build. Every

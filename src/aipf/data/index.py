@@ -18,13 +18,16 @@ from aipf.paths import CKPT_DIRNAME, FIELDS_DIRNAME, raw_env_name
 from aipf.system import System
 
 #: Run-tag prefix -> (geometry, ensemble), matched by ``startswith`` in order: most specific first.
+#: The last resort for the ensemble (:func:`_classify`): a run's ``run.json`` records it, and a bare
+#: geometry prefix (``cube``, ``slab``, ...) takes the one the system's declared md deck of that
+#: geometry integrates. ``cube`` is ``NPT``: every archived two-species cube ran ``fix npt ... iso``.
 _GEOMETRY_ENSEMBLE: tuple[tuple[str, str, str], ...] = (
     ("slab_overdamped", "slab", "langevin_overdamped"),
     ("slab_meltfirst", "slab", "NVT"),
     ("homogeneous_brownian", "cube", "langevin_overdamped"),
     ("nucleation_seed", "cube", "langevin_overdamped"),
     ("spinodal_cube", "cube", "langevin_overdamped"),
-    ("cube", "cube", "NVT"),
+    ("cube", "cube", "NPT"),
     ("slab", "slab", "NPT_z"),
     ("ball", "ball", "NVT"),
     ("column", "column", "NVT"),
@@ -164,9 +167,36 @@ def _farm_partition_dir(system: System, meta: dict) -> tuple[str, str | None]:
     return "/".join(parts), None
 
 
-def _classify(tag: str) -> tuple[str, str]:
+def _declared_deck_ensemble(system: System, geometry: str) -> str | None:
+    """The ensemble ``system``'s declared md decks (``defaults["md"]``) of ``geometry`` integrate;
+    ``None`` when it declares none. Decks of one geometry that disagree raise: there is no rule to
+    pick one."""
+    from aipf.md.request import normalise_ensemble, normalise_geometry
+
+    found = {}
+    for name, deck in (system.defaults.get("md") or {}).items():
+        point = deck.get("point") if isinstance(deck, dict) else None
+        if not isinstance(point, dict) or "geometry" not in point or "ensemble" not in point:
+            continue
+        if normalise_geometry(point["geometry"]) == geometry:
+            found[name] = normalise_ensemble(point["ensemble"])
+    if len(set(found.values())) > 1:
+        raise ValueError(
+            f"system {system.name!r} declares md decks of geometry {geometry!r} that integrate "
+            f"different ensembles ({found}), so an archived run's ensemble cannot be read off them")
+    return next(iter(found.values()), None)
+
+
+def _classify(tag: str, system: System | None = None) -> tuple[str, str]:
+    """``(geometry, ensemble)`` of an archived run without ``run.json``, from its tag's prefix.
+
+    The ensemble: for a bare geometry prefix (the prefix is the geometry's own name), the one
+    ``system``'s declared md deck of that geometry integrates, when it declares one; else the
+    table's. A protocol prefix (``slab_meltfirst``, ``homogeneous_brownian``, ...) names its own."""
     for prefix, geometry, ensemble in _GEOMETRY_ENSEMBLE:
         if tag.startswith(prefix):
+            if system is not None and prefix == geometry:
+                ensemble = _declared_deck_ensemble(system, geometry) or ensemble
             return geometry, ensemble
     raise ValueError(
         f"cannot classify run tag {tag!r}. Add its prefix to _GEOMETRY_ENSEMBLE "
@@ -321,7 +351,7 @@ def _composition(system: System, tag: str, src: dict) -> dict:
 
 
 def _normalise(system: System, tag: str, src: dict) -> dict:
-    geometry, ensemble = _classify(tag)
+    geometry, ensemble = _classify(tag, system)
     varying = ["z"] if ensemble == "NPT_z" else []
 
     return {
