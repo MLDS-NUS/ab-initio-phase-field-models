@@ -46,10 +46,23 @@ def layer_path(T, j):
     return FIGDATA / f"painted_T{T}_{j}.png"
 
 
+def _wheel():
+    """``figures/common/wheel.py``, loaded by path under a private name: a bare ``import wheel``
+    returns the PyPI ``wheel`` package whenever that one is already in ``sys.modules``."""
+    import importlib.util
+    name = "_figures_common_wheel"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, HERE.parent / "common" / "wheel.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def rerun() -> str:
     """The command that paints the boxes again and rewrites their layers, under this
     figure's build (the pip wheel first on the path)."""
-    import wheel
+    wheel = _wheel()
     return (f"{box3d.RENDER_3D}=1 PYTHONPATH={wheel.wheel_dir()} "
             f"python figures/{HERE.name}/draw.py figures/out/{HERE.name}")
 
