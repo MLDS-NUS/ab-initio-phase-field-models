@@ -50,7 +50,7 @@ WORDS: dict[str, str] = {
     "a decision record": r"\buser ruling\b",
     "this machine": r"\bnscc\b|asp2a|e0945231|(?<![.@\w])nus\b(?!\.edu)|this host|11004368|\bpbs10\d|\bq2@",
     "an environment name": r"torchenv|lammps_env|apfm",
-    "a run name": r"champion|\bwave ?\d|\bwave_|pre_wave|wave1\d|w35d4s4|lg1_s2|gammamlp|freeu|p30m50"
+    "a run name": r"champion|\bwave ?\d|\bwave_|pre_wave|wave\d|w35d4s4|lg1_s2|gammamlp|freeu|p30m50"
                   r"|_seed\d|epoch=\d+-step|\bprod_e\d+|\bbase_s\d",
     "an absolute path": r"/(?:home|scratch|tmp)/",
     "a session": r"claude|superpowers",
@@ -197,6 +197,9 @@ def test_the_word_list_catches_what_it_names():
     assert "a plan item" in names("(spec " + "sec17.1)") and "a plan item" in names("see sec" + "17")
     assert "a plan item" not in names("seconds") and "a plan item" not in names("t_sec10")
     assert "a run name" in names("M_table.pre_" + "wave15_clean.npz") and "a run name" in names("x_wave" + "15")
+    assert "a run name" in names("x_wave" + "20_s1") and "a run name" in names("runs/x_wave" + "2")
+    for physics in ("wavevector", "wavenumber", "a triangle wave", "the wave vector k", "waves"):
+        assert "a run name" not in names(physics), physics
     assert "a run name" in names("runs/x_seed4/" + "epoch=6-" + "step=7.ckpt")
     assert "a run name" in names("prod_" + "e25_x_s1")
     assert "a run name" in names("fh/base_s1") and "a run name" not in names("database_size")
@@ -240,8 +243,34 @@ def _byte_scanned() -> list[Path]:
     return picked
 
 
+def _string_fields(dtype) -> bool:
+    """Whether ``dtype`` holds text: a ``str``/``bytes``/object dtype, or a structured dtype with such a
+    field (at any depth, sub-arrays included)."""
+    if dtype.names:
+        return any(_string_fields(dtype.fields[name][0]) for name in dtype.names)
+    if dtype.subdtype is not None:
+        return _string_fields(dtype.subdtype[0])
+    return dtype.kind in "USO"
+
+
+def _flat_strings(item, out: list) -> None:
+    """Every string, bytes or object leaf of one array element (a record, a tuple, a nested list)."""
+    if isinstance(item, bytes):
+        out.append(item.decode("utf-8", "replace"))
+    elif isinstance(item, str):
+        out.append(item)
+    elif isinstance(item, (tuple, list)):
+        for part in item:
+            _flat_strings(part, out)
+    elif hasattr(item, "tolist") and not isinstance(item, (int, float, complex)):
+        _flat_strings(item.tolist(), out)
+    elif item is not None and not isinstance(item, (int, float, complex, bool)):
+        out.append(str(item))
+
+
 def _array_text(data: bytes) -> bytes:
-    """The strings of an ``.npy`` string or object array, one per line, as UTF-8; empty otherwise."""
+    """The strings of an ``.npy`` string or object array, or of a structured array's string fields,
+    one per line, as UTF-8; empty otherwise."""
     import io
 
     import numpy as np
@@ -253,16 +282,13 @@ def _array_text(data: bytes) -> bytes:
         dtype = read(handle)[2]
     except ValueError:
         return b""
-    if dtype.kind not in "USO":
+    if not _string_fields(dtype):
         return b""
     handle.seek(0)
-    array = np.lib.format.read_array(handle, allow_pickle=dtype.kind == "O")
-    texts = []
+    array = np.lib.format.read_array(handle, allow_pickle=dtype.hasobject)
+    texts: list = []
     for item in array.ravel().tolist():
-        if isinstance(item, bytes):
-            texts.append(item.decode("utf-8", "replace"))
-        elif item is not None:
-            texts.append(str(item))
+        _flat_strings(item, texts)
     return "\n".join(texts).encode("utf-8")
 
 
@@ -358,6 +384,31 @@ def test_a_string_array_in_an_npz_is_read_as_text(tmp_path, save, kind):
         assert not _byte_hits("x.npz", path.read_bytes(), BYTE_WORDS)
     members = _members(path)
     assert any(_byte_hits(f"x.npz:{name}", data, BYTE_WORDS) for name, data in members)
+
+
+@pytest.mark.parametrize("save", ["save", "savez", "savez_compressed"])
+@pytest.mark.parametrize("field", ["U64", "S64", "O", "(2,)U64"])
+def test_a_string_field_of_a_structured_array_is_read_as_text(tmp_path, save, field):
+    """A structured dtype hides its ``U``/``S``/object fields from a check on ``dtype.kind`` (it is
+    ``V``); the member scan reads every string field, nested sub-arrays included."""
+    import numpy as np
+
+    secret = "/" + "scratch/" + "users/x"
+    dtype = np.dtype([("T", "f8"), ("where", field)])
+    value = (secret.encode() if field.startswith("S")
+             else (secret, "ok") if field.startswith("(2,)") else secret)
+    array = np.array([(1.0, value)], dtype=dtype)
+    if save == "save":
+        path = tmp_path / "x.npy"
+        np.save(path, array, allow_pickle=True)
+    else:
+        path = tmp_path / "x.npz"
+        getattr(np, save)(path, record=array)
+    members = _members(path)
+    assert any(_byte_hits(f"x:{name}", data, BYTE_WORDS) for name, data in members)
+    plain = tmp_path / "plain.npy"
+    np.save(plain, np.zeros(3, dtype=[("T", "f8"), ("n", "i4")]))
+    assert _array_text(plain.read_bytes()) == b""
 
 
 def test_without_a_git_index_the_walk_keeps_to_what_git_would_track():

@@ -69,7 +69,7 @@ def test_every_declared_anchor_term_is_trained_on_the_published_models_rows(run_
                                          "L_P", "L_W"]
     assert manifest["declared_weights_without_data"] == {}
     assert manifest["kernel_hinge"] == {"term": "L_W", "kappa": 2.0, "k_max": 3.0,
-                                        "n_k": 32, "margin": 0.0}
+                                        "n_k": 32, "margin": 0.0, "lambda_W": 0.3}
     assert manifest["anchor_tables"]["rows"] == {
         "anchor_M": 288, "anchor_S": 286, "anchor_bulk": 286, "anchor_P": 442}
     assert not (run_dir / "UNTRAINED_TERMS.txt").exists()

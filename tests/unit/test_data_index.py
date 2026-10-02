@@ -64,9 +64,37 @@ def test_build_writes_valid_metadata(tmp_path, monkeypatch):
         (s.paths.data_root() / "md" / "800GPa" / "cube_x0.05_T02000"
          / "meta.json").read_text())
     assert meta["schema_version"] == SCHEMA_VERSION
-    assert meta["ensemble"] == "NVT"          # a cube is constant volume
+    # no run.json and no declared cube deck: the table's cube row (every archived cube ran fix npt)
+    assert meta["ensemble"] == "NPT"
     assert meta["geometry"] == "cube"
     assert meta["box"]["varying"] == []
+
+
+def test_run_json_wins_and_a_declared_deck_comes_second(tmp_path, monkeypatch):
+    """The ensemble's order: a run's ``run.json`` request, then the system's declared md deck of the
+    tag's geometry (for a bare geometry prefix), then the table."""
+    import dataclasses
+    from dataclasses import asdict
+
+    from aipf.md.request import StatePoint
+
+    s = _system(tmp_path, monkeypatch)
+    s = dataclasses.replace(s, defaults={"md": {"cube-nvt": {
+        "point": {"geometry": "cube", "ensemble": "NVT"}}}})
+    point = StatePoint(geometry="cube", ensemble="langevin_overdamped", T=2500.0, x=0.25,
+                       dt_ps=0.001, equil_ps=1.0, prod_ps=10.0, dump_every_ps=0.02,
+                       dump_from="prod", seed=7, n_atoms=None, P=None)
+    run = tmp_path / "scratch" / "cube_data_800GPa" / "cube_from_md_run"
+    run.mkdir(parents=True)
+    (run / "traj.lammpstrj").write_text("frames")
+    (run / "run.json").write_text(json.dumps({
+        "system": "demo", "template": "cube-nvt", "campaign": None, "point": asdict(point),
+        "values": {}, "dry_run": False, "result": {"status": "ok"}}))
+    manifest = index.build(s)
+    ensembles = {r["tag"]: r["meta"]["ensemble"] for r in manifest["state_points"] if "meta" in r}
+    assert ensembles[point.tag] == "langevin_overdamped"          # run.json's request
+    assert ensembles["cube_x0.05_T02000"] == "NVT"                 # the declared deck, over the table
+    assert ensembles["cube_x0.50_T03000"] == "NVT"
 
 
 def test_slab_metadata_records_the_breathing_axis(tmp_path, monkeypatch):

@@ -187,7 +187,7 @@ def test_a_declared_hinge_is_trained_logged_and_recorded(tmp_path):
     assert man["terms_trained"] == ["L_dyn", "L_W"]
     assert man["declared_weights_without_data"] == {}
     assert man["kernel_hinge"] == {"term": "L_W", "kappa": 2.0, "k_max": 3.0, "n_k": 32,
-                                   "margin": 0.0}
+                                   "margin": 0.0, "lambda_W": 0.3}
     steps = json.loads((run / "steps.json").read_text())
     assert all(math.isfinite(t["L_W"]) and t["L_W"] >= 0.0 for t in steps["terms"])
     hparams = yaml.safe_load((run / "hparams.yaml").read_text())

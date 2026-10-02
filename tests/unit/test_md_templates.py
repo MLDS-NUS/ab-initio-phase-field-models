@@ -230,30 +230,30 @@ def test_a_blank_line_in_a_deck_survives():
 # ---------------------------------------------------------------------------
 
 #: label, request, equilibration timestep override, expected step counts.
-#: Every row names the file its numbers were read out of, and every number is
+#: Every row names the archived campaign its numbers were read out of, and every number is
 #: the step count that campaign actually ran.
 ARCHIVED_STEPS: list[tuple[str, StatePoint, float | None, dict[str, int]]] = [
-    ("first heavy tree, Data/slab_data/gen_manifest.py CUBE_RUN: "
+    ("first heavy tree, the production campaign's cube runs: "
      "n_equil 7500, n_prod 150000, dump 100, dt 2e-4",
      StatePoint(geometry="cube", ensemble="npt_iso", T=7000.0, x=0.5,
                 dt_ps=2e-4, equil_ps=7500 * 2e-4, prod_ps=150000 * 2e-4,
                 dump_every_ps=100 * 2e-4, dump_from="prod", seed=1,
                 P=800.0, n_atoms=3456),
      None, {"N_EQUIL": 7500, "N_PROD": 150000, "N_DUMP": 100}),
-    ("first heavy tree, Data/slab_data/gen_manifest.py SLAB_RUN: "
+    ("first heavy tree, the production campaign's slab runs: "
      "n_equil 5000, n_prod 400000, dump 200, dt 1e-4",
      StatePoint(geometry="slab", ensemble="npt_z", T=2000.0, x=(0.0, 1.0),
                 dt_ps=1e-4, equil_ps=5000 * 1e-4, prod_ps=400000 * 1e-4,
                 dump_every_ps=200 * 1e-4, dump_from="prod", seed=1, P=800.0),
      None, {"N_EQUIL": 5000, "N_PROD": 400000, "N_DUMP": 200}),
-    ("first heavy tree, Data/eos/launch_eos.py: N_EQUIL 5000, N_AVG 5000 at "
+    ("first heavy tree, the equation-of-state campaign: N_EQUIL 5000, N_AVG 5000 at "
      "the worker's hardcoded timestep 2e-4, and no trajectory at all",
      StatePoint(geometry="eos", ensemble="npt_iso", T=5000.0, x=0.5,
                 dt_ps=2e-4, equil_ps=5000 * 2e-4, prod_ps=5000 * 2e-4,
                 dump_every_ps=None, dump_from="none", seed=42, P=800.0,
                 n_atoms=512),
      None, {"N_EQUIL": 5000, "N_PROD": 5000}),
-    ("second heavy tree, Data/cube/run_cube.py defaults: melt 10 ps and "
+    ("second heavy tree, its cube deck's defaults: melt 10 ps and "
      "production 50 ps at dt 1e-3, dumped every 0.1 ps",
      StatePoint(geometry="cube", ensemble="npt_iso", T=1800.0, x=0.8,
                 dt_ps=1e-3, equil_ps=10.0, prod_ps=50.0,
@@ -364,7 +364,7 @@ def test_no_pressure_is_derived_from_the_request():
 
 
 def test_an_offset_preparation_ramps_from_above_the_target_down_to_it():
-    """``Data/slab_data/run_slab_prod.py``: ``T_RAMP = T_K + 2000.0``, and the
+    """The first heavy tree's production deck: ``T_RAMP = T_K + 2000.0``, and the
     equilibration fix ramps ``T_RAMP -> T_K``."""
     system = _system(preparation=PreparationRules(ramp_offset=2000.0))
     values = values_from(_point(T=7000.0), system)
@@ -373,7 +373,7 @@ def test_an_offset_preparation_ramps_from_above_the_target_down_to_it():
 
 
 def test_an_absolute_preparation_holds_at_the_melting_temperature():
-    """``Data/cube/run_cube.py``: ``fix melt all npt temp 2600.0 2600.0``,
+    """The second heavy tree's cube deck: ``fix melt all npt temp 2600.0 2600.0``,
     held, not ramped, and the production fix goes straight to the target."""
     system = _system(preparation=PreparationRules(melt_T=2600.0))
     values = values_from(_point(T=1800.0), system)
@@ -488,7 +488,7 @@ def test_a_production_dump_fills_the_production_slot_and_empties_the_other():
 
 
 def test_an_equilibration_dump_fills_the_other_slot():
-    """``Data/slab_data/gen_phaseC.py`` asked for this on purpose: the early
+    """The first heavy tree's per-seed slab campaign asked for this on purpose: the early
     linear growth window lives in the frames the melt would otherwise throw
     away."""
     values = values_from(_point(dump_from="equil"), _system())
@@ -688,7 +688,7 @@ def _rendered(geometry, ensemble, dt_equil_ps=None, system=None,
 
 
 def test_the_barostatted_cube_keeps_the_archived_stage_order():
-    """``Data/slab_data/run_slab_prod.py``, ENSEMBLE=npt_iso: velocities at the
+    """The first heavy tree's production deck, ENSEMBLE=npt_iso: velocities at the
     preparation temperature, one equilibration fix that ends at the target,
     the recentring fix, then the dump declared only after the clock is reset,
     then production. Its own docstring calls the order load-bearing."""
@@ -737,7 +737,7 @@ def test_the_barostatted_cube_moves_its_dump_when_the_melt_is_kept():
 
 
 def test_the_slab_deck_barostats_one_axis_and_does_not_melt():
-    """``run_slab_prod.py`` ties the over-temperature ramp to the ISOTROPIC
+    """The first heavy tree's production deck ties the over-temperature ramp to the ISOTROPIC
     barostat, not to the geometry: ``RAMP = ENSEMBLE == "npt_iso"``, with the
     comment that the ramp is only needed to melt a lattice configuration. The
     one-axis path starts from a liquid, so it settles at its own target."""

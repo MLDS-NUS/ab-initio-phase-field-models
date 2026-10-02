@@ -255,7 +255,8 @@ def test_md_doctor_is_one_call_of_examine_site(monkeypatch, capsys):
             return "the report"
     monkeypatch.setattr(doctor, "examine_site", lambda site, **kw: seen.update(kw) or _Report())
     assert main(["md", "doctor", "--device", "cuda", "--deep"]) == 0
-    assert seen == {"device": "cuda", "deep": True}
+    # the potential of every system that declares one (Site.for_system), checked in the one call
+    assert seen == {"device": "cuda", "deep": True, "potential_systems": ["feb", "hhe"]}
     assert capsys.readouterr().out.strip() == "the report"
     _Report.can_run = None
     assert main(["md", "doctor"]) == 1

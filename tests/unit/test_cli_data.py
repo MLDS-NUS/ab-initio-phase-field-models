@@ -60,17 +60,20 @@ def test_data_build_refuses_a_raw_root_that_is_not_there(capsys, monkeypatch, tm
 
 
 def test_an_undeclared_raw_root_is_a_refusal_in_every_command(capsys, monkeypatch, tmp_path):
-    """A command that reaches an undeclared raw root (here the dome stage) exits 2 naming the variable
-    and the key, not a traceback: the refusal is caught once, in the entry point."""
-    declared_roots.published_or_skip("hhe")
+    """A command that reaches an undeclared raw root (here training, whose H/He sources live under it)
+    exits 2 naming the variable and the key, not a traceback: the refusal is caught once, in the
+    entry point. (The diagnosis stages read tracked equation-of-state tables and reach no raw root.)"""
     from aipf import paths
     monkeypatch.setattr(paths, "config", lambda: {})
     monkeypatch.delenv("AIPF_RAW_HHE", raising=False)
     monkeypatch.delenv("AIPF_RAW", raising=False)
-    assert main(["diagnose", "--system", "hhe", "--ckpt", "published", "--stage", "dome",
-                 "--out", str(tmp_path / "out")]) == 2
+    monkeypatch.setenv("AIPF_DATA", str(tmp_path / "farm"))
+    assert main(["train", "--system", "hhe", "--run", "r1", "--seed", "0", "--steps", "1",
+                 "--source", "cube=.:cube_*:16,16,16", "--resume-optimizer", "no",
+                 "--anchors", "none", "--device", "cpu"]) == 2
     err = capsys.readouterr().err
-    assert err.startswith("aipf diagnose: ") and "AIPF_RAW_HHE" in err and "[paths.raw]" in err
+    assert err.startswith("aipf train: ") and "AIPF_RAW_HHE" in err and "[paths.raw]" in err
+    assert not (tmp_path / "farm").exists()
 
 
 def test_a_malformed_aipf_toml_is_a_refusal_naming_the_file(capsys, monkeypatch, tmp_path):

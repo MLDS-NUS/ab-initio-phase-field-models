@@ -322,9 +322,9 @@ _CUBE_NPT_OUTPUTS = {
 _CUBE_NPT_DECK = Deck(
     name="cube-npt",
     text=_CUBE_NPT,
-    source=("Data/slab_data/run_slab_prod.py (first heavy-element tree), "
-            "ENSEMBLE=npt_iso, cross-read against Data/cube/run_cube.py "
-            "(second heavy-element tree), whose melt stage is the same "
+    source=("the first heavy-element tree's production deck, "
+            "ENSEMBLE=npt_iso, cross-read against the second heavy-element "
+            "tree's cube deck, whose melt stage is the same "
             "shape with a held rather than a ramped temperature"),
     produced=("the barostatted-cube trajectory sets on both raw data trees: "
               "cube_data and its four per-pressure siblings in the first, "
@@ -337,8 +337,7 @@ _CUBE_NPT_DECK = Deck(
 _SLAB_NPT_Z_DECK = Deck(
     name="slab-npt-z",
     text=_SLAB_NPT_Z,
-    source="Data/slab_data/run_slab_prod.py (first heavy-element tree), "
-           "ENSEMBLE=npt_z",
+    source="the first heavy-element tree's production deck, ENSEMBLE=npt_z",
     produced="the 88 interfacial runs in slab_data and its four "
              "per-pressure siblings on the first raw data tree",
     geometry="slab",
@@ -349,7 +348,7 @@ _SLAB_NPT_Z_DECK = Deck(
 _EOS_NPT_DECK = Deck(
     name="eos-npt",
     text=_EOS_NPT,
-    source=("Data/eos/run_eos_point.py in both heavy-element trees: the "
+    source=("the equation-of-state point deck of both heavy-element trees: the "
             "preparation ramp and the stage order from the first, the "
             "sampling written to a file from the second, whose worker runs "
             "a deck rather than driving the engine in process and so cannot "
@@ -363,14 +362,13 @@ _EOS_NPT_DECK = Deck(
 _CUBE_OVERDAMPED_DECK = Deck(
     name="cube-overdamped",
     text=_CUBE_OVERDAMPED,
-    source=("Data/input/in.quench.lammps and "
-            "Data/input/in.homogeneous_brownian.lammps (reduced-unit tree). "
+    source=("the reduced-unit tree's quench and homogeneous Brownian decks. "
             "Stripped of comments the two differ only in the stage-one "
             "temperature and in housekeeping, which is why one text serves "
             "both"),
     produced=("the in-dome training trees and the above-critical "
-              "fluctuation trees: Data/spinodal_cube at three temperatures "
-              "and Data/homogeneous_brownian at four"),
+              "fluctuation trees: the spinodal cubes at three temperatures "
+              "and the homogeneous Brownian runs at four"),
     geometry="cube",
     ensemble="langevin_overdamped",
     defaults=_REDUCED_DUMP,
@@ -384,7 +382,7 @@ _QUENCH_DECK = Deck(
     name="quench-overdamped",
     text=_CUBE_OVERDAMPED,
     source=_CUBE_OVERDAMPED_DECK.source,
-    produced=("Data/quench at five temperatures, the coarsening ground "
+    produced=("the quench runs at five temperatures, the coarsening ground "
               "truth, deliberately kept out of training"),
     geometry="quench",
     ensemble="langevin_overdamped",
@@ -394,8 +392,8 @@ _QUENCH_DECK = Deck(
 _SLAB_OVERDAMPED_DECK = Deck(
     name="slab-overdamped",
     text=_SLAB_OVERDAMPED,
-    source="Data/input/in.slab_overdamped.lammps (reduced-unit tree)",
-    produced=("Data/slab_overdamped, one long trajectory per temperature "
+    source="the reduced-unit tree's overdamped slab deck",
+    produced=("the overdamped slabs, one long trajectory per temperature "
               "and seed -- the dynamics this package exists to learn"),
     geometry="slab",
     ensemble="langevin_overdamped",
@@ -405,8 +403,8 @@ _SLAB_OVERDAMPED_DECK = Deck(
 _VEXT_NVT_DECK = Deck(
     name="vext-nvt",
     text=_VEXT_NVT,
-    source=("Data/input/in.vext_checkerboard.lammps and "
-            "Data/input/in.vext_hexagonal.lammps (reduced-unit tree), which "
+    source=("the reduced-unit tree's checkerboard and hexagonal "
+            "external-field decks, which "
             "differ only in the field they apply"),
     produced="the four external-field equilibrium trees, two profiles at "
              "two temperatures each",

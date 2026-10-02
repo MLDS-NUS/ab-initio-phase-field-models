@@ -38,12 +38,12 @@ def _point(**kwargs) -> StatePoint:
 
 
 # --------------------------------------------------------------------------
-# The archive. Each entry: a label naming its source file, the request, and
+# The archive. Each entry: a label naming the campaign it describes, the request, and
 # the frame count measured on disk where one was measured.
 # --------------------------------------------------------------------------
 
 ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
-    # -- first tree, Data/slab_data/gen_manifest.py + manifests/manifest_all.json
+    # -- first heavy tree, its production campaign of cubes and slabs
     ("A1 uniform cube, barostat on all axes: n_equil 7500 and n_prod 150000 "
      "steps at dt 2e-4 ps, dumped every 100 steps",
      StatePoint(geometry="cube", ensemble="npt_iso", T=7000.0, x=0.5,
@@ -58,14 +58,14 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=200 * 1e-4, dump_from="prod", seed=1,
                 P=800.0),
      2001),
-    # -- Data/slab_data/gen_multiP_anchors.py -> manifests/anchors_<P>GPa.json
+    # -- first heavy tree, the per-pressure anchor campaign
     ("A3 the same cube on another pressure manifold",
      StatePoint(geometry="cube", ensemble="npt_iso", T=5500.0, x=0.05,
                 dt_ps=2e-4, equil_ps=7500 * 2e-4, prod_ps=150000 * 2e-4,
                 dump_every_ps=100 * 2e-4, dump_from="prod", seed=1,
                 P=200.0, n_atoms=3456),
      None),
-    # -- Data/slab_data/gen_phaseC.py -> manifests/phaseC_<P>GPa_s<n>.json
+    # -- first heavy tree, the per-pressure, per-seed slab campaign that dumps its equilibration
     ("A4 a cube that keeps its equilibration frames on purpose, because the "
      "early growth window lives in them",
      StatePoint(geometry="cube", ensemble="npt_iso", T=4000.0, x=0.3,
@@ -73,7 +73,7 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=100 * 2e-4, dump_from="equil", seed=1,
                 P=400.0, n_atoms=3456),
      None),
-    # -- Data/slab_data/gen_herich_corner.py -> manifests/herich_corner.json
+    # -- first heavy tree, the He-rich corner campaign
     ("A5 a corner-filling cube, identical in shape and carrying only a "
      "campaign label this vocabulary does not keep",
      StatePoint(geometry="cube", ensemble="npt_iso", T=5000.0, x=0.9,
@@ -81,14 +81,14 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=100 * 2e-4, dump_from="prod", seed=1,
                 P=800.0, n_atoms=3456),
      None),
-    # -- pbs/dense_dump.pbs: dump every single step, and a seed of its own
+    # -- first heavy tree, a batch job that dumps every single step, with a seed of its own
     ("A6 the dense-dump one-off: cadence equal to the timestep",
      StatePoint(geometry="cube", ensemble="npt_iso", T=7000.0, x=0.5,
                 dt_ps=2e-4, equil_ps=7500 * 2e-4, prod_ps=250000 * 2e-4,
                 dump_every_ps=2e-4, dump_from="prod", seed=11,
                 P=800.0, n_atoms=3456),
      None),
-    # -- Data/eos/launch_eos.py + Data/eos/run_eos_point.py: no trajectory
+    # -- first heavy tree, the equation-of-state campaign and its point deck: no trajectory
     ("A7 an equation-of-state point: 5000 equilibration and 5000 averaging "
      "steps at dt 2e-4 ps, no trajectory written at all",
      StatePoint(geometry="eos", ensemble="npt_iso", T=2000.0, x=0.1,
@@ -96,7 +96,7 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=None, dump_from="none", seed=42,
                 P=800.0, n_atoms=512),
      None),
-    # -- analysis/s0/launch_s0.py: a third dump cadence, 250 steps
+    # -- first heavy tree, the S(0) measurement runs: a third dump cadence, 250 steps
     ("A8 the structure-factor spot check: 50000 equilibration and 200000 "
      "production steps, dumped every 250",
      StatePoint(geometry="cube", ensemble="npt_iso", T=7000.0, x=0.08,
@@ -104,14 +104,14 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=250 * 2e-4, dump_from="prod", seed=42,
                 P=800.0, n_atoms=3456),
      None),
-    # -- pbs/pilots_A2.pbs: a short pilot at a new pressure
+    # -- first heavy tree, a short pilot at a new pressure
     ("A9 a pressure pilot: 5000 production steps only",
      StatePoint(geometry="cube", ensemble="npt_iso", T=9500.0, x=0.95,
                 dt_ps=2e-4, equil_ps=7500 * 2e-4, prod_ps=5000 * 2e-4,
                 dump_every_ps=100 * 2e-4, dump_from="prod", seed=1,
                 P=400.0, n_atoms=3456),
      None),
-    # -- second tree, Data/cube/gen_manifest.py -> manifests/pass1_s<n>.json
+    # -- second heavy tree, the first pass of its cube campaign, one manifest per shard
     ("B1 the grid cube: 10 ps melt and 50 ps production at dt 1e-3 ps, "
      "dumped every 0.1 ps, at zero pressure",
      StatePoint(geometry="cube", ensemble="npt_iso", T=1200.0, x=0.1,
@@ -131,7 +131,7 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=0.1, dump_from="prod", seed=1,
                 P=5.0, n_atoms=3456),
      None),
-    # -- Data/cube/gen_pass2.py -> manifests/pass2_s<n>.json
+    # -- second heavy tree, the second pass of its cube campaign
     ("B4 a continuation: no melt, resumed from a numbered restart of its "
      "parent",
      StatePoint(geometry="cube", ensemble="npt_iso", T=1500.0, x=0.7,
@@ -153,7 +153,7 @@ ARCHIVED: list[tuple[str, StatePoint, int | None]] = [
                 dump_every_ps=0.02, dump_from="prod", seed=1,
                 P=0.0, n_atoms=3456),
      None),
-    # -- Data/eos/launch_eos_pool.py, the same worker on a new grid
+    # -- second heavy tree, the equation-of-state worker on a new grid
     ("B7 an equation-of-state point on the second tree's pressure grid",
      StatePoint(geometry="eos", ensemble="npt_iso", T=1900.0, x=0.0,
                 dt_ps=2e-4, equil_ps=1.0, prod_ps=1.0,

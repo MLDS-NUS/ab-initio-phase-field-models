@@ -2,8 +2,7 @@
 
 Every check here reads what a checkout carries, the tracked checkpoints under
 ``data/<system>/ckpt/published/`` and the figure data under ``figures/<fig>/figdata/``; one also
-needs the Fe-B equation-of-state tables under its raw root, is marked ``env`` and skips, naming the
-root, where it is absent. A checkout without the tracked checkpoints skips every check here,
+reads the Fe-B equation-of-state tables tracked under ``experiments/feb/eos/``. A checkout without the tracked checkpoints skips every check here,
 naming the checkpoint (``declared_roots.published_or_skip``):
 
 * each published checkpoint (H/He, Fe-B, Lennard-Jones and its two baselines) carries its declared
@@ -72,14 +71,12 @@ def test_each_published_checkpoint_carries_its_digest_and_loads_strictly(name, v
     assert sum(p.numel() for p in model.parameters()) > 0
 
 
-@pytest.mark.env
 def test_feb_stability_map_reproduces_one_published_row(tmp_path):
     """The stage solves the model's own isobar on the equation-of-state manifold, which it reads from
-    ``eos_<P>GPa/eos_n_x_T.csv`` under the Fe-B raw root."""
+    ``eos_<P>GPa/eos_n_x_T.csv`` tracked under ``experiments/feb/eos/`` (no raw root needed)."""
     declared_roots.published_or_skip("feb")
     from aipf.cli.main import main
 
-    declared_roots.raw_or_skip("feb", f"eos_{FEB_P}GPa", "eos_n_x_T.csv")
     assert main(["diagnose", "--system", "feb", "--ckpt", "published", "--stage", "stability_map",
                  "--T-grid", f"{FEB_T},{FEB_T},25", "--pressure", str(FEB_P),
                  "--out", str(tmp_path)]) == 0

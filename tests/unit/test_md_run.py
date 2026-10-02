@@ -1,7 +1,7 @@
 """aipf.md.run and ``aipf md run``: a named deck filled, written, pre-flighted, and run or not.
 
 The declaration is the reduced-unit tree's homogeneous overdamped run, every value quoted from its
-archived deck ``Data/input/in.homogeneous_brownian.lammps`` (line numbers there), declared by the
+archived homogeneous overdamped deck of that tree, declared by the
 system under ``defaults["md"]["cube-overdamped"]`` (experiments/lj/system.py).
 """
 from __future__ import annotations
