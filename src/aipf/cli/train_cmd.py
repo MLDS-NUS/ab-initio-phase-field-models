@@ -247,7 +247,7 @@ def run(args: argparse.Namespace) -> int:
     # a reserved run name, the starting weights found and digest-checked
     from aipf.train.fit import ReservedRunName, pre_run_checks
     try:
-        pre_run_checks(system, args.run_name, init_from)
+        init_path = pre_run_checks(system, args.run_name, init_from)
     except ReservedRunName as refused:
         print(f"aipf train: {refused}", file=sys.stderr)
         return 2
@@ -273,6 +273,14 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     if args.pbs:
+        # a batch job would only fail on it later: refused here, by name, before a job exists
+        if resume_optimizer:
+            from aipf.train.fit import OptimizerLayoutMismatch, check_optimizer_resumable
+            try:
+                check_optimizer_resumable(system, init_from, init_path)
+            except (OptimizerLayoutMismatch, KeyError) as refused:
+                print(f"--resume-optimizer yes: {refused.args[0]}", file=sys.stderr)
+                return 2
         return _submit(args, system)
 
     # refused here, by name, before any run directory exists (`fit` refuses it too)
@@ -291,10 +299,17 @@ def run(args: argparse.Namespace) -> int:
     # "declared" -> None (the declaration answers); "none" -> NO_ANCHORS (drift-only)
     anchors = None if args.anchors == "declared" else NO_ANCHORS
 
-    run_dir = fit(system, run_name=args.run_name, sources=sources,
-                  seed=args.seed, steps=args.steps, epochs=args.epochs,
-                  init_from=init_from, resume_optimizer=resume_optimizer,
-                  anchors=anchors, log_every_step=args.log_every_step,
-                  device=args.device, deterministic=args.deterministic)
+    # a saved optimizer whose parameter groups do not fit this model's (the published lj
+    # checkpoint's does not) is refused by fit, by name, before the run directory exists
+    from aipf.train.fit import OptimizerLayoutMismatch
+    try:
+        run_dir = fit(system, run_name=args.run_name, sources=sources,
+                      seed=args.seed, steps=args.steps, epochs=args.epochs,
+                      init_from=init_from, resume_optimizer=resume_optimizer,
+                      anchors=anchors, log_every_step=args.log_every_step,
+                      device=args.device, deterministic=args.deterministic)
+    except OptimizerLayoutMismatch as refused:
+        print(f"--resume-optimizer yes: {refused}", file=sys.stderr)
+        return 2
     print(run_dir)
     return 0

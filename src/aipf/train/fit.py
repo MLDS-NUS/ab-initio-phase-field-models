@@ -36,8 +36,8 @@ from .kernel_hinge import HINGE_TERM, KernelHinge, declared_fields as _hinge_fie
 from .lit_module import LitModule, seeded_rng
 from .penalties import PENALTY_TERMS, penalties_from_system
 
-__all__ = ["DEVICES", "DeviceUnavailable", "ReservedRunName", "fit", "pre_run_checks",
-           "resolve_device"]
+__all__ = ["DEVICES", "DeviceUnavailable", "OptimizerLayoutMismatch", "ReservedRunName",
+           "check_optimizer_resumable", "fit", "pre_run_checks", "resolve_device"]
 
 #: Where a run trains: ``auto`` is ``cuda`` when torch sees one, else ``cpu``.
 DEVICES = ("auto", "cpu", "cuda")
@@ -308,6 +308,80 @@ class ReservedRunName(ValueError):
     """A run name that would write into the published checkpoints' directory."""
 
 
+class OptimizerLayoutMismatch(ValueError):
+    """A saved optimizer state whose parameter groups do not line up with this model's fresh optimizer.
+
+    Raised before the run directory exists; ``aipf train`` turns it into exit 2."""
+
+
+def _optimizer_layout_refusal(groups: Sequence[Mapping[str, Any]],
+                              optimizer_state: Mapping[str, Any],
+                              names: Mapping[int, str], where: str) -> Optional[str]:
+    """``None`` when ``optimizer_state`` fits ``groups`` position by position, else what differs.
+
+    An optimizer state is matched to parameters by position only, so the check is: the same number
+    of groups, the same number of tensors in each, and each saved moment the shape of the parameter
+    at its position (a position the saved run never stepped carries no moment and is not compared)."""
+    saved_groups = optimizer_state.get("param_groups", [])
+    saved_state = optimizer_state.get("state", {})
+    fresh = [[tuple(p.shape) for p in g["params"]] for g in groups]
+    saved = [[(tuple(saved_state[i]["exp_avg"].shape)
+               if i in saved_state and "exp_avg" in saved_state[i] else None)
+              for i in g["params"]] for g in saved_groups]
+    lines = []
+    if [len(g) for g in fresh] != [len(g) for g in saved]:
+        lines.append(f"tensors per parameter group: saved {[len(g) for g in saved]}, "
+                     f"this model's fresh optimizer {[len(g) for g in fresh]}")
+    for n, (fg, sg) in enumerate(zip(fresh, saved)):
+        bad = [k for k, (f, s) in enumerate(zip(fg, sg)) if s is not None and f != s]
+        if bad:
+            lines.append(f"group {n}: {len(bad)} position(s) where the saved moment's shape is not "
+                         f"the parameter's, first at position {bad[0]} (saved {sg[bad[0]]}, "
+                         f"parameter {names.get(id(groups[n]['params'][bad[0]]), '?')} "
+                         f"{fg[bad[0]]})")
+        # name the fresh tensors whose shape the saved group has no moment for
+        pool = [s for s in sg if s is not None]
+        unmatched = []
+        for p, f in zip(groups[n]["params"], fg):
+            if f in pool:
+                pool.remove(f)
+            else:
+                unmatched.append(f"{names.get(id(p), '?')} {f}")
+        if unmatched and len(fg) != len(sg):
+            lines.append(f"group {n}: this model trains {', '.join(unmatched)}, which the saved "
+                         f"optimizer has no moment for (the run that wrote it did not train it)")
+    if not lines:
+        return None
+    return (f"the optimizer state saved in {where} does not fit this model's optimizer: "
+            + "; ".join(lines)
+            + ". An optimizer state is matched to parameters by position, so it cannot be "
+              "resumed here. Pass --resume-optimizer no (resume_optimizer=False) to start a "
+              "fresh optimizer and schedule from these weights")
+
+
+def _check_layout(lit: "LitModule", optimizer_state: Mapping[str, Any], where: str) -> None:
+    """Raise :class:`OptimizerLayoutMismatch` when ``optimizer_state`` does not fit ``lit``'s groups."""
+    names = {id(p): n for n, p in lit.model.named_parameters()}
+    refusal = _optimizer_layout_refusal(lit.parameter_groups(), optimizer_state, names, where)
+    if refusal is not None:
+        raise OptimizerLayoutMismatch(refusal)
+
+
+def check_optimizer_resumable(system: System, init_from: Checkpoint,
+                              path: Optional[Path] = None) -> None:
+    """The ``resume_optimizer=True`` refusals, made before anything is written: ``init_from`` carries
+    an optimizer state (``KeyError`` otherwise) whose groups fit this model's fresh optimizer
+    (:class:`OptimizerLayoutMismatch` otherwise). Builds the model on the CPU under its own
+    forked stream, so the global one is left as it was."""
+    cfg = TrainConfig(**{**_config_from_system(system), "seed": 0})
+    with seeded_rng(0):
+        model = build_functional(system)
+    saved = _load_weights_into(model, init_from, system.paths.raw, system, path=path)
+    optimizer_state, _ = _optimizer_state_of(saved, init_from)
+    lit = _MultiSourceDriver(model, model._cache, cfg)
+    _check_layout(lit, optimizer_state, str(path or init_from.path or "the published checkpoint"))
+
+
 def _tables_on(tables, device):
     """The anchor tables with every tensor on ``device`` (the same object when they already are)."""
     moved = {f.name: value.to(device) for f in dataclasses.fields(tables)
@@ -535,7 +609,6 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
 
     init_path = pre_run_checks(system, run_name, init_from)
     run_dir = index.ckpt_dir(system, root) / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = TrainConfig(**{**_config_from_system(system), "seed": int(seed),
                          **dict(config_overrides or {})})
@@ -553,7 +626,12 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
             raise ValueError(
                 "resume_optimizer=True needs init_from: there is no saved "
                 "optimizer to continue without a checkpoint to read it from")
-        lit.resume_optimizer_from(*_optimizer_state_of(saved, init_from))
+        optimizer_state, scheduler_state = _optimizer_state_of(saved, init_from)
+        # refused by name before the run directory exists: torch's own load would fail later
+        # with a bare size error, or map moments onto the wrong tensors
+        _check_layout(lit, optimizer_state, str(init_path or init_from.path))
+        lit.resume_optimizer_from(optimizer_state, scheduler_state)
+    run_dir.mkdir(parents=True, exist_ok=True)
     anchors = _anchors_from_system(system, anchors)
     if anchors is not None:
         lit.attach_anchors(anchors, float(_declared_constant(system, "kB")))

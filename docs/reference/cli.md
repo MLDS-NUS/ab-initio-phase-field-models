@@ -144,7 +144,7 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 | `--seed` | the one seed the model, batch-order and draw streams derive from |
 | `--steps`, `--epochs` | the run's length, exactly one |
 | `--source` | a training source: SUBDIR is relative to the declared `source_root`, PATTERN a glob of run directories, the grid the real-space grid it is scattered onto. Repeatable. `declared` alone trains the system's `defaults["training"]["sources"]`, exclusions included |
-| `--resume-optimizer` | `no` builds the optimizer and schedule fresh; `yes` resumes them from `--init-from-published`'s checkpoint (the published `lj` checkpoint's saved optimizer state has parameter groups that do not match a fresh optimizer's, so `yes` fails on it; start from it with `no`). Required |
+| `--resume-optimizer` | `no` builds the optimizer and schedule fresh; `yes` resumes them from `--init-from-published`'s checkpoint when its parameter groups fit this model's optimizer, else exit 2 naming what differs (the published `lj` checkpoint's do not: start from it with `no`). Required |
 | `--anchors` | `declared` trains the system's anchor tables; `none` the drift term alone. Required |
 | `--variant` | a declared variant ([system.md](system.md#variant)) |
 | `--init-from-published` | start from the system's (or variant's) published weights, digest-checked |
@@ -154,8 +154,9 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 | `--pbs`, `--walltime-h`, `--dry-run` | as `aipf md run`; the job file is `job.pbs` in the run directory, and `--dry-run` needs `--pbs` |
 
 Before anything is written the command refuses a source whose glob selects no run directory (after
-its exclusions), `--resume-optimizer yes` without `--init-from-published`, and a published
-checkpoint it cannot find or whose digest differs. Prints the run directory. See
+its exclusions), `--resume-optimizer yes` without `--init-from-published` or with a saved optimizer
+whose parameter groups do not fit this model's, and a published checkpoint it cannot find or whose
+digest differs. Prints the run directory. See
 [training.md](training.md).
 
 ## aipf diagnose

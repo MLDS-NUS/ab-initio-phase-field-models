@@ -164,7 +164,11 @@ with `temperature`, `mobility`, `records`, `record_temperature`, `structure_zero
 `--init-from-published` (`init_from=system.checkpoint`) loads the system's published weights,
 digest-checked, into the declared model. `--resume-optimizer no` builds the optimizer and schedule
 fresh, so the first steps sit in the linear warm-up. `--resume-optimizer yes` resumes the saved
-optimizer and schedule; the published `lj` checkpoint's saved optimizer state has parameter groups that do not match a fresh optimizer's, so `yes` fails on it; start from it with `no`. A fresh run is built
+optimizer and schedule when its parameter groups fit this model's fresh optimizer tensor by tensor,
+and otherwise is refused by name (exit 2, `OptimizerLayoutMismatch` from `fit`) before the run
+directory exists. The published `lj` checkpoint is refused: the run that wrote it held the local
+net's linear skip `g_net.w2.weight` frozen, so its one group has 15 tensors against 16 here, in
+another order. Start from it with `no`. A fresh run is built
 under the model stream of `--seed`, and does not reproduce a published run's own initialisation.
 
 ## Devices and determinism
