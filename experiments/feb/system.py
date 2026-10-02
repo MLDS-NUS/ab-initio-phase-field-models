@@ -280,7 +280,9 @@ SYSTEM = System(
         "grad_clip": 1.0,         # Trainer argument, in no checkpoint
         # -- the diagnosis
         "diagnose": {
-            # eos_<P>GPa/eos_n_x_T.csv: at 0 GPa the grid measured before the apex refinement
+            # eos_<P>GPa/eos_n_x_T.csv, tracked under experiments/feb/eos/ (read before the raw
+            # root). At 0 GPa this file is the grid measured after the apex refinement, byte for byte
+            # the eos_0GPa/eos_n_x_T_v2.csv the training block reads: one table under two names
             "eos_csvs": {P: f"eos_{int(P)}GPa/eos_n_x_T.csv" for P in _EOS_MANIFOLDS},
             "eos_columns": dict(_EOS_COLUMNS),
             "manifold_fit": "per_row",  # the manifolds have holes

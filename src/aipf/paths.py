@@ -199,6 +199,16 @@ def tracked_tables(system: str) -> Path:
     return experiments_root() / system / TABLES_DIRNAME
 
 
+#: A system's tracked equation-of-state tables, under its experiment folder.
+EOS_DIRNAME = "eos"
+
+
+def tracked_eos(system: str) -> Path:
+    """A system's tracked equation-of-state tables, ``<experiments>/<system>/eos``; a declared relative
+    manifold path is looked for here before the raw root (``aipf diagnose``)."""
+    return experiments_root() / system / EOS_DIRNAME
+
+
 def experiments_root() -> Path:
     """Where experiment folders live: ``AIPF_EXPERIMENTS``, else ``[paths] experiments``, else ``<repo>/experiments``."""
     try:

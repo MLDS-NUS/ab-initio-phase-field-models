@@ -90,9 +90,9 @@ Each runs on a CPU in seconds, needs no MD data, and prints the directory it wro
 `data/<system>/diagnose/<md5[:12]>/`. `--ckpt published` checks the tracked checkpoint against the
 md5 its system declares before reading it. The first two write `kappa.json`, the gradient-energy
 matrix of the learned kernel. The third writes the binodal, spinodal and critical temperature of
-the Lennard-Jones mixture. Other stages (`phase_diagram`, `stability_map`, `dome`, `tc`), which
-need the system's raw data root (`AIPF_RAW_<SYSTEM>`), are listed in
-[docs/reference/diagnose.md](docs/reference/diagnose.md).
+the Lennard-Jones mixture. The other stages (`phase_diagram`, `stability_map`, `dome`, `tc`) read
+the equation-of-state tables tracked under `experiments/<system>/eos/`, so they too run without the
+raw data root, and are listed in [docs/reference/diagnose.md](docs/reference/diagnose.md).
 
 ## Reproduce the paper figures
 

@@ -104,7 +104,7 @@ Manifolds (`phase_diagram`, `stability_map`, `dome`):
 
 | key | meaning |
 |---|---|
-| `eos_csvs` | `{pressure: path relative to the raw root}` |
+| `eos_csvs` | `{pressure: relative path}`, read from the system's tracked tables `experiments/<system>/eos/` first, then from its raw root |
 | `eos_columns` | `x_column`, `T_column`, `n_columns` (alternatives, the first present wins), `status_column`, `status_ok` |
 | `manifold_fit` | `column` (blend two temperature columns, then fit; holes refused; needs `x_channel = 1`) or `per_row` (fit each temperature row on its measured nodes) |
 | `manifold_min_nodes` | `per_row`: the measured compositions a row needs |

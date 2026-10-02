@@ -578,13 +578,16 @@ def _apex(declared: Mapping[str, Any], T_grid: np.ndarray, bin_lo: np.ndarray,
 
 
 def manifolds(system: System, declared: Mapping[str, Any]):
-    """Every declared manifold, loaded once and keyed by its pressure."""
+    """Every declared manifold, loaded once and keyed by its pressure. A relative path is read from the
+    system's tracked tables (``experiments/<system>/eos``) first, then from its raw root."""
+    from aipf.paths import tracked_eos
+
     columns = dict(_need(declared, "eos_columns"))
     fit = _need(declared, "manifold_fit")
     if fit not in MANIFOLD_FITS:
         raise ValueError(f"manifold_fit={fit!r} is not one of {MANIFOLD_FITS}")
     x_channel = int(system.table_keys["x_channel"])
-    root = system.paths.raw()
+    tracked = tracked_eos(system.name)
     out = {}
     for pressure, relative in dict(_need(declared, "eos_csvs")).items():
         path = Path(relative)
@@ -593,6 +596,8 @@ def manifolds(system: System, declared: Mapping[str, Any]):
                 f"the manifold declared at {pressure} is an absolute path; "
                 f"locations are resolved under the system's own root so that "
                 f"the environment can move it")
+        # the tracked copy first; the raw root is asked for only when there is none
+        root = tracked if (tracked / path).is_file() else system.paths.raw()
         if fit == "per_row":
             out[float(pressure)] = load_manifold_rows(
                 root / path, x_channel=x_channel,
