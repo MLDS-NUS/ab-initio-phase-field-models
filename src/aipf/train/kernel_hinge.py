@@ -13,7 +13,7 @@ A declaration spells it as a saved checkpoint does (``lambda_wpsd``; ``wpsd_kapp
 checkpoint: the weight to ``lambda_W``, the shape into ``extra_experiment_config``."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
@@ -54,12 +54,14 @@ def declared_fields(declared: Mapping[str, Any]) -> Dict[str, Any]:
 
 @dataclass(frozen=True)
 class KernelHinge:
-    """The hinge's shape: ``kappa``, the wavenumber reach ``k_max``, the count ``n_k`` and ``margin``."""
+    """The hinge's shape: ``kappa``, the wavenumber reach ``k_max``, the count ``n_k`` and ``margin``;
+    ``weight`` is the ``lambda_W`` it trains at (recorded, not compared: one shape is one hinge)."""
 
     kappa: float
     k_max: float
     n_k: int
     margin: float
+    weight: Optional[float] = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if int(self.n_k) < 1:
@@ -80,7 +82,8 @@ class KernelHinge:
                 f"lambda_W={cfg.lambda_W!r} trains the kernel hinge, and its shape {missing} "
                 f"is not declared: this package has no default for any of {list(SHAPE_KEYS)}")
         return cls(kappa=float(extra["wpsd_kappa"]), k_max=float(extra["wpsd_k_max"]),
-                   n_k=int(extra["wpsd_n_k"]), margin=float(extra["wpsd_margin"]))
+                   n_k=int(extra["wpsd_n_k"]), margin=float(extra["wpsd_margin"]),
+                   weight=float(cfg.lambda_W))
 
     def wavenumbers(self, *, dtype: torch.dtype,
                     device: torch.device | str | None = None) -> torch.Tensor:
@@ -109,9 +112,11 @@ class KernelHinge:
         return l_w(W[1:] - W[0], k, kappa=self.kappa, margin=self.margin)
 
     def provenance(self) -> Dict[str, Any]:
-        """What ``MANIFEST.json`` records under ``kernel_hinge``: the term and its shape."""
+        """What ``MANIFEST.json`` records under ``kernel_hinge``: the term, its shape and the weight
+        ``lambda_W`` it trained at (``None`` for a hinge built without one)."""
         return {"term": HINGE_TERM, "kappa": self.kappa, "k_max": self.k_max,
-                "n_k": int(self.n_k), "margin": self.margin}
+                "n_k": int(self.n_k), "margin": self.margin,
+                "lambda_W": None if self.weight is None else float(self.weight)}
 
 
 __all__ = ["HINGE_TERM", "KernelHinge", "SHAPE_KEYS", "WEIGHT_KEY", "declared_fields"]

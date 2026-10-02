@@ -124,7 +124,7 @@ a saved checkpoint spells it: the weight `lambda_wpsd`, which the driver maps to
 shape `wpsd_kappa`, `wpsd_k_max`, `wpsd_n_k` and `wpsd_margin`, which it keeps in
 `extra_experiment_config`. A non-zero weight without all four shape keys is refused, and so is a
 model without a pair kernel. `MANIFEST.json` names the terms a run trained, and its `kernel_hinge`
-records the hinge's shape.
+records the hinge's shape and the `lambda_W` it trained at.
 
 ## Anchor tables
 
