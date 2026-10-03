@@ -40,12 +40,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     from aipf.paths import ConfigError, MissingLocation
     from aipf.site import MissingSiteFact
+    from aipf.system import UnknownSystem
     try:
         return args.func(args)
-    except (MissingLocation, MissingSiteFact, ConfigError) as refused:
-        # an undeclared location or site fact, or an unreadable aipf.toml: a refusal, not a crash
-        print(f"aipf {args.command}: {refused}", file=sys.stderr)
+    except (MissingLocation, MissingSiteFact, ConfigError, UnknownSystem) as refused:
+        # an undeclared location, site fact or system, or an unreadable aipf.toml: a refusal, not a
+        # crash
+        print(f"{_verb(args)}: {refused}", file=sys.stderr)
         return 2
+
+
+#: The attributes that hold a command's verb or driver (``aipf md doctor``, ``aipf rollout slab``).
+_VERB_ATTRIBUTES = ("md_command", "data_command", "driver")
+
+
+def _verb(args: argparse.Namespace) -> str:
+    """The command as it was typed, up to its verb: ``aipf md doctor``, ``aipf train``."""
+    words = ["aipf", args.command]
+    words += [getattr(args, name) for name in _VERB_ATTRIBUTES if getattr(args, name, None)]
+    return " ".join(words)
 
 
 if __name__ == "__main__":

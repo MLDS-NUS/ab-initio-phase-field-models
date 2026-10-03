@@ -103,6 +103,9 @@ def _site_lammps(given: str | None, verb: str) -> str | None:
 def _doctor(args: argparse.Namespace) -> int:
     from aipf.md.doctor import examine_site, systems_with_potential
     from aipf.site import Site
+    from aipf.system import load
+    if args.system is not None:
+        load(args.system)                 # an undeclared system is refused before any check runs
     # the potential each system runs (Site.for_system), every declaring system unless one is named
     names = [args.system] if args.system is not None else (systems_with_potential() or None)
     diagnosis = examine_site(Site.load(), device=args.device, deep=args.deep,

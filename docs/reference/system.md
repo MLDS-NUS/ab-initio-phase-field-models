@@ -10,7 +10,7 @@ command that needs a value the system does not declare refuses, naming the key.
 
 | function | does |
 |---|---|
-| `aipf.system.load(name_or_path)` | a name is looked up as `<experiments>/<name>/system.py`; an argument containing a path separator is a folder. Refuses with the available names when there is no `system.py`, when it defines no `SYSTEM`, or when `SYSTEM` is not a `System` |
+| `aipf.system.load(name_or_path)` | a name is looked up as `<experiments>/<name>/system.py`; an argument containing a path separator is a folder. Refuses with the declared names when there is no `system.py` (`UnknownSystem`, a `FileNotFoundError`, which every `aipf` command prints as one line and exit 2), when it defines no `SYSTEM`, or when `SYSTEM` is not a `System` |
 | `aipf.system.available()` | the sorted names of the experiment folders that hold a `system.py` |
 | `aipf.system.experiments_root()` | `AIPF_EXPERIMENTS`, else `[paths] experiments` in `aipf.toml`, else `<repo>/experiments` |
 

@@ -754,3 +754,40 @@ def test_rollout_hands_the_driver_the_variant_system(monkeypatch, tmp_path):
                  "--device", "cpu", "--out", "data"]) == 0
     assert seen["system"].functional.local == "landau"
     assert seen["system"].variant_name == "landau"
+
+
+# ---------------------------------------------------------------------------
+# --system: a name no experiment folder declares
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("verb,argv", [
+    ("aipf train", ["train", "--run", "r", "--seed", "0", "--steps", "1",
+                    "--source", "a=b:c:1,1,1", "--resume-optimizer", "no", "--anchors", "none"]),
+    ("aipf diagnose", ["diagnose", "--ckpt", "published", "--stage", "kappa"]),
+    ("aipf modes", ["modes", "--tag", "t", "--sigma", "1", "--k-cut", "1"]),
+    ("aipf rollout spinodal", ["rollout", "spinodal", "--ckpt", "published", "--run", "r",
+                               "--seeds", "--t-end", "1", "--dt", "1", "--save-ps", "1",
+                               "--device", "cpu", "--out", "data"]),
+    ("aipf data build", ["data", "build", "--dry-run"]),
+    ("aipf data rebuild", ["data", "rebuild"]),
+    ("aipf md run", ["md", "run", "--template", "x", "--out", "OUT", "--dry-run"]),
+    ("aipf md doctor", ["md", "doctor"]),
+])
+def test_an_undeclared_system_is_one_refusal_naming_the_declared_ones(verb, argv, tmp_path):
+    """Every verb that takes ``--system`` refuses an undeclared name with exit 2 and one line that
+    lists the declared systems, never a traceback, and writes nothing."""
+    from aipf.system import available
+    argv = [str(tmp_path / "out") if a == "OUT" else a for a in argv]
+    r = _aipf(*argv, "--system", "bogus")
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    declared = ", ".join(available()) or "none"
+    assert r.stderr.startswith(f"{verb}: no system 'bogus' is declared; declared: {declared}"), r.stderr
+    assert "Traceback" not in r.stderr
+    assert not any(tmp_path.iterdir())
+
+
+def test_a_folder_without_a_system_file_is_refused_the_same_way(tmp_path):
+    r = _aipf("md", "doctor", "--system", str(tmp_path / "nowhere"))
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert r.stderr.startswith("aipf md doctor: no system.py at "), r.stderr
+    assert "declares no system; declared:" in r.stderr and "Traceback" not in r.stderr

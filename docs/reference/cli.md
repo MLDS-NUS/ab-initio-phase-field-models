@@ -23,7 +23,7 @@ command does not take as a flag comes from that system's declaration ([system.md
 |---|---|
 | 0 | done; the last line printed is the output (a directory, a file, or `ok`) |
 | 1 | `aipf md run`: the engine ran and failed, or the pre-flight of a `--dry-run` did not pass; `aipf md doctor`: a check the site needs is broken or could not be inspected |
-| 2 | refused before anything ran: a usage error, an undeclared location or site fact, an `aipf.toml` that is not valid TOML, or a declaration that is missing a key. The reason is on stderr and names the key, flag or variable to set |
+| 2 | refused before anything ran: a usage error, an undeclared system, location or site fact, an `aipf.toml` that is not valid TOML, or a declaration that is missing a key. The reason is on stderr and names the key, flag or variable to set |
 
 ## Configuration
 

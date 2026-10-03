@@ -617,20 +617,26 @@ def _looks_like_a_path(name_or_path: str) -> bool:
     return any(sep in name_or_path for sep in separators)
 
 
+class UnknownSystem(FileNotFoundError):
+    """A name that no experiment folder declares, or a folder that holds no ``system.py``.
+
+    The message names the systems that are declared; ``aipf`` prints it as one refusal (exit 2)."""
+
+
 def load(name_or_path: str) -> System:
-    """Load a System by short name or by path to its folder."""
-    folder = (Path(name_or_path) if _looks_like_a_path(name_or_path)
-              else experiments_root() / name_or_path)
+    """Load a System by short name or by path to its folder; :class:`UnknownSystem` when there is none."""
+    by_path = _looks_like_a_path(name_or_path)
+    folder = Path(name_or_path) if by_path else experiments_root() / name_or_path
     module_path = folder / _SYSTEM_FILENAME
     if not module_path.is_file():
         names = available()
         known = (", ".join(names) if names else
                  f"none (set {_EXPERIMENTS_ENV}, or [paths] experiments in aipf.toml, "
                  f"to say where they live)")
-        raise FileNotFoundError(
-            f"no {_SYSTEM_FILENAME} at {module_path}. Available systems: "
-            f"{known}"
-        )
+        if by_path:
+            raise UnknownSystem(f"no {_SYSTEM_FILENAME} at {module_path}, so the folder "
+                                f"{name_or_path!r} declares no system; declared: {known}")
+        raise UnknownSystem(f"no system {name_or_path!r} is declared; declared: {known}")
     spec = importlib.util.spec_from_file_location(
         f"aipf_experiment_{folder.name}", module_path)
     if spec is None or spec.loader is None:
