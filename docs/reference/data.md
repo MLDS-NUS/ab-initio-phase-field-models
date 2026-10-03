@@ -79,7 +79,7 @@ manifest indexes a different one is refused, and writes nothing (`ForeignManifes
 | `T_K` | the temperature, in the system's unit |
 | `P_GPa` | the pressure, else `constants["P_GPa"]` |
 | `composition` | `{"species", "kind": "uniform", "regions" or "two_slab", "x": {species: value or [values]}}` |
-| `box` | `{"L": the starting edge of a cubic box or null, "varying": the axes that move}`; `NPT_z` allows `z`, `NPT` any, the others none |
+| `box` | `{"L": the starting edge of a cubic box or null, "varying": the axes that move}`: `["z"]` under `NPT_z`, `["x", "y", "z"]` under `NPT`, none under the others (`aipf.data.meta.moving_axes`) |
 | `n_atoms`, `dt_ps`, `dump_every_ps`, `n_frames` | numbers; the last three positive |
 | `engine`, `potential`, `seed`, `status` | |
 | `extra` | everything else the source recorded: `n_equil`, `n_prod`, the template, the campaign, the path of `run.json` |

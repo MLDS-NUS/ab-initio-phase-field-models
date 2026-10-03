@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from aipf.data.meta import SCHEMA_VERSION, validate
+from aipf.data.meta import SCHEMA_VERSION, moving_axes, validate
 from aipf.paths import CKPT_DIRNAME, FIELDS_DIRNAME, raw_env_name
 from aipf.system import System
 
@@ -297,7 +297,7 @@ def _meta_from_run_record(system: System, run_dir: Path, record: dict) -> dict:
         "T_K": float(fields["T_K"]),
         "P_GPa": fields["P_GPa"],
         "composition": composition,
-        "box": {"L": box_edge, "varying": ["z"] if fields["ensemble"] == "NPT_z" else []},
+        "box": {"L": box_edge, "varying": moving_axes(fields["ensemble"])},
         "n_atoms": None if fields["n_atoms"] is None else int(fields["n_atoms"]),
         "dt_ps": float(fields["dt_ps"]),
         "dump_every_ps": fields["dump_every_ps"],
@@ -352,7 +352,6 @@ def _composition(system: System, tag: str, src: dict) -> dict:
 
 def _normalise(system: System, tag: str, src: dict) -> dict:
     geometry, ensemble = _classify(tag, system)
-    varying = ["z"] if ensemble == "NPT_z" else []
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -363,7 +362,7 @@ def _normalise(system: System, tag: str, src: dict) -> dict:
         "T_K": float(src["T_K"]),
         "P_GPa": src.get("P_GPa", system.constants.get("P_GPa")),
         "composition": _composition(system, tag, src),
-        "box": {"L": src.get("box_L_A"), "varying": varying},
+        "box": {"L": src.get("box_L_A"), "varying": moving_axes(ensemble)},
         "n_atoms": int(src["n_atoms"]),
         "dt_ps": float(src["dt_ps"]),
         "dump_every_ps": _dump_every_ps(src),

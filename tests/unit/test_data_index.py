@@ -67,7 +67,7 @@ def test_build_writes_valid_metadata(tmp_path, monkeypatch):
     # no run.json and no declared cube deck: the table's cube row (every archived cube ran fix npt)
     assert meta["ensemble"] == "NPT"
     assert meta["geometry"] == "cube"
-    assert meta["box"]["varying"] == []
+    assert meta["box"]["varying"] == ["x", "y", "z"]          # fix npt ... iso moves every axis
 
 
 def test_run_json_wins_and_a_declared_deck_comes_second(tmp_path, monkeypatch):
@@ -95,6 +95,34 @@ def test_run_json_wins_and_a_declared_deck_comes_second(tmp_path, monkeypatch):
     assert ensembles[point.tag] == "langevin_overdamped"          # run.json's request
     assert ensembles["cube_x0.05_T02000"] == "NVT"                 # the declared deck, over the table
     assert ensembles["cube_x0.50_T03000"] == "NVT"
+
+
+@pytest.mark.parametrize("ensemble,axes", [("NPT", ["x", "y", "z"]), ("NPT_z", ["z"]),
+                                           ("NVT", []), ("langevin_overdamped", [])])
+def test_a_run_json_records_the_same_moving_axes_as_the_table(tmp_path, monkeypatch, ensemble,
+                                                               axes):
+    """The two routes into a record, a run's ``run.json`` and an archived run's table row, write the
+    same ``box.varying`` for the same ensemble: the axes that move (data.md), every one under NPT."""
+    from dataclasses import asdict
+
+    from aipf.data.meta import moving_axes
+    from aipf.md.request import PRESSURE_CONTROLLED, StatePoint
+
+    s = _system(tmp_path, monkeypatch)
+    point = StatePoint(geometry="cube", ensemble=ensemble, T=2500.0, x=0.25, dt_ps=0.001,
+                       equil_ps=1.0, prod_ps=10.0, dump_every_ps=0.02, dump_from="prod", seed=7,
+                       n_atoms=None, P=800.0 if ensemble in PRESSURE_CONTROLLED else None)
+    run = tmp_path / "scratch" / "cube_data_800GPa" / "cube_from_md_run"
+    run.mkdir(parents=True)
+    (run / "traj.lammpstrj").write_text("frames")
+    (run / "run.json").write_text(json.dumps({
+        "system": "demo", "template": "cube", "campaign": None, "point": asdict(point),
+        "values": {}, "dry_run": False, "result": {"status": "ok"}}))
+    records = {r["tag"]: r["meta"] for r in index.build(s)["state_points"] if "meta" in r}
+    assert records[point.tag]["ensemble"] == ensemble
+    assert records[point.tag]["box"]["varying"] == axes == moving_axes(ensemble)
+    table_npt = records["cube_x0.05_T02000"]                   # the table's cube row: NPT
+    assert table_npt["box"]["varying"] == moving_axes("NPT") == ["x", "y", "z"]
 
 
 def test_slab_metadata_records_the_breathing_axis(tmp_path, monkeypatch):

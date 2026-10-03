@@ -18,6 +18,14 @@ _VARYING_ALLOWED: dict[str, frozenset[str]] = {
     "NPT": frozenset({"x", "y", "z"}),
 }
 
+
+
+def moving_axes(ensemble: str) -> list[str]:
+    """The axes the box moves along under ``ensemble``, sorted: every axis it lets move, since a
+    barostat that acts on an axis moves it (``NPT``: x, y and z; ``NPT_z``: z); none for an unknown one."""
+    return sorted(_VARYING_ALLOWED.get(ensemble, ()))
+
+
 #: Ensembles in which the pressure is a controlled variable.
 _PRESSURE_CONTROLLED = frozenset({"NPT", "NPT_z"})
 
