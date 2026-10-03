@@ -221,9 +221,11 @@ as for `aipf md run`: the job file is `job.pbs` in the run directory.
 
 `--init-from-published` starts from the published weights (the checkout's tracked file,
 digest-checked) instead of fresh ones. `--resume-optimizer yes` resumes the saved optimizer and
-schedule too, when the saved parameter groups fit this model's optimizer. The published `lj`
-checkpoint's do not (the run that wrote it held one weight frozen), so `yes` is refused on it with
-exit 2 and a message naming the difference; start from it with `--resume-optimizer no`, as below. A
+schedule too, when the saved parameter groups fit this model's optimizer, in order: a checkpoint
+written by `aipf train` records the parameter at each position. The published checkpoints record no
+names, and each holds two tensors or more of one shape whose order cannot be checked without them, so
+`yes` is refused on them with exit 2 and a message naming the tensors. Start from one with
+`--resume-optimizer no`, as below. A
 checkpoint nothing holds is refused before any run directory exists.
 
 ```text

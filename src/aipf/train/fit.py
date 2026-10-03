@@ -314,14 +314,37 @@ class OptimizerLayoutMismatch(ValueError):
     Raised before the run directory exists; ``aipf train`` turns it into exit 2."""
 
 
+#: The checkpoint key under which this driver records, per optimizer group, the name of the parameter
+#: at each position. A torch optimizer state lists positions only; these names say which tensor is where.
+OPTIMIZER_NAMES_KEY = "optimizer_param_names"
+
+
+def _saved_param_names(saved: Mapping[str, Any],
+                       optimizer_state: Mapping[str, Any]) -> Optional[list]:
+    """The names a checkpoint records for its optimizer's positions (:data:`OPTIMIZER_NAMES_KEY`), one
+    list per group; ``None`` when it records none, or a list that does not cover every saved position."""
+    recorded = saved.get(OPTIMIZER_NAMES_KEY)
+    counts = [len(g["params"]) for g in optimizer_state.get("param_groups", [])]
+    if (not isinstance(recorded, (list, tuple))
+            or [len(g) if isinstance(g, (list, tuple)) else -1 for g in recorded] != counts
+            or not all(isinstance(n, str) for g in recorded for n in g)):
+        return None
+    return [list(g) for g in recorded]
+
+
 def _optimizer_layout_refusal(groups: Sequence[Mapping[str, Any]],
                               optimizer_state: Mapping[str, Any],
-                              names: Mapping[int, str], where: str) -> Optional[str]:
+                              names: Mapping[int, str], where: str,
+                              saved_names: Optional[Sequence[Sequence[str]]] = None) -> Optional[str]:
     """``None`` when ``optimizer_state`` fits ``groups`` position by position, else what differs.
 
-    An optimizer state is matched to parameters by position only, so the check is: the same number
-    of groups, the same number of tensors in each, and each saved moment the shape of the parameter
-    at its position (a position the saved run never stepped carries no moment and is not compared)."""
+    An optimizer state is matched to parameters by position only. The check is: the same number of
+    groups, the same number of tensors in each, each saved moment the shape of the parameter at its
+    position (a position the saved run never stepped carries no moment and is not compared), and the
+    order. Shapes cannot prove the order of two tensors of one shape, so the order is checked by name:
+    ``saved_names`` (what the checkpoint records, :data:`OPTIMIZER_NAMES_KEY`) against ``names`` (this
+    model's ``named_parameters``), position by position. A state that records no names is refused when
+    two tensors of one group share a shape, naming them, and accepted when the shapes alone fix it."""
     saved_groups = optimizer_state.get("param_groups", [])
     saved_state = optimizer_state.get("state", {})
     fresh = [[tuple(p.shape) for p in g["params"]] for g in groups]
@@ -351,6 +374,8 @@ def _optimizer_layout_refusal(groups: Sequence[Mapping[str, Any]],
             lines.append(f"group {n}: this model trains {', '.join(unmatched)}, which the saved "
                          f"optimizer has no moment for (the run that wrote it did not train it)")
     if not lines:
+        lines = _order_refusals(groups, names, saved_names)
+    if not lines:
         return None
     return (f"the optimizer state saved in {where} does not fit this model's optimizer: "
             + "; ".join(lines)
@@ -359,10 +384,41 @@ def _optimizer_layout_refusal(groups: Sequence[Mapping[str, Any]],
               "fresh optimizer and schedule from these weights")
 
 
-def _check_layout(lit: "LitModule", optimizer_state: Mapping[str, Any], where: str) -> None:
+def _order_refusals(groups: Sequence[Mapping[str, Any]], names: Mapping[int, str],
+                    saved_names: Optional[Sequence[Sequence[str]]]) -> list:
+    """Why the saved order is not this model's, one line per group: a position whose recorded name is
+    another parameter's, or, with no names recorded, the tensors whose shared shape hides their order."""
+    lines = []
+    for n, group in enumerate(groups):
+        fresh = [(names.get(id(p), "?"), tuple(p.shape)) for p in group["params"]]
+        if saved_names is not None:
+            moved = [k for k, ((name, _), saved) in enumerate(zip(fresh, saved_names[n]))
+                     if name != saved]
+            if moved:
+                k = moved[0]
+                lines.append(f"group {n}: {len(moved)} position(s) where the saved optimizer holds "
+                             f"another parameter than this model, first at position {k} (saved "
+                             f"{saved_names[n][k]}, this model {fresh[k][0]} {fresh[k][1]})")
+            continue
+        by_shape: Dict[tuple, list] = {}
+        for name, shape in fresh:
+            by_shape.setdefault(shape, []).append(name)
+        shared = [name for same in by_shape.values() if len(same) > 1 for name in same]
+        if shared:
+            shown = ", ".join(shared[:4]) + (f" and {len(shared) - 4} more" if len(shared) > 4 else "")
+            lines.append(f"group {n}: the saved optimizer records no parameter names "
+                         f"({OPTIMIZER_NAMES_KEY!r}), and {len(shared)} of this model's {len(fresh)} "
+                         f"tensors share a shape with another ({shown}), so which saved moment "
+                         f"belongs to which of them cannot be checked")
+    return lines
+
+
+def _check_layout(lit: "LitModule", optimizer_state: Mapping[str, Any], where: str,
+                  saved_names: Optional[Sequence[Sequence[str]]] = None) -> None:
     """Raise :class:`OptimizerLayoutMismatch` when ``optimizer_state`` does not fit ``lit``'s groups."""
     names = {id(p): n for n, p in lit.model.named_parameters()}
-    refusal = _optimizer_layout_refusal(lit.parameter_groups(), optimizer_state, names, where)
+    refusal = _optimizer_layout_refusal(lit.parameter_groups(), optimizer_state, names, where,
+                                        saved_names)
     if refusal is not None:
         raise OptimizerLayoutMismatch(refusal)
 
@@ -379,7 +435,8 @@ def check_optimizer_resumable(system: System, init_from: Checkpoint,
     saved = _load_weights_into(model, init_from, system.paths.raw, system, path=path)
     optimizer_state, _ = _optimizer_state_of(saved, init_from)
     lit = _MultiSourceDriver(model, model._cache, cfg)
-    _check_layout(lit, optimizer_state, str(path or init_from.path or "the published checkpoint"))
+    _check_layout(lit, optimizer_state, str(path or init_from.path or "the published checkpoint"),
+                  _saved_param_names(saved, optimizer_state))
 
 
 def _tables_on(tables, device):
@@ -445,9 +502,15 @@ class _MultiSourceDriver(LitModule):
         return total, parts
 
     def on_save_checkpoint(self, checkpoint) -> None:
-        """Stamp the schema tag :func:`_load_weights_into` branches on, beside the base class's model state."""
+        """Stamp the schema tag :func:`_load_weights_into` branches on, beside the base class's model state,
+        and the name of the parameter at each optimizer position (:data:`OPTIMIZER_NAMES_KEY`), which a
+        resume checks the order against."""
         super().on_save_checkpoint(checkpoint)
         checkpoint["config_schema"] = NEW_CONFIG_SCHEMA_TAG
+        names = {id(p): n for n, p in self.model.named_parameters()}
+        optimizers = self.trainer.optimizers
+        groups = optimizers[0].param_groups if optimizers else self.parameter_groups()
+        checkpoint[OPTIMIZER_NAMES_KEY] = [[names[id(p)] for p in g["params"]] for g in groups]
 
     def training_step(self, batch, batch_idx):
         total, parts = self._drift_total(batch)
@@ -629,7 +692,8 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
         optimizer_state, scheduler_state = _optimizer_state_of(saved, init_from)
         # refused by name before the run directory exists: torch's own load would fail later
         # with a bare size error, or map moments onto the wrong tensors
-        _check_layout(lit, optimizer_state, str(init_path or init_from.path))
+        _check_layout(lit, optimizer_state, str(init_path or init_from.path),
+                      _saved_param_names(saved, optimizer_state))
         lit.resume_optimizer_from(optimizer_state, scheduler_state)
     run_dir.mkdir(parents=True, exist_ok=True)
     anchors = _anchors_from_system(system, anchors)

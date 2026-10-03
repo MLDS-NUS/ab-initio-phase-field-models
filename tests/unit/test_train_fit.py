@@ -776,6 +776,34 @@ def test_resume_optimizer_continues_the_saved_moments_and_rate(tmp_path):
     assert cold_md5 != warm_md5
 
 
+def test_a_saved_order_with_two_same_shaped_parameters_swapped_is_refused(tmp_path):
+    """A checkpoint written here records the parameter at each optimizer position; a resume compares
+    those names with this model's, so a swap that every shape survives is still refused."""
+    from aipf.train.fit import OPTIMIZER_NAMES_KEY, OptimizerLayoutMismatch
+
+    sysm, sources = _demo_system_with_modes(tmp_path)
+    first = fit(sysm, run_name="seed_run", sources=sources, steps=1, seed=0,
+                resume_optimizer=False, root=tmp_path / "data")
+    state = torch.load(first / "final.ckpt", map_location="cpu", weights_only=False)
+    recorded = state[OPTIMIZER_NAMES_KEY]
+    model_names = dict(state["model_state_dict"])
+    group = recorded[0]
+    shapes = [tuple(model_names[n].shape) for n in group]
+    i, j = next((i, j) for i in range(len(group)) for j in range(i + 1, len(group))
+                if shapes[i] == shapes[j])
+    group[i], group[j] = group[j], group[i]
+    swapped = tmp_path / "swapped.ckpt"
+    torch.save(state, swapped)
+    saved = Checkpoint(path=str(swapped.relative_to(tmp_path)),
+                       md5=hashlib.md5(swapped.read_bytes()).hexdigest())
+    with pytest.raises(OptimizerLayoutMismatch) as refused:
+        fit(sysm, run_name="resumed", sources=sources, steps=1, seed=0,
+            resume_optimizer=True, init_from=saved, root=tmp_path / "data")
+    text = str(refused.value)
+    assert f"first at position {i} (saved {group[i]}, this model {group[j]}" in text
+    assert not any(tmp_path.rglob("resumed"))
+
+
 def test_the_optimizer_builds_the_two_declared_decay_groups(tmp_path):
     """Two groups, base and heads, at the two declared decays.
 

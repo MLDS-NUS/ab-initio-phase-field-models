@@ -167,9 +167,13 @@ digest-checked, into the declared model. `--resume-optimizer no` builds the opti
 fresh, so the first steps sit in the linear warm-up. `--resume-optimizer yes` resumes the saved
 optimizer and schedule when its parameter groups fit this model's fresh optimizer tensor by tensor,
 and otherwise is refused by name (exit 2, `OptimizerLayoutMismatch` from `fit`) before the run
-directory exists. The published `lj` checkpoint is refused: the run that wrote it held the local
-net's linear skip `g_net.w2.weight` frozen, so its one group has 15 tensors against 16 here, in
-another order. Start from it with `no`. A fresh run is built
+directory exists. A saved optimizer lists positions, not names, so the order is checked against the
+parameter names a checkpoint written by `fit` records at each position (`optimizer_param_names`). A
+checkpoint that records none is refused when two tensors of one group share a shape, since their
+order cannot be checked. Every published checkpoint records none and is refused, so start from one
+with `no`. The published `lj` checkpoint differs in count as well: the run that wrote it held the
+local net's linear skip `g_net.w2.weight` frozen, so its one group has 15 tensors against 16 here.
+A fresh run is built
 under the model stream of `--seed`, and does not reproduce a published run's own initialisation.
 
 ## Devices and determinism
