@@ -47,7 +47,7 @@ WORDS: dict[str, str] = {
     "a plan item": r"\btask ?[A-Z]?\d|\bphase ?\d|spec ?§|\(spec\s*$|\(spec (?:section|global)|\bspec section|§"
                    r"|(?-i:\b[A-G]\d[a-z]\b)|\bitem ?C\d\d\b|\bspec ?sec|\bsec1\d\b",
     "a migration date": r"(?<!date-released: )\b2026-\d\d-\d\d\b",
-    "a decision record": r"\buser ruling\b",
+    "a decision record": r"\brulings?\b",
     "this machine": r"\bnscc\b|asp2a|e0945231|(?<![.@\w])nus\b(?!\.edu)|this host|11004368|\bpbs10\d|\bq2@",
     "an environment name": r"torchenv|lammps_env|apfm",
     "a run name": r"champion|\bwave ?\d|\bwave_|pre_wave|wave\d|w35d4s4|lg1_s2|gammamlp|freeu|p30m50"
@@ -189,6 +189,8 @@ def test_the_word_list_catches_what_it_names():
     assert "a plan item" not in names("(spec or {})") and "a plan item" not in names("d2f/dx2")
     assert "provenance prose" in names("ported from the old code") and "provenance prose" not in names("exported from it")
     assert "a migration date" in names("by the ruling of 2026-09-22")
+    assert "a decision record" in names("Spec ruling: an archive") and "a decision record" in names("two rulings")
+    assert "a decision record" not in names("the ruled surface") and "a decision record" not in names("overruling")
     assert "a migration date" not in names("date-released: 2026-10-01")
     assert "a run name" in names("wave20_gammaMLP_lg1_s2_seed2") and "a run name" not in names("wavevector")
     assert "a plan item" not in names("the phase diagram") and "a plan item" not in names("C1 potentials")

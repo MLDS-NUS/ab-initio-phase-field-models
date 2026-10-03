@@ -1,9 +1,8 @@
 """The anchor rules, pinned against the CODE rather than its documentation.
 
-Two independent figure sessions found that the sets the training code actually
-reads differ from the sets the documented cut rules imply, for both two-density
-systems. This file records which is which, so that "correcting" a value back to
-its documentation fails rather than passes.
+The sets the training code reads differ from the sets the documented cut rules
+imply, for both two-density systems. This file records which is which, so that
+"correcting" a value back to its documentation fails rather than passes.
 """
 from aipf.system import load
 

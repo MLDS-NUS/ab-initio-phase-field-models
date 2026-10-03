@@ -295,7 +295,7 @@ def test_a_composition_label_may_not_take_one_of_the_archives_own_keys(
 
 def test_the_archive_is_labelled_with_the_composition_it_was_given(tiny_dump,
                                                                    tmp_path):
-    """Spec ruling: an archive with no composition label is trainable by nothing.
+    """The archive carries the composition it was given: one with no label is trainable by nothing.
 
     Read back through the training reader's own declaration rather than by
     key name, which is the thing that has to keep working.
