@@ -170,8 +170,8 @@ and otherwise is refused by name (exit 2, `OptimizerLayoutMismatch` from `fit`) 
 directory exists. A saved optimizer lists positions, not names, so the order is checked against the
 parameter names a checkpoint written by `fit` records at each position (`optimizer_param_names`). A
 checkpoint that records none is refused when two tensors of one group share a shape, since their
-order cannot be checked. Every published checkpoint records none and is refused, so start from one
-with `no`. The published `lj` checkpoint differs in count as well: the run that wrote it held the
+order cannot be checked. So `yes` can only succeed on a checkpoint that `fit` wrote. Every published
+checkpoint records none and is refused, so start from one with `no`. The published `lj` checkpoint differs in count as well: the run that wrote it held the
 local net's linear skip `g_net.w2.weight` frozen, so its one group has 15 tensors against 16 here.
 A fresh run is built
 under the model stream of `--seed`, and does not reproduce a published run's own initialisation.

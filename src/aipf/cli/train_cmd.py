@@ -300,8 +300,9 @@ def run(args: argparse.Namespace) -> int:
     # "declared" -> None (the declaration answers); "none" -> NO_ANCHORS (drift-only)
     anchors = None if args.anchors == "declared" else NO_ANCHORS
 
-    # a saved optimizer whose parameter groups do not fit this model's (the published lj
-    # checkpoint's does not) is refused by fit, by name, before the run directory exists
+    # a saved optimizer whose parameter groups do not fit this model's in count, shape or
+    # recorded order is refused by fit, by name, before the run directory exists; every
+    # published checkpoint is refused this way (they record no parameter names)
     from aipf.train.fit import OptimizerLayoutMismatch
     try:
         run_dir = fit(system, run_name=args.run_name, sources=sources,
