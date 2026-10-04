@@ -171,8 +171,7 @@ aipf.toml.example  the template of the local, untracked aipf.toml
 Working and tested today: the three published models, the quick start, every paper figure and the
 MD-to-model chain on the Lennard-Jones mixture. Still being completed:
 
-- the Fe-B retraining recipe: a full retraining runs, and its comparison with the published model is
-  being added to the workflow guide;
+- the Fe-B retraining recipe is being validated;
 - the documentation, in places;
 - the DOI of the raw MD archive, once it exists.
 

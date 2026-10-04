@@ -404,34 +404,17 @@ $WORK/feb-data/feb/ckpt/retrain/job.pbs
 ```
 
 Without `--pbs` the same command trains in this process. With `--pbs --dry-run` it writes the job
-file and submits nothing. What the run did:
-
-- Loading the 356 runs took about 7 minutes and about 72 GB of host memory, so the job needs
-  `pbs_mem` of 80 GB or more (this one asked for 110 GB and 16 cores).
-- One step trains one batch of 6 windows from each source; the largest source sets the epoch at 216
-  steps, so 60 epochs are 12960 steps. At about 0.7 s per step on one A100 the run took 2 h 37 min
-  to `final.ckpt`.
-- It trained `L_dyn`, `L_M`, `L_S`, `L_bulk`, `L_P` and the kernel hinge `L_W` (the declared
-  `lambda_wpsd = 0.3`, whose shape `MANIFEST.json` records under `kernel_hinge` beside the six
-  terms of `terms_trained`) on 288 mobility rows, 286 structure-factor rows, 286 bulk rows and 442
-  pressure rows. The total loss went from 30.5 at step 0, most of it the hinge, to 12.0 at step 100
-  and 0.079 at the last step, with no non-finite value. The bulk term spikes in the second epoch
-  (one step reaches 2.8e5 before weighting) and is back below 0.3 in the third. The hinge falls
-  below 1e-3 in the third epoch and ends at 1.4e-3. The mean over the last epoch, 0.080, is the
-  published run's own final value: with the hinge, the two runs sum the same terms with the same
-  weights.
-
-The hinge is what makes the miscibility gap. It holds the kernel's k = 0 eigenvalues near -18
-(-17.8 and -17.6 here, -17.5 and -17.4 in the published model). A run without it fits every other
-term better, but its k = 0 kernel turns repulsive and the model comes out stable at every
-composition and temperature, with no T_c.
+file and submits nothing. Loading the 356 runs needs about 72 GB of host memory, so the job needs
+`pbs_mem` of 80 GB or more. One step trains one batch of 6 windows from each source; the largest
+source sets the epoch at 216 steps, so 60 epochs are 12960 steps, about two to three hours on one
+A100. The run trains `L_dyn`, `L_M`, `L_S`, `L_bulk`, `L_P` and the kernel hinge `L_W` (the declared
+`lambda_wpsd`), and `MANIFEST.json` lists them under `terms_trained`. The hinge is part of the recipe,
+not an optional regulariser: it is what keeps the k = 0 kernel attractive (see `docs/reference/training.md`).
 
 A retraining is not the published run bit for bit. A fresh run starts from the initialisation
-`--seed` gives and draws its batches in its own order, not the published run's. Two differences
-from the published recipe remain: the published run started the mobility head's last layer with
-its bias at the median of the measured mobility table and its weights scaled by 0.1, where this
-driver uses the default initialisation, and the comparison below rests on one seed. Expect the retrained model
-to agree with the published one within the spread of a training run, not to reproduce it.
+`--seed` gives and draws its batches in its own order, so its phase diagram agrees with the
+published one within the spread of a training run rather than reproducing it. Diagnose it with the
+same two stages as the published model:
 
 ```text
 $ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
@@ -439,31 +422,6 @@ $ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
 $ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
     --stage phase_diagram --T-grid 1200,2600,50 --pressure 0 --pressure 5 --pressure 10
 ```
-
-For a run with `--seed 4`, the retrained model against the published one (retrained / published):
-
-| | 0 GPa | 5 GPa | 10 GPa |
-|---|---|---|---|
-| T_c on the 50 K binodal grid (K) | 2000 / 2000 | 1950 / 2050 | 1900 / 2000 |
-| T_c from the apex fit (K) | refused / 2026 | 1968 / 2042 | 1918 / 2011 |
-| highest T with Gamma < 0 on the 25 K map (K) | 2025 / 2025 | 1975 / 2050 | 1925 / 2025 |
-| B-rich binodal branch, mean absolute difference in x_B | 0.028 | 0.028 | 0.029 |
-| Gamma map correlation, whole map / above 2100 K | 0.985 / 0.989 | 0.986 / 0.988 | 0.985 / 0.986 |
-
-The retrained critical temperature is the published one at 0 GPa and 100 K lower at 5 and 10 GPa on
-the binodal grid (74 and 93 K lower by the apex fit). At 0 GPa the apex fit is refused and
-`summary.csv` reports `T_c_fit_K` as `nan`: only three tie lines fall in the narrow tail of the
-dome, and the fit needs four (a straight fit through those three gives about 2040 K). Training the
-published recipe at six seeds, the published model among them, put the grid T_c between 1950 and
-2100 K, so this run lies inside that spread at 0 and 5 GPa and one grid step below it at 10 GPa.
-
-Above 2100 K, where both models are stable, the two Gamma maps differ by at most 0.6. Inside the
-dome the retrained Gamma reaches lower (minimum -3.0 / -2.8 / -2.6 at 0 / 5 / 10 GPa, against
--3.0 / -2.5 / -2.1) and its unstable region is smaller (8 to 11 % of the map, against 10 to 12 %).
-The binodal's B-rich branch agrees to about 0.03 in x_B at the temperatures where both models have
-one, and the retrained branch is narrower at low temperature (x_B 0.38 against 0.43 at 1200 K and
-0 GPa). The Fe-rich branch of both models sits at x_B = 0.05, the low end of the composition grid
-the diagnosis declares, so the diagnosis does not resolve it.
 
 The same two stages with `--ckpt published` diagnose the published model; the `stability_map` stage
 reproduces the published Fe-B Gamma map in about 10 minutes on one CPU thread.
