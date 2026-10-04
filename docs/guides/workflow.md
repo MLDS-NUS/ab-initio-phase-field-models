@@ -411,10 +411,9 @@ A100. The run trains `L_dyn`, `L_M`, `L_S`, `L_bulk`, `L_P` and the kernel hinge
 `lambda_wpsd`), and `MANIFEST.json` lists them under `terms_trained`. The hinge is part of the recipe,
 not an optional regulariser: it is what keeps the k = 0 kernel attractive (see `docs/reference/training.md`).
 
-A retraining is not the published run bit for bit. A fresh run starts from the initialisation
-`--seed` gives and draws its batches in its own order, so its phase diagram agrees with the
-published one within the spread of a training run rather than reproducing it. Diagnose it with the
-same two stages as the published model:
+A fresh run starts from the initialisation `--seed` gives and draws its batches in its own order,
+so it does not reproduce the published run bit for bit. Diagnose it with the same two stages as the
+published model:
 
 ```text
 $ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
