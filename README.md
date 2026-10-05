@@ -105,9 +105,10 @@ aipf train --system hhe --source sample --anchors declared --resume-optimizer no
 aipf train --system lj  --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
 ```
 
-Each trains every loss term its system declares, on a CPU in minutes, and writes
+Each trains every loss term its system declares (add `--device cpu` to stay off a GPU), in
+under a minute, and writes
 `data/<system>/ckpt/sample/final.ckpt`, which `aipf diagnose --ckpt` reads. The sample is there to
-exercise the pipeline, not to reproduce the published models: it holds one training window of a
+exercise the pipeline, not to reproduce the published models: it holds a window or two of a
 few runs, so a model trained on it carries no physics. See
 [docs/guides/workflow.md](docs/guides/workflow.md#7-training-on-the-bundled-sample).
 

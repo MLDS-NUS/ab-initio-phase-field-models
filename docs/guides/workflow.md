@@ -331,8 +331,8 @@ models were trained on are not part of the repository. So that the training step
 from a clean checkout, each system carries a small sample under `data/<system>/sample/`, a few
 megabytes in all:
 
-- a few mode runs (one per declared source for `feb` and `hhe`, one per temperature at four
-  temperatures for `lj`), each cut to its first training window and to the modes with
+- a few mode runs (one per declared source for `feb`; one cube per pressure and one slab for
+  `hhe`; one per temperature at four temperatures for `lj`), each cut to its first training window and to the modes with
   max |n_i| <= 2. The `lj` runs keep the four windows that fill one batch, since its declared loader
   drops a partial batch;
 - the anchor and equation-of-state tables the system's training declaration reads, at the same
@@ -359,7 +359,7 @@ aipf diagnose --system lj  --ckpt data/lj/ckpt/sample/final.ckpt  --stage one_fi
 ```
 
 The sample is there so that the pipeline can be exercised from end to end. It is not a smaller
-copy of the training data. A model trained on it has seen one window of a few runs in a narrow
+copy of the training data. A model trained on it has seen a window or two of a few runs in a narrow
 band of modes, so it carries no physics: its phase diagram, its gradient-energy matrix and its
 mobility mean nothing, and no number it gives should be compared with the published models.
 Training those again needs the raw MD archive, available from the authors on request. Section 8
@@ -396,14 +396,13 @@ in process: lammps.lammps(cmdargs=['-screen', 'none', '-log', 'log.lammps', '-k'
 ok
 ```
 
-It took 9 min 48 s, about 0.19 s per step. The directory holds `in.lammps`, `log.lammps`,
+It takes about ten minutes on one GPU. The directory holds `in.lammps`, `log.lammps`,
 `run.json`, `traj.dump` (21 frames: step 0 of production and one every 100 steps), `thermo_prod.txt`
 (the production averages of temperature, pressure, volume and energy) and `final.data`. Keep the farm
 (`AIPF_DATA`) outside the raw root: links inside it would be indexed again by the next build.
 
 The same command with `--pbs --walltime-h 0.5` writes `job.pbs` into the run directory, submits it
-and prints the job file and the job id; the job ran in about 10 minutes and wrote the same
-`in.lammps` byte for byte. A job whose GPU is shared with another process can fail to allocate
+and prints the job file and the job id; the job writes the same `in.lammps` byte for byte. A job whose GPU is shared with another process can fail to allocate
 device memory (`Kokkos ERROR: Cuda memory space failed to allocate`, in `job.log`); a resubmission
 is the remedy.
 
