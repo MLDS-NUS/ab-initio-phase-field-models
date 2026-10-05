@@ -18,9 +18,9 @@ images, are read as bytes and matched against :data:`BYTE_WORDS`. A zip archive 
 is invisible in the raw bytes, and every string or object array in an ``.npy`` member (or file) is
 matched as text, since numpy stores a ``str`` array as UTF-32, which no byte pattern meets. Without a
 git index (an archive, a downloaded zip) the walk keeps to what git would track: under ``data/``
-only the published checkpoints, never what the quick start writes beside them. A checkpoint's pickle record is matched against
-:data:`PICKLE_WORDS` as well, which adds the short words that compressed bytes could produce by
-chance but a pickle of settings cannot.
+only the published checkpoints and the training sample, never what the quick start writes beside
+them. A checkpoint's pickle record is matched against :data:`PICKLE_WORDS` as well, which adds the
+short words that compressed bytes could produce by chance but a pickle of settings cannot.
 """
 from __future__ import annotations
 
@@ -215,10 +215,11 @@ def test_no_tracked_file_names_where_the_code_came_from():
 
 
 def _tracked_by_layout(rel: str) -> bool:
-    """Without a git index: under ``data/`` only ``data/<system>/ckpt/published/**`` is tracked (see
-    ``.gitignore``); the rest of the farm, ``diagnose/`` runs included, is the user's own output."""
+    """Without a git index: under ``data/`` only ``data/<system>/ckpt/published/**`` and the training
+    sample ``data/<system>/sample/**`` are tracked (see ``.gitignore``); the rest of the farm,
+    ``diagnose/`` runs included, is the user's own output."""
     parts = Path(rel).parts
-    return parts[0] != "data" or parts[2:4] == ("ckpt", "published")
+    return parts[0] != "data" or parts[2:4] == ("ckpt", "published") or parts[2:3] == ("sample",)
 
 
 def _byte_scanned() -> list[Path]:

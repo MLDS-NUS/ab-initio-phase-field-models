@@ -7,14 +7,16 @@ dist/
 # The symlink farm at the repository root, rebuilt from the manifest rather than
 # tracked. The leading slash is required: a bare "data/" matches at any depth and
 # would also exclude the package's own src/aipf/data/ module.
-# One exception: the published checkpoints are real files, tracked, at
-# data/<system>/ckpt/published/final.ckpt and .../published/<variant>/final.ckpt.
+# Two exceptions, both real files and tracked: the published checkpoints, at
+# data/<system>/ckpt/published/final.ckpt and .../published/<variant>/final.ckpt,
+# and the training sample of each system, everything under data/<system>/sample/.
 # Git cannot re-include a file below an ignored directory, so each level is
 # ignored by its contents (/data/*) and the directories on the way re-included.
 /data/*
 !/data/*/
 /data/*/*
 !/data/*/ckpt/
+!/data/*/sample/
 /data/*/ckpt/*
 !/data/*/ckpt/published/
 

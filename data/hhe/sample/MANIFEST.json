@@ -1,0 +1,205 @@
+{
+ "system": "hhe",
+ "purpose": "a sample that lets `aipf train --source sample` run from a clean checkout; a model trained on it carries no physics",
+ "rule": {
+  "frames": "the first 2 w + 1 + (windows - 1) stride frames of each run",
+  "half_width": 25,
+  "stride": 10,
+  "modes": "max |n_i| <= 2 and n_z >= 0"
+ },
+ "sources": {
+  "cube_200": {
+   "root": "modes/modes_200GPa",
+   "pattern": "cube_x0.05_T02000",
+   "grid": [
+    24,
+    24,
+    24
+   ]
+  },
+  "cube_400": {
+   "root": "modes/modes_400GPa",
+   "pattern": "cube_x0.05_T03000",
+   "grid": [
+    24,
+    24,
+    24
+   ]
+  },
+  "cube_600": {
+   "root": "modes/modes_600GPa",
+   "pattern": "cube_x0.05_T03000",
+   "grid": [
+    24,
+    24,
+    24
+   ]
+  },
+  "cube_800": {
+   "root": "modes/modes_800GPa",
+   "pattern": "cube_x0.05_T02000",
+   "grid": [
+    24,
+    24,
+    24
+   ]
+  },
+  "slab_800": {
+   "root": "modes/modes_800GPa",
+   "pattern": "slab_xl0.00_xr0.90_T02000",
+   "grid": [
+    16,
+    16,
+    64
+   ]
+  }
+ },
+ "files": [
+  {
+   "path": "modes/modes_200GPa/cube_x0.05_T02000/modes.npz",
+   "source": "cube_200",
+   "tag": "cube_x0.05_T02000",
+   "frames": 51,
+   "frames_in_source": 1501,
+   "modes": 75,
+   "modes_in_source": 2945,
+   "dropped_keys": [],
+   "windows": 1,
+   "bytes": 53966,
+   "md5": "8bc2d430a64ddda4cd36cec542056197"
+  },
+  {
+   "path": "modes/modes_400GPa/cube_x0.05_T03000/modes.npz",
+   "source": "cube_400",
+   "tag": "cube_x0.05_T03000",
+   "frames": 51,
+   "frames_in_source": 1501,
+   "modes": 75,
+   "modes_in_source": 2205,
+   "dropped_keys": [],
+   "windows": 1,
+   "bytes": 53974,
+   "md5": "89b9fcf572f87294caedfea244ce7083"
+  },
+  {
+   "path": "modes/modes_600GPa/cube_x0.05_T03000/modes.npz",
+   "source": "cube_600",
+   "tag": "cube_x0.05_T03000",
+   "frames": 51,
+   "frames_in_source": 1501,
+   "modes": 75,
+   "modes_in_source": 1863,
+   "dropped_keys": [],
+   "windows": 1,
+   "bytes": 54016,
+   "md5": "c797caf525e6425b35d5eae64a04e886"
+  },
+  {
+   "path": "modes/modes_800GPa/cube_x0.05_T02000/modes.npz",
+   "source": "cube_800",
+   "tag": "cube_x0.05_T02000",
+   "frames": 51,
+   "frames_in_source": 1501,
+   "modes": 75,
+   "modes_in_source": 1575,
+   "dropped_keys": [],
+   "windows": 1,
+   "bytes": 53800,
+   "md5": "710d90b6d2f9c6e3d3bc38b5c605e029"
+  },
+  {
+   "path": "modes/modes_800GPa/slab_xl0.00_xr0.90_T02000/modes.npz",
+   "source": "slab_800",
+   "tag": "slab_xl0.00_xr0.90_T02000",
+   "frames": 51,
+   "frames_in_source": 2001,
+   "modes": 75,
+   "modes_in_source": 2627,
+   "dropped_keys": [],
+   "windows": 1,
+   "bytes": 53460,
+   "md5": "0eed9f340a2f86b8651544d613e7cf4d"
+  },
+  {
+   "path": "fields/fdt_800GPa/M_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 24901,
+   "md5": "148a63d51bf893333c95bbf53f59562a"
+  },
+  {
+   "path": "fields/fdt_200GPa/M_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 16287,
+   "md5": "6b33a822d5c0088c10b94fb25619537e"
+  },
+  {
+   "path": "fields/fdt_400GPa/M_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 18018,
+   "md5": "4f53d28f6da4012fdf0e269c171110a9"
+  },
+  {
+   "path": "fields/fdt_600GPa/M_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 19789,
+   "md5": "de5d5876bd5c553ae9a669ce6fc80142"
+  },
+  {
+   "path": "fields/fdt_800GPa/S_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 362604,
+   "md5": "1c06b0dbdfbfed61d9f6e442197c0e17"
+  },
+  {
+   "path": "fields/fdt_200GPa/S_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 317600,
+   "md5": "2e377541597f6c271de712d04c2d3c2c"
+  },
+  {
+   "path": "fields/fdt_400GPa/S_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 296646,
+   "md5": "0f7cdcf9fbd61ccca1886ead4971be38"
+  },
+  {
+   "path": "fields/fdt_600GPa/S_table.npz",
+   "role": "table",
+   "dropped_keys": [],
+   "bytes": 296212,
+   "md5": "b663211675da22002e8a8a81715c4bdf"
+  },
+  {
+   "path": "eos_800GPa/eos_n_x_T.csv",
+   "role": "table",
+   "bytes": 6917,
+   "md5": "d800f3d58b82577a13d0abcab5a2d3f8"
+  },
+  {
+   "path": "eos_200GPa/eos_n_x_T.csv",
+   "role": "table",
+   "bytes": 6915,
+   "md5": "3eb6f15bcabac6cfbeb0d1ceb9c5007e"
+  },
+  {
+   "path": "eos_400GPa/eos_n_x_T.csv",
+   "role": "table",
+   "bytes": 6915,
+   "md5": "31a70eedac7370635f008dc67596693d"
+  },
+  {
+   "path": "eos_600GPa/eos_n_x_T.csv",
+   "role": "table",
+   "bytes": 6919,
+   "md5": "43285b768486a5089143ac3ccec14c02"
+  }
+ ],
+ "total_bytes": 1648939
+}

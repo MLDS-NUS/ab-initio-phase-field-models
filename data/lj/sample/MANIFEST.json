@@ -1,0 +1,76 @@
+{
+ "system": "lj",
+ "purpose": "a sample that lets `aipf train --source sample` run from a clean checkout; a model trained on it carries no physics",
+ "rule": {
+  "frames": "the first 2 w + 1 + (windows - 1) stride frames of each run",
+  "half_width": 25,
+  "stride": 20,
+  "modes": "max |n_i| <= 2 and n_z >= 0"
+ },
+ "sources": {
+  "slab": {
+   "root": "modes",
+   "pattern": "slab_overdamped_*",
+   "grid": [
+    20,
+    20,
+    80
+   ]
+  }
+ },
+ "files": [
+  {
+   "path": "modes/slab_overdamped_MD_xA_0.50_T_1.10_seed_42/modes.npz",
+   "source": "slab",
+   "tag": "slab_overdamped_MD_xA_0.50_T_1.10_seed_42",
+   "frames": 111,
+   "frames_in_source": 20001,
+   "modes": 75,
+   "modes_in_source": 1617,
+   "dropped_keys": [],
+   "windows": 4,
+   "bytes": 55997,
+   "md5": "557589548959c6e78a87857eaa6df729"
+  },
+  {
+   "path": "modes/slab_overdamped_MD_xA_0.50_T_1.30_seed_42/modes.npz",
+   "source": "slab",
+   "tag": "slab_overdamped_MD_xA_0.50_T_1.30_seed_42",
+   "frames": 111,
+   "frames_in_source": 20001,
+   "modes": 75,
+   "modes_in_source": 1617,
+   "dropped_keys": [],
+   "windows": 4,
+   "bytes": 56076,
+   "md5": "7ef2164f095bc53a477233786286cb8b"
+  },
+  {
+   "path": "modes/slab_overdamped_MD_xA_0.50_T_1.50_seed_42/modes.npz",
+   "source": "slab",
+   "tag": "slab_overdamped_MD_xA_0.50_T_1.50_seed_42",
+   "frames": 111,
+   "frames_in_source": 20001,
+   "modes": 75,
+   "modes_in_source": 1617,
+   "dropped_keys": [],
+   "windows": 4,
+   "bytes": 56035,
+   "md5": "2af2df1fcc116edeae41e893f51b5c00"
+  },
+  {
+   "path": "modes/slab_overdamped_MD_xA_0.50_T_1.70_seed_42/modes.npz",
+   "source": "slab",
+   "tag": "slab_overdamped_MD_xA_0.50_T_1.70_seed_42",
+   "frames": 111,
+   "frames_in_source": 20001,
+   "modes": 75,
+   "modes_in_source": 1617,
+   "dropped_keys": [],
+   "windows": 4,
+   "bytes": 56067,
+   "md5": "a2027947237594150b7c4a1abed8bfaf"
+  }
+ ],
+ "total_bytes": 224175
+}

@@ -103,6 +103,7 @@ def test_each_tracked_file_is_in_git_and_not_ignored(name, variant):
 @pytest.mark.parametrize("rel", [
     "data/hhe/manifest.json", "data/hhe/md/x", "data/lj/modes", "data/tools/x", "data/x.txt",
     "data/hhe/ckpt/smoke/final.ckpt", "data/feb/ckpt/some_run/MANIFEST.json",
+    "data/lj/ckpt/sample/final.ckpt", "data/feb/samples/x",
 ])
 def test_the_rest_of_the_data_farm_stays_ignored(rel):
     if not _in_git():
@@ -110,13 +111,26 @@ def test_the_rest_of_the_data_farm_stays_ignored(rel):
     assert _ignored(rel), f"{rel} is not ignored"
 
 
-def test_the_only_tracked_files_under_data_are_the_published_checkpoints():
+def _sample_files() -> set:
+    """The training sample's files as its manifests list them, the manifests included."""
+    import json
+    found = set()
+    for manifest in (REPO / "data").glob("*/sample/MANIFEST.json"):
+        base = manifest.parent.relative_to(REPO)
+        found.add(str(base / manifest.name))
+        found.update(str(base / e["path"]) for e in json.loads(manifest.read_text())["files"])
+    return found
+
+
+def test_the_only_tracked_files_under_data_are_the_published_checkpoints_and_the_sample():
     if not _in_git():
         pytest.skip("not a git checkout")
     listed = subprocess.run(["git", "-C", str(REPO), "ls-files", "data"],
                             capture_output=True, text=True, check=True).stdout.split()
-    # a checkout may leave the checkpoints out; it may not track anything else under data/
-    assert set(listed) <= set(TRACKED.values()), sorted(set(listed) - set(TRACKED.values()))
+    # a checkout may leave the checkpoints out; beside them it tracks only the files the training
+    # sample's manifests list
+    allowed = set(TRACKED.values()) | _sample_files()
+    assert set(listed) <= allowed, sorted(set(listed) - allowed)
 
 
 def test_no_tracked_path_names_a_run():
