@@ -228,9 +228,11 @@ def test_hhe_every_declaration_is_pinned():
         "eos_trees": ("eos_800GPa", "eos_200GPa", "eos_400GPa",
                       "eos_600GPa"),
     }
-    # The rollout, column and md blocks are pinned on their own below.
+    # The rollout, column and md blocks are pinned on their own below; the training sample's rows
+    # against its manifest in test_sample_dataset.py.
     assert s.defaults["md"] == {"potential": {"md5": "2ed3c8297221761a915e212408e803b4"}}
-    assert {k: v for k, v in s.defaults.items()
+    assert {k: ({kk: vv for kk, vv in v.items() if kk != "sample"} if k == "training" else v)
+            for k, v in s.defaults.items()
             if k not in ("rollout", "column", "md")} == {
         "sigma": 2.0, "k_cut": 3.0, "mode_fields": "per_type", "k_max": None,
         "k_fit_stat": 1.5, "R_cut": 4.5, "rung": 3, "f_form": "mlp", "kernel_form": "radial_mlp",
@@ -488,7 +490,9 @@ def test_feb_every_declaration_is_pinned():
         "noneq_10": ("modes_10GPa_v2", "cube_*", (32, 32, 32), 138),
         "stable_10": ("modes_10GPa_v2", "cube_*", (32, 32, 32), 52)}
     assert list(sources) == list(s.defaults["source_loss_weights"])
-    assert {k: ({kk: vv for kk, vv in v.items() if kk != "sources"} if k == "training" else v)
+    # the training sample's rows are pinned against its manifest in test_sample_dataset.py
+    assert {k: ({kk: vv for kk, vv in v.items() if kk not in ("sources", "sample")}
+                if k == "training" else v)
             for k, v in s.defaults.items() if k != "md"} == {
         "rung": 3, "sigma": 2.0, "k_cut": 3.0, "mode_fields": "per_type",
         "k_max": 2.0,
@@ -665,7 +669,8 @@ def test_lj_every_declaration_is_pinned():
     assert ("/" + tables["m_table"]).endswith("/FDT_M/results/M_meso_homogeneous.npz")
     assert ("/" + tables["s_table"]).endswith(
         "/Tc_structure_factor/results/Scc_reciprocal_from_md.npz")
-    training = {k: v for k, v in s.defaults["training"].items() if k != "tables"}
+    # the training sample's rows are pinned against its manifest in test_sample_dataset.py
+    training = {k: v for k, v in s.defaults["training"].items() if k not in ("tables", "sample")}
     assert {k: v for k, v in tables.items() if k not in ("m_table", "s_table")} == {
         "key": "temperature", "state": (0.5,), "rho_total": 1.0,
         "w0": {"route": "radial", "r_max": 3.0, "n_points": 1000},

@@ -56,6 +56,11 @@ _TRAINING = {
     # the tier `aipf modes` writes (index.modes_dir)
     "source_root": {"tier": "farm", "path": "modes"},
     "modes_root": "Data/slab_overdamped/modes",  # under the raw root
+    # the bundled sample, data/lj/sample: four runs, one per temperature, each cut to the four
+    # windows that fill one batch (drop_last drops a partial one) and to the modes with max |n_i| <= 2.
+    # `aipf train --source sample` trains on it with no raw root; it runs the pipeline and carries no
+    # physics. The root is relative to data/lj/sample.
+    "sample": {"slab": {"root": "modes", "pattern": "slab_overdamped_*", "grid": (20, 20, 80)}},
     "train_temperatures": (1.10, 1.15, 1.25, 1.30, 1.35, 1.40,
                            1.45, 1.50, 1.60, 1.70),
     "val_seeds": (45,),

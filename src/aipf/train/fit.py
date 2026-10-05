@@ -37,7 +37,8 @@ from .lit_module import LitModule, seeded_rng
 from .penalties import PENALTY_TERMS, penalties_from_system
 
 __all__ = ["DEVICES", "DeviceUnavailable", "OptimizerLayoutMismatch", "ReservedRunName",
-           "check_optimizer_resumable", "fit", "pre_run_checks", "resolve_device"]
+           "check_optimizer_resumable", "fit", "pre_run_checks", "resolve_device",
+           "sample_system"]
 
 #: Where a run trains: ``auto`` is ``cuda`` when torch sees one, else ``cpu``.
 DEVICES = ("auto", "cpu", "cuda")
@@ -257,6 +258,36 @@ def declared_source_table(system: System) -> Tuple[Tuple[str, str, str, Tuple[in
                      tuple(int(g) for g in entry["grid"]),
                      tuple(str(t) for t in entry.get("exclude_tags", ()))))
     return tuple(rows)
+
+
+#: The ``defaults["training"]`` entry naming the bundled sample's sources: ``{name: {"root", "pattern",
+#: "grid"}}`` as ``sources``, each root relative to ``data/<system>/sample`` (:func:`aipf.paths.sample_dir`).
+SAMPLE_KEY = "sample"
+
+
+def sample_system(system: System) -> System:
+    """``system`` as it trains on its bundled sample (``aipf train --source sample``).
+
+    The raw root becomes ``data/<system>/sample`` (:class:`aipf.paths.SamplePaths`), the source root that
+    directory, and the declared sources the sample's ``defaults["training"]["sample"]`` rows; every other
+    declaration, the anchors and penalties included, is the system's own, read from the sample where the
+    declaration reads the raw root. A refusal names the missing declaration or directory."""
+    from aipf.paths import SamplePaths
+    training = _training(system)
+    declared = training.get(SAMPLE_KEY)
+    if not declared:
+        raise KeyError(
+            f"system {system.name!r} declares no defaults[{_TRAINING_KEY!r}][{SAMPLE_KEY!r}]: "
+            f"it bundles no training sample")
+    paths = SamplePaths(system.name)
+    if not paths.raw().is_dir():
+        raise FileNotFoundError(
+            f"system {system.name!r} declares a training sample and its directory "
+            f"{paths.raw()} is missing")
+    sampled = {**training, "source_root": {"tier": "raw", "path": "."},
+               "sources": {name: dict(row) for name, row in declared.items()}}
+    return dataclasses.replace(system, paths=paths,
+                               defaults={**system.defaults, _TRAINING_KEY: sampled})
 
 
 def _specs_from(system: System,

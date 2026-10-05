@@ -16,6 +16,13 @@ SOURCE_SPELLING = "NAME=SUBDIR:PATTERN:GX,GY,GZ"
 #: ``--source declared``: the system's own ``defaults["training"]["sources"]``, exclusions included.
 DECLARED = "declared"
 
+#: ``--source sample``: the system's bundled sample, ``data/<system>/sample``, whose sources are
+#: ``defaults["training"]["sample"]``; no raw root is read.
+SAMPLE = "sample"
+
+#: The ``--source`` keywords that name a whole set and stand alone.
+_KEYWORDS = (DECLARED, SAMPLE)
+
 #: A field grid is three lengths. A source that gives fewer has not said
 #: what shape its fields are.
 _GRID_RANK = 3
@@ -23,9 +30,9 @@ _GRID_RANK = 3
 
 def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
     """One ``--source`` argument as the ``(name, subdir, pattern, grid)`` row
-    ``aipf.train.fit._specs_from`` takes, or :data:`DECLARED`."""
-    if text == DECLARED:
-        return DECLARED
+    ``aipf.train.fit._specs_from`` takes, or :data:`DECLARED` or :data:`SAMPLE`."""
+    if text in _KEYWORDS:
+        return text
     name, sep, rest = text.partition("=")
     parts = rest.split(":")
     if not sep or not name or len(parts) != 3:
@@ -82,7 +89,11 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                         "once; SUBDIR is relative to the system's declared "
                         "source root. Its loss weight is the system's declared one. "
                         "`--source declared` alone trains on the system's declared "
-                        "sources (defaults['training']['sources'])")
+                        "sources (defaults['training']['sources']). `--source sample` "
+                        "alone trains on the small sample bundled in the repository, "
+                        "data/<system>/sample (defaults['training']['sample']), and reads "
+                        "no raw data root: it exercises the pipeline and gives a model "
+                        "with no physics in it")
     p.add_argument(f"--init-from-{PUBLISHED_DIRNAME}", dest="init_from_published",
                    action="store_true",
                    help="start from the weights of the checkpoint this "
@@ -145,19 +156,34 @@ def unmatched_sources(system, table) -> list:
 
 
 def _source_table(system, given) -> Optional[Sequence[Tuple]]:
-    """The ``--source`` rows as given, or the system's declared ones for ``--source declared``;
-    ``None`` after printing a refusal."""
-    if DECLARED not in given:
+    """The ``--source`` rows as given, or the system's declared ones for ``--source declared`` (and for
+    ``--source sample``, on the system :func:`_on_sample` returned); ``None`` after printing a refusal."""
+    keyword = next((g for g in given if g in _KEYWORDS), None)
+    if keyword is None:
         return tuple(given)
     if len(given) > 1:
-        print(f"--source {DECLARED} stands alone: it names the system's whole declared set, "
+        print(f"--source {keyword} stands alone: it names the system's whole "
+              f"{'declared set' if keyword == DECLARED else 'bundled sample'}, "
               f"so it cannot be combined with another --source", file=sys.stderr)
         return None
     from aipf.train.fit import declared_source_table
     try:
         return declared_source_table(system)
     except (KeyError, ValueError) as refused:
-        print(f"--source {DECLARED}: {refused.args[0]}", file=sys.stderr)
+        print(f"--source {keyword}: {refused.args[0]}", file=sys.stderr)
+        return None
+
+
+def _on_sample(system, given):
+    """``system`` itself, or under ``--source sample`` the system as it trains on its bundled sample
+    (:func:`aipf.train.fit.sample_system`); ``None`` after printing a refusal."""
+    if SAMPLE not in given:
+        return system
+    from aipf.train.fit import sample_system
+    try:
+        return sample_system(system)
+    except (KeyError, FileNotFoundError) as refused:
+        print(f"--source {SAMPLE}: {refused.args[0]}", file=sys.stderr)
         return None
 
 
@@ -178,8 +204,8 @@ def _job_command(args: argparse.Namespace) -> list:
     command += (["--steps", str(args.steps)] if args.steps is not None
                 else ["--epochs", str(args.epochs)])
     for row in args.source:
-        if row == DECLARED:
-            command += ["--source", DECLARED]
+        if row in _KEYWORDS:
+            command += ["--source", row]
             continue
         name, subdir, pattern, grid = row
         command += ["--source", f"{name}={subdir}:{pattern}:{','.join(str(g) for g in grid)}"]
@@ -205,7 +231,8 @@ def _submit(args: argparse.Namespace, system) -> int:
     spec = PbsSpec.from_site(Site.load(), walltime_h=args.walltime_h)
     env = {"AIPF_DATA": str(paths.data_root())}
     try:
-        env[paths.raw_env_name(system.name)] = str(system.paths.raw())
+        if not isinstance(system.paths, paths.SamplePaths):  # the sample is found in the checkout
+            env[paths.raw_env_name(system.name)] = str(system.paths.raw())
     except paths.MissingLocation:
         pass                                      # the job refuses the same way, naming it
     workdir = index.ckpt_dir(system) / args.run_name
@@ -227,6 +254,9 @@ def _submit(args: argparse.Namespace, system) -> int:
 
 def run(args: argparse.Namespace) -> int:
     system = variant.load_system(args)
+    if system is None:
+        return 2
+    system = _on_sample(system, args.source)
     if system is None:
         return 2
     if (args.walltime_h is not None or args.dry_run) and not args.pbs:

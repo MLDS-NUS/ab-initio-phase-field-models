@@ -15,7 +15,7 @@ experiment folders     ``AIPF_EXPERIMENTS``      ``[paths] experiments``      ``
 
 Every environment variable, ``AIPF_RAW`` included, wins over every ``aipf.toml`` entry. The raw root (a system's
 MD archives) is only read; the farm ``<data>/<system>/{md,modes,ckpt,diagnose}`` is written; the published
-checkpoints are tracked files ``AIPF_DATA`` does not move. Site facts resolve the same way in :mod:`aipf.site`."""
+checkpoints and the training sample ``data/<system>/sample`` are tracked files ``AIPF_DATA`` does not move. Site facts resolve the same way in :mod:`aipf.site`."""
 from __future__ import annotations
 
 import functools
@@ -189,6 +189,16 @@ def published_checkpoint(system: str, variant: str | None = None) -> Path:
     return (base / variant if variant else base) / TRACKED_FILE_NAME
 
 
+#: The directory of a system's bundled training sample, beside ``ckpt/`` under ``data/<system>/``.
+SAMPLE_DIRNAME = "sample"
+
+
+def sample_dir(system: str) -> Path:
+    """A system's bundled training sample, tracked at ``data/<system>/sample`` in the checkout; like the
+    published checkpoints, ``AIPF_DATA`` does not move it. ``aipf train --source sample`` reads it."""
+    return repo_root() / _DATA_DIRNAME / system / SAMPLE_DIRNAME
+
+
 #: The subdirectory of a system's experiment folder that holds its tracked measured tables.
 TABLES_DIRNAME = "anchors"
 
@@ -247,6 +257,22 @@ class Paths:
         """The published checkpoints tracked in the checkout's data directory; ``AIPF_DATA`` never moves them."""
         return published_dir(self.system)
 
+    def sample(self) -> Path:
+        """The bundled training sample tracked in the checkout's data directory (:func:`sample_dir`)."""
+        return sample_dir(self.system)
+
     def sub(self, *parts: str) -> Path:
         """A path under the raw root."""
         return self.raw().joinpath(*parts)
+
+
+@dataclass(frozen=True)
+class SamplePaths(Paths):
+    """A system's locations with its raw root replaced by its bundled training sample (:func:`sample_dir`).
+
+    The sample holds every file the declared training reads from the raw root, at the same relative path
+    (the mode runs under ``modes/``), so a training run that reads through this object needs no raw root."""
+
+    def raw(self) -> Path:
+        """The bundled sample, whatever the environment or ``aipf.toml`` declares as the raw root."""
+        return sample_dir(self.system)

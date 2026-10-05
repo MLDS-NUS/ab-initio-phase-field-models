@@ -319,6 +319,24 @@ SYSTEM = System(
             "source_root": {"tier": "raw", "path": "fields"},  # <raw>/fields/...
             # the published training partition: per source, its tree, glob, grid and excluded runs
             "sources": json.loads((Path(__file__).parent / "training_sources.json").read_text()),
+            # the bundled sample, data/feb/sample: one run per source, cut to one training window
+            # and the modes with max |n_i| <= 2, beside the tables the anchors read. `aipf train --source
+            # sample` trains on it with no raw root; it runs the pipeline and carries no physics.
+            # Roots are relative to data/feb/sample.
+            "sample": {
+                "noneq_0": {"root": "modes/modes_0GPa_v2", "pattern": "cube_x0.75_T1400_s1",
+                            "grid": (32, 32, 32)},
+                "stable_0": {"root": "modes/modes_0GPa_v2", "pattern": "cube_x0.10_T1400_s1",
+                             "grid": (32, 32, 32)},
+                "noneq_5": {"root": "modes/modes_5GPa_v2", "pattern": "cube_x0.80_T1400_s1",
+                            "grid": (32, 32, 32)},
+                "stable_5": {"root": "modes/modes_5GPa_v2", "pattern": "cube_x0.10_T1400_s1",
+                             "grid": (32, 32, 32)},
+                "noneq_10": {"root": "modes/modes_10GPa_v2", "pattern": "cube_x0.85_T1500_s1",
+                             "grid": (32, 32, 32)},
+                "stable_10": {"root": "modes/modes_10GPa_v2", "pattern": "cube_x0.10_T1400_s1",
+                             "grid": (32, 32, 32)},
+            },
             "half_width": 100,  # frames
             "n_states": 5,
             "stride": 40,

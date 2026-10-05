@@ -259,6 +259,22 @@ SYSTEM = System(
         # -- aipf.train.fit's own vocabulary for the loader and the anchors
         "training": {
             "source_root": {"tier": "raw", "path": "fields"},  # <raw>/fields/...
+            # the bundled sample, data/hhe/sample: one run per source, cut to one training window
+            # and the modes with max |n_i| <= 2, beside the tables the anchors read. `aipf train --source
+            # sample` trains on it with no raw root; it runs the pipeline and carries no physics.
+            # Roots are relative to data/hhe/sample.
+            "sample": {
+                "cube_200": {"root": "modes/modes_200GPa", "pattern": "cube_x0.05_T02000",
+                             "grid": (24, 24, 24)},
+                "cube_400": {"root": "modes/modes_400GPa", "pattern": "cube_x0.05_T03000",
+                             "grid": (24, 24, 24)},
+                "cube_600": {"root": "modes/modes_600GPa", "pattern": "cube_x0.05_T03000",
+                             "grid": (24, 24, 24)},
+                "cube_800": {"root": "modes/modes_800GPa", "pattern": "cube_x0.05_T02000",
+                             "grid": (24, 24, 24)},
+                "slab_800": {"root": "modes/modes_800GPa", "pattern": "slab_xl0.00_xr0.90_T02000",
+                             "grid": (16, 16, 64)},
+            },
             "half_width": 25,      # frames
             "n_states": 5,
             "stride": 10,          # frames between window centres
