@@ -6,7 +6,7 @@ Three places hold a system's data:
 |---|---|---|
 | the raw root (`AIPF_RAW_<SYSTEM>`, [cli.md](cli.md#locations-aipfpaths)) | the MD runs: trajectories, logs, run records; and, under `fields/`, the archived mode trees, measured tables and equation-of-state tables | MD, `aipf md run`; never written by any other command |
 | the farm (`AIPF_DATA`, default `<repo>/data`) | `<data>/<system>/`: the index, the mode archives `aipf modes` extracts, training runs, diagnoses, rollouts | every other command |
-| the checkout | `data/<system>/ckpt/published[/<variant>]/final.ckpt`, the published checkpoints, and `experiments/<system>/anchors/`, small measured tables | tracked files |
+| the checkout | `data/<system>/ckpt/published[/<variant>]/final.ckpt`, the published checkpoints; `data/<system>/sample/`, the training sample `aipf train --source sample` reads ([training.md](training.md#sources)); and `experiments/<system>/anchors/`, small measured tables | tracked files |
 
 ## The farm
 

@@ -44,7 +44,8 @@ relative path in `aipf.toml` is relative to the repository root, an empty value 
 The raw root of system `s` is the first of `AIPF_RAW_S`, `$AIPF_RAW/s`, `[paths.raw] s`,
 `[paths] raw_parent/s`, then the system's own `Paths(raw_default=...)` (none of the shipped systems
 declares one). The published checkpoints are tracked files,
-`<repo>/data/<system>/ckpt/published[/<variant>]/final.ckpt`, and `AIPF_DATA` does not move them.
+`<repo>/data/<system>/ckpt/published[/<variant>]/final.ckpt`, and so is the training sample,
+`<repo>/data/<system>/sample/`; `AIPF_DATA` moves neither.
 
 ### Site facts (`aipf.site`)
 
@@ -133,7 +134,7 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 ## aipf train
 
     aipf train --system S --run NAME --seed N (--steps N | --epochs N)
-               --source NAME=SUBDIR:PATTERN:GX,GY,GZ [--source ...] | --source declared
+               --source NAME=SUBDIR:PATTERN:GX,GY,GZ [--source ...] | --source declared | --source sample
                --resume-optimizer {yes,no} --anchors {declared,none}
                [--variant NAME] [--init-from-published] [--log-every-step]
                [--device {auto,cpu,cuda}] [--deterministic] [--pbs] [--walltime-h H] [--dry-run]
@@ -143,7 +144,7 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 | `--run` | the run directory's name under `<data>/<system>/ckpt/`; `published` is refused |
 | `--seed` | the one seed the model, batch-order and draw streams derive from |
 | `--steps`, `--epochs` | the run's length, exactly one |
-| `--source` | a training source: SUBDIR is relative to the declared `source_root`, PATTERN a glob of run directories, the grid the real-space grid it is scattered onto. Repeatable. `declared` alone trains the system's `defaults["training"]["sources"]`, exclusions included |
+| `--source` | a training source: SUBDIR is relative to the declared `source_root`, PATTERN a glob of run directories, the grid the real-space grid it is scattered onto. Repeatable. `declared` alone trains the system's `defaults["training"]["sources"]`, exclusions included. `sample` alone trains on the sample bundled in the checkout, `data/<system>/sample` (`defaults["training"]["sample"]`), with the anchor tables read from it and no raw root; it exercises the pipeline and gives a model with no physics in it ([../guides/workflow.md](../guides/workflow.md#7-training-on-the-bundled-sample)) |
 | `--resume-optimizer` | `no` builds the optimizer and schedule fresh; `yes` resumes them from `--init-from-published`'s checkpoint when its parameter groups fit this model's optimizer in count, shape and the order of the parameter names it records, else exit 2 naming what differs. `yes` can only succeed on a checkpoint that `aipf train` wrote; the published checkpoints record no names, so start from them with `no`. Required |
 | `--anchors` | `declared` trains the system's anchor tables; `none` the drift term alone. Required |
 | `--variant` | a declared variant ([system.md](system.md#variant)) |

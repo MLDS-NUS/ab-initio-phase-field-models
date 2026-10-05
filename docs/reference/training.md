@@ -44,6 +44,15 @@ onto; the excluded tags are dropped. Several sources train together: one batch o
 |---|---|---|
 | `source_root` | `{"tier": "raw" or "farm", "path": relative}` | `raw`: under the system's raw root; `farm`: under `<data>/<system>/` (where `aipf modes` writes) |
 | `sources` | `{name: {"root", "pattern", "grid", "exclude_tags"}}` | the declared set, `--source declared`; `exclude_tags` optional |
+| `sample` | `{name: {"root", "pattern", "grid"}}` | the bundled sample, `--source sample`; each root relative to `data/<system>/sample` |
+
+`--source sample` trains `aipf.train.fit.sample_system(system)`: the system with its raw root
+replaced by `data/<system>/sample` (`aipf.paths.SamplePaths`), its source root that directory and
+its declared sources the `sample` rows. Every other entry of the declaration is the system's own, and
+the anchor and equation-of-state tables are read from the sample at the paths the declaration gives
+relative to the raw root (a table tracked under `experiments/<system>/anchors/` first, as always).
+The sample is tracked in the checkout like the published checkpoints, so `AIPF_DATA` does not move
+it. It lets the pipeline run without the raw archive; a model trained on it carries no physics.
 
 ## Windows
 

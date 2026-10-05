@@ -94,6 +94,23 @@ the Lennard-Jones mixture. The other stages (`phase_diagram`, `stability_map`, `
 the equation-of-state tables tracked under `experiments/<system>/eos/`, so they too run without the
 raw data root, and are listed in [docs/reference/diagnose.md](docs/reference/diagnose.md).
 
+### Train on the sample
+
+Each system also carries a small training sample, `data/<system>/sample/`, so that training runs
+from a clean checkout with no MD data:
+
+```bash
+aipf train --system feb --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
+aipf train --system hhe --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
+aipf train --system lj  --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
+```
+
+Each trains every loss term its system declares, on a CPU in minutes, and writes
+`data/<system>/ckpt/sample/final.ckpt`, which `aipf diagnose --ckpt` reads. The sample is there to
+exercise the pipeline, not to reproduce the published models: it holds one training window of a
+few runs, so a model trained on it carries no physics. See
+[docs/guides/workflow.md](docs/guides/workflow.md#7-training-on-the-bundled-sample).
+
 ## Reproduce the paper figures
 
 Every figure drawn with matplotlib lives in `figures/<fig>/`: `figdata/` holds the arrays it shows
@@ -137,7 +154,8 @@ available from the authors on request. Training the published systems again need
 ```text
 src/aipf/          the package: functionals, mobility, training, diagnosis, solvers, MD, data
 experiments/       one folder per physical system, each a system.py (hhe, feb, lj)
-data/<system>/ckpt/published/   the published checkpoints (the rest of data/ is local)
+data/<system>/ckpt/published/   the published checkpoints
+data/<system>/sample/           a small training sample (the rest of data/ is local)
 figures/           the paper's figures, redrawn from committed data, and the notebook
 docs/guides/       environment, workflow, a new system
 docs/reference/    every command, declaration and module

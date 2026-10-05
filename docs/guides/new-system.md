@@ -113,7 +113,7 @@ argument of the functional and the mobility, with its admissible values, in
 | block | needed by | keys |
 |---|---|---|
 | top level | `aipf train`, `aipf rollout`, `aipf modes` | `sigma`, `estimator` (`weak`, `weak_mid`, `savgol`), `h_inv_eps`, `k_max`, `mode_fields`, the `TrainConfig` fields ([../reference/training.md](../reference/training.md#the-optimiser-and-the-loss-weights)) |
-| `training` | `aipf train` | `source_root`, `half_width`, `n_states`, `stride`, `savgol_window`, `savgol_poly`, `run_weighting`, `val_split`, `val_labels`, `val_fraction`, `split_seed`, `batch_size`, `num_workers`, `pin_memory`, `drop_last`, `order`; optionally `band_k_max`, `sources`, `tables`, `grad_clip`, `penalty_seed`, `conv_T_measure`, `gamma_paths` |
+| `training` | `aipf train` | `source_root`, `half_width`, `n_states`, `stride`, `savgol_window`, `savgol_poly`, `run_weighting`, `val_split`, `val_labels`, `val_fraction`, `split_seed`, `batch_size`, `num_workers`, `pin_memory`, `drop_last`, `order`; optionally `band_k_max`, `sources`, `sample`, `tables`, `grad_clip`, `penalty_seed`, `conv_T_measure`, `gamma_paths` |
 | `diagnose` | `aipf diagnose` | per stage, [../reference/diagnose.md](../reference/diagnose.md#the-declared-block) |
 | `rollout` | `aipf rollout` | `solver`, `archive`, `spinodal`, `slab` ([../reference/rollout.md](../reference/rollout.md#the-declaration)) |
 | `md` | `aipf md run` | `potential: {"md5": ...}` for a machine-learned potential, and one `{point, values, dt_equil_ps, campaign}` per deck ([../reference/md.md](../reference/md.md#the-declaration)) |
