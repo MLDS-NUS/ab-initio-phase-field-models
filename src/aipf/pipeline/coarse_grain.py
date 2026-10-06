@@ -101,6 +101,116 @@ def read_timesteps(path) -> np.ndarray:
     return np.array(steps, dtype=np.int64)
 
 
+#: Why the last bytes of a chained dump were not read as a frame: ``"nul_padding"`` (only NUL bytes, as
+#: a file system leaves after a killed writer) or ``"truncated_frame"`` (a frame cut short).
+TAIL_REASONS = ("nul_padding", "truncated_frame")
+
+#: Longest line the chain reader takes, in bytes; a dump line is far shorter, a NUL run is not a line.
+_LINE_LIMIT = 1 << 16
+
+#: The line a frame starts with, as the chain reader searches for it in raw bytes.
+_TIMESTEP = b"ITEM: TIMESTEP"
+
+
+def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
+    """Yield the frames of a restart chain of LAMMPS text dumps, in file order, each step once.
+
+    A frame whose timestep is at or below the last one kept is a restart's overlap and is dropped. A file
+    may end in NUL padding or a cut frame (:data:`TAIL_REASONS`): its complete frames are kept, the tail is
+    skipped and the next file read. Anything else that is not a frame, with a frame after it, raises.
+    :func:`read_dump` is left as it is: this reader holds every line to a newline and the frame layout.
+
+    ``report`` gets one dict per file as it is opened, final once the iteration ends: ``source``,
+    ``frames_kept``, ``frames_overlap``, ``tail_bytes`` and ``tail`` (``None`` or a reason).
+    """
+    last = None
+    for path in paths:
+        entry = {"source": str(path), "frames_kept": 0, "frames_overlap": 0,
+                 "tail_bytes": 0, "tail": None}
+        report.append(entry)
+        for frame in _complete_frames(path, entry):
+            if last is not None and frame.timestep <= last:
+                entry["frames_overlap"] += 1
+                continue
+            last = frame.timestep
+            entry["frames_kept"] += 1
+            yield frame
+
+
+def _complete_frames(path, entry: dict) -> Iterator[Frame]:
+    """One file's complete frames; where they stop, :func:`_classify_tail` fills ``entry`` or raises."""
+    with open(path, "rb") as handle:
+        while True:
+            start = handle.tell()
+            first = handle.readline(_LINE_LIMIT)
+            if not first:
+                return
+            frame = _strict_frame(first, handle)
+            if frame is None:
+                _classify_tail(path, handle, start, entry)
+                return
+            yield frame
+
+
+def _strict_frame(first: bytes, handle) -> Frame | None:
+    """The frame starting at line ``first``, or ``None`` if the bytes are not one whole frame."""
+    if not first.startswith(_TIMESTEP) or not _whole(first):
+        return None
+    header = [handle.readline(_LINE_LIMIT) for _ in range(_HEADER_LINES - 1)]
+    if not all(_whole(line) for line in header) \
+            or not header[1].startswith(b"ITEM: NUMBER OF ATOMS") \
+            or not header[3].startswith(b"ITEM: BOX BOUNDS") \
+            or not header[7].startswith(b"ITEM: ATOMS"):
+        return None
+    try:
+        timestep, n_atoms = int(header[0]), int(header[2])
+        for line in header[4:7]:
+            [float(v) for v in line.split()[:2]]
+    except ValueError:
+        return None
+    body = [handle.readline(_LINE_LIMIT) for _ in range(n_atoms)]
+    if not all(_whole(line) for line in body):
+        return None
+    return _parse_frame(timestep, [line.decode() for line in header[4:7]],
+                        header[7].decode().split()[2:],
+                        [line.decode() for line in body])
+
+
+def _whole(line: bytes) -> bool:
+    """Whether a raw line is a written line: ended by a newline, without a NUL byte."""
+    return line.endswith(b"\n") and b"\0" not in line
+
+
+def _classify_tail(path, handle, start: int, entry: dict) -> None:
+    """Name the bytes from ``start`` to the end as a tail, or raise if a frame header follows them."""
+    size = handle.seek(0, 2)
+    handle.seek(start)
+    only_nul = True
+    carry = b""
+    position = start
+    while True:
+        chunk = handle.read(1 << 20)
+        if not chunk:
+            break
+        if only_nul and chunk.strip(b"\0"):
+            only_nul = False
+        window = carry + chunk
+        # the frame that failed starts at ``start``; only a header after it is a frame that follows
+        found = window.find(_TIMESTEP, 1 if position == start else 0)
+        if found >= 0:
+            at = position - len(carry) + found
+            raise ValueError(
+                f"{path}: the bytes from offset {start} are not a complete "
+                f"frame, and a frame header follows at offset {at}. A cut "
+                f"or padded tail is skipped, corruption inside a file is "
+                f"not: the frames after it would join the chain with a gap "
+                f"nobody sees")
+        carry = window[-(len(_TIMESTEP) - 1):]
+        position += len(chunk)
+    entry["tail_bytes"] = size - start
+    entry["tail"] = "nul_padding" if only_nul else "truncated_frame"
+
+
 def _parse_frame(timestep, bound_lines, columns, body) -> Frame | None:
     """One frame's header and atom rows into a :class:`Frame`, or ``None`` for a truncated row.
     """

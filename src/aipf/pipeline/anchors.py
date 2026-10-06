@@ -343,10 +343,12 @@ def run_mobility(amplitudes, box_lengths, nvec, *, temperature: float,
                  thermal_energy: float, lags: Sequence[int],
                  frame_interval: float, band: tuple[float, float],
                  min_lag: float, extrapolation_k_max: float,
-                 reference_rule: str) -> RunMobility:
+                 reference_rule) -> RunMobility:
     """Measure one equilibrium run, from its stored amplitudes to ``M(0)``. The uniform mode is dropped here.
 
-    ``reference_rule`` must be the rule the mode labels were chosen under (:data:`REFERENCE_BOXES`).
+    ``reference_rule`` must be the rule the mode labels were chosen under (:data:`REFERENCE_BOXES`), or
+    the cell ``(Lx, Ly, Lz)`` the archive records; :func:`aipf.pipeline.modes.recorded_reference` reads
+    either off an archive.
     """
     rho = np.asarray(amplitudes)
     if rho.ndim != 3:

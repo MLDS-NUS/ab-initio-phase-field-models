@@ -193,9 +193,9 @@ def run_weights(runs: Sequence[ModeRun], weighting: RunWeighting,
         return np.ones(len(runs), np.float32)
     statistics = []
     for run in runs:
-        box = run.boxes if run.boxes.ndim == 1 else run.boxes.mean(axis=0)
+        box = run.cell if run.cell.ndim == 1 else run.cell.mean(axis=0)
         volume = float(box.prod())
-        keep = band_keep(run.labels, run.boxes, window.band_k_max)
+        keep = band_keep(run.labels, run.cell, window.band_k_max)
         labels = run.labels if keep is None else run.labels[keep]
         values = []
         for centre in range(window.half_width - 1,

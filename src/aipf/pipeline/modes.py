@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -30,8 +32,13 @@ ARCHIVE_KEYS = {"amplitudes": "rho_k", "labels": "nvec", "box": "box",
 #: Keys of a two-sided composition label: a direct-coexistence run has no single composition.
 SIDE_KEYS = ("x_left", "x_right")
 
-#: The box the mode labels are chosen on, fixed to match the archive.
+#: The box the mode labels are chosen on by default, matching the archive. An archive without
+#: :data:`REFERENCE_BOX_KEY` was written under it.
 REFERENCE_BOX = "time_mean"
+
+#: The ``modes.npz`` key of the reference cell ``(3,)`` float64, written only under another rule
+#: (``"first_frame"`` or a stated cell). A reader that finds it reads ``k`` and ``V`` in this cell.
+REFERENCE_BOX_KEY = "reference_box"
 
 #: Metadata step counts of the preparation and production stages. A run with neither is refused.
 STEP_COUNT_KEYS = ("n_equil", "n_prod")
@@ -55,6 +62,7 @@ class ModesRecord:
 
     ``amplitudes`` ``(n_frames, n_modes, n_channels)`` complex64, ``labels`` ``(n_modes, 3)`` int,
     ``boxes`` ``(n_frames, 3)``, ``T``, ``dt_frame``, ``provenance`` (with ``cache_dir``).
+    ``reference_box`` ``(3,)`` is the cell under a rule other than :data:`REFERENCE_BOX`, else ``None``.
     """
 
     amplitudes: np.ndarray
@@ -63,6 +71,7 @@ class ModesRecord:
     T: float
     dt_frame: float
     provenance: Mapping[str, Any]
+    reference_box: Optional[np.ndarray] = None
 
     def save(self, directory: Path) -> Path:
         """Write ``modes.npz`` with the composition label, and ``provenance.json``. Returns the archive."""
@@ -75,6 +84,9 @@ class ModesRecord:
             ARCHIVE_KEYS["temperature"]: self.T,
             ARCHIVE_KEYS["frame_interval"]: self.dt_frame,
         }
+        if self.reference_box is not None:
+            payload[REFERENCE_BOX_KEY] = np.asarray(self.reference_box,
+                                                    dtype=np.float64)
         label = self.provenance.get("composition") or {}
         # A label key that collided with an archive key would overwrite that array.
         clash = sorted(set(label) & set(payload))
@@ -101,9 +113,20 @@ class ModesRecord:
             boxes = payload[ARCHIVE_KEYS["box"]]
             temperature = float(payload[ARCHIVE_KEYS["temperature"]])
             interval = float(payload[ARCHIVE_KEYS["frame_interval"]])
+            reference = (payload[REFERENCE_BOX_KEY]
+                         if REFERENCE_BOX_KEY in payload else None)
         provenance = json.loads((directory / "provenance.json").read_text())
         return cls(amplitudes, labels, boxes, temperature, interval,
-                   provenance)
+                   provenance, reference)
+
+
+def recorded_reference(directory: Path):
+    """The rule an archive's labels were chosen under, for :func:`aipf.pipeline.anchors.run_mobility`:
+    its :data:`REFERENCE_BOX_KEY` cell ``(3,)`` when it carries one, else :data:`REFERENCE_BOX`."""
+    with np.load(Path(directory) / "modes.npz") as payload:
+        if REFERENCE_BOX_KEY in payload:
+            return np.array(payload[REFERENCE_BOX_KEY], dtype=np.float64)
+    return REFERENCE_BOX
 
 
 def composition_label(composition: Mapping[str, Any], *,
@@ -217,11 +240,12 @@ def extracted_types(fields, species_types: Sequence[int]) -> tuple[int, ...]:
 
 def combine_fields(amplitudes: np.ndarray, labels: np.ndarray,
                    boxes: np.ndarray, fields,
-                   atom_types: Sequence[int]) -> np.ndarray:
+                   atom_types: Sequence[int], *,
+                   reference_box: Optional[np.ndarray] = None) -> np.ndarray:
     """``(n_frames, n_modes, n_types)`` per-type sums to ``(n_frames, n_modes, n_fields)``, same dtype.
 
     Weights are applied in the stored precision, in declaration order. A declared ``mean`` replaces
-    the zero mode by ``mean * V`` of the frame's own box.
+    the zero mode by ``mean * V`` of the frame's own box, or of ``reference_box`` ``(3,)`` when given.
 
     ``amplitudes``: per-type sums, ``(n_frames, n_modes, n_types)`` complex.
     ``labels``: the integer mode labels, ``(n_modes, 3)``.
@@ -232,7 +256,11 @@ def combine_fields(amplitudes: np.ndarray, labels: np.ndarray,
     column = {int(t): i for i, t in enumerate(atom_types)}
     real = np.empty(0, amplitudes.dtype).real.dtype
     zero = np.flatnonzero((np.asarray(labels) == 0).all(axis=1))
-    volumes = np.prod(np.asarray(boxes, dtype=np.float64), axis=-1)
+    if reference_box is None:
+        volumes = np.prod(np.asarray(boxes, dtype=np.float64), axis=-1)
+    else:
+        volumes = np.full(len(boxes), np.prod(np.asarray(reference_box,
+                                                         dtype=np.float64)))
     out = np.empty(amplitudes.shape[:2] + (len(fields),), amplitudes.dtype)
     for c, spec in enumerate(fields):
         missing = sorted(set(spec["weights"]) - set(column))
@@ -273,22 +301,72 @@ def _cache_key(identity: Mapping[str, Any]) -> str:
 
 def _extract(dump: Path, *, k_cut: float, atom_types: Sequence[int],
              ordering: str, route: str, device: Optional[str],
-             skip_frames: int):
-    """Drop ``skip_frames``, choose the mode set on the time-mean box of the rest, extract."""
-    frames = list(coarse_grain.read_dump(dump))[skip_frames:]
-    if not frames:
-        raise ValueError(
-            f"{dump} holds no complete frame after dropping {skip_frames}: "
-            f"there is no timeline to extract")
-    boxes = coarse_grain.box_lengths(frames)
-    labels = extract_modes.mode_set(
-        extract_modes.reference_box(boxes, rule=REFERENCE_BOX),
-        k_cut=k_cut, ordering=ordering)
-    amplitudes, _ = extract_modes.mode_series(
-        frames, labels, atom_types=atom_types, route=route, device=device,
-        dtype=np.complex64)
+             skip_frames: int, reference=REFERENCE_BOX,
+             chain: Optional[list] = None):
+    """Drop ``skip_frames``, choose the mode set on the ``reference`` box of the rest, extract.
+
+    ``chain`` (a list to fill with the per-file report) reads ``dump`` as a restart chain
+    (:func:`aipf.pipeline.coarse_grain.read_dump_chain`). Returns amplitudes, labels, boxes and the cell.
+    """
+    if chain is None:
+        frames = list(coarse_grain.read_dump(dump))[skip_frames:]
+    else:
+        frames = itertools.islice(
+            coarse_grain.read_dump_chain(dump, report=chain), skip_frames,
+            None)
+        if reference == REFERENCE_BOX:
+            # the time mean needs every box before the first label: held, as a single dump is
+            frames = list(frames)
+    if isinstance(frames, list):
+        if not frames:
+            raise _no_frame(dump, skip_frames)
+        boxes = coarse_grain.box_lengths(frames)
+        cell = extract_modes.reference_box(boxes, rule=reference)
+        labels = extract_modes.mode_set(cell, k_cut=k_cut, ordering=ordering)
+        amplitudes, _ = extract_modes.mode_series(
+            frames, labels, atom_types=atom_types, route=route, device=device,
+            dtype=np.complex64)
+    else:
+        # a cell known from the first frame on: the chain streams, one frame in memory at a time
+        first = next(frames, None)
+        if first is None:
+            raise _no_frame(dump, skip_frames)
+        cell = extract_modes.reference_box(
+            coarse_grain.box_lengths([first]), rule=reference)
+        labels = extract_modes.mode_set(cell, k_cut=k_cut, ordering=ordering)
+        edges = []
+
+        def seen(stream):
+            for frame in stream:
+                edges.append(frame.box_bounds[:, 1] - frame.box_bounds[:, 0])
+                yield frame
+
+        amplitudes, _ = extract_modes.mode_series(
+            seen(itertools.chain([first], frames)), labels,
+            atom_types=atom_types, route=route, device=device,
+            dtype=np.complex64)
+        boxes = np.stack(edges)
     # Channel first inside the package, channel last on disk.
-    return np.moveaxis(amplitudes, 1, 2), labels, boxes
+    return np.moveaxis(amplitudes, 1, 2), labels, boxes, cell
+
+
+def _no_frame(dump, skip_frames: int) -> ValueError:
+    """The refusal of a timeline with nothing left to extract."""
+    return ValueError(
+        f"{dump} holds no complete frame after dropping {skip_frames}: "
+        f"there is no timeline to extract")
+
+
+def _reference_rule(rule):
+    """``rule`` as the identity records it: a name of :data:`extract_modes.REFERENCE_BOXES`, or a stated
+    cell as a list of three floats, exact."""
+    if isinstance(rule, str):
+        if rule not in extract_modes.REFERENCE_BOXES:
+            raise ValueError(
+                f"reference_box={rule!r} is not one of "
+                f"{extract_modes.REFERENCE_BOXES} or a stated cell (Lx, Ly, Lz)")
+        return rule
+    return [float(v) for v in extract_modes.explicit_box(rule)]
 
 
 def modes_from_dump(dump, *, sigma: float, k_cut: float,
@@ -296,7 +374,8 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
                     route: str, T: float, dt_frame: float, skip_frames: int,
                     composition: Optional[Mapping[str, float]] = None,
                     cache_dir: Optional[Path] = None,
-                    entry_dir: Optional[Path] = None) -> ModesRecord:
+                    entry_dir: Optional[Path] = None,
+                    reference_box=REFERENCE_BOX) -> ModesRecord:
     """One trajectory's modes, provenance-stamped and cached.
 
     ``atom_types`` are the dump types summed; ``fields`` is :data:`PER_TYPE` (store them) or checked
@@ -305,7 +384,16 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
     ``entry_dir``: exactly this directory, replaced when the provenance differs (the archive's
     ``<tree>/<tag>/modes.npz``). With neither nothing is cached; both is refused.
 
-    ``dump``: the trajectory file (a LAMMPS text dump).
+    A list or tuple of dumps is a restart chain (:func:`aipf.pipeline.coarse_grain.read_dump_chain`):
+    overlapping steps read once, a NUL-padded or cut tail skipped, every file's sha256 in the identity
+    and its frames kept, overlap and tail in ``provenance["chain"]``. ``skip_frames`` counts frames of
+    the joined timeline. A single path is read by :func:`aipf.pipeline.coarse_grain.read_dump`, as before.
+
+    A ``reference_box`` other than :data:`REFERENCE_BOX` is recorded in the identity and written as
+    :data:`REFERENCE_BOX_KEY`; ``box`` stays the frames' own edges. A declared ``mean`` is then
+    ``mean * V_ref``.
+
+    ``dump``: the trajectory file (a LAMMPS text dump), or a list of them in restart order.
     ``sigma``: the coarse-graining width, in the coordinates' length unit (recorded).
     ``k_cut``: the mode cutoff ``|k| <= k_cut``, in the reciprocal length unit.
     ``atom_types``: the dump types summed, one per stored channel before combination.
@@ -317,6 +405,8 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
     ``skip_frames``: leading frames dropped as preparation.
     ``composition``: label scalars stored beside the modes, or ``None``.
     ``cache_dir``, ``entry_dir``: the two cache layouts, at most one.
+    ``reference_box``: the cell the labels are chosen on, ``"time_mean"``, ``"first_frame"`` or a
+    stated ``(Lx, Ly, Lz)`` (stored exactly, float64), in the coordinates' length unit.
     """
     if cache_dir is not None and entry_dir is not None:
         raise ValueError(
@@ -326,7 +416,16 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
         raise TypeError(
             f"fields={fields!r} is neither {PER_TYPE!r} nor the tuple "
             f"check_fields returns: pass the declaration through it")
-    dump = Path(dump)
+    chained = not isinstance(dump, (str, os.PathLike))
+    if chained:
+        dump = [Path(p) for p in dump]
+        if not dump:
+            raise ValueError(
+                "dump is an empty chain: a restart chain names its files in "
+                "the order they were written")
+    else:
+        dump = Path(dump)
+    reference = _reference_rule(reference_box)
     skip_frames = int(skip_frames)
     if skip_frames < 0:
         raise ValueError(
@@ -335,14 +434,15 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
             f"would silently extract the whole dump")
     identity = {
         "schema": SCHEMA,
-        "source": str(dump),
-        "source_sha256": _sha256(dump),
+        "source": [str(p) for p in dump] if chained else str(dump),
+        "source_sha256": ([_sha256(p) for p in dump] if chained
+                          else _sha256(dump)),
         "sigma": float(sigma),
         "k_cut": float(k_cut),
         "atom_types": [int(t) for t in atom_types],
         "ordering": ordering,
         "route": route,
-        "reference_box": REFERENCE_BOX,
+        "reference_box": reference,
         "device": DEVICE,
         "device_resolved": str(_resolve_device(DEVICE)),
         "T": float(T),
@@ -361,25 +461,33 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
     if entry is not None and (entry / "modes.npz").is_file():
         cached = ModesRecord.load(entry)
         if {k: v for k, v in cached.provenance.items()
-                if k != "cache_dir"} == identity:
+                if k not in ("cache_dir", "chain")} == identity:
+            if chained:
+                provenance["chain"] = cached.provenance["chain"]
             # where it is now, which a moved or relinked tier changes
             return dataclasses.replace(cached, provenance=provenance)
-    amplitudes, labels, boxes = _extract(
+    chain = [] if chained else None
+    amplitudes, labels, boxes, cell = _extract(
         dump, k_cut=k_cut, atom_types=atom_types, ordering=ordering,
         route=route, device=DEVICE if route == "dense" else None,
-        skip_frames=int(skip_frames))
+        skip_frames=int(skip_frames), reference=reference, chain=chain)
+    if chained:
+        provenance["chain"] = chain
+    # the default rule writes no cell, so its archive is the one it always was
+    cell = None if reference == REFERENCE_BOX else cell
     if fields != PER_TYPE:
         amplitudes = combine_fields(amplitudes, labels, boxes, fields,
-                                    atom_types)
+                                    atom_types, reference_box=cell)
     record = ModesRecord(amplitudes, labels, boxes, float(T), float(dt_frame),
-                         provenance)
+                         provenance, cell)
     if entry is not None:
         record.save(entry)
     return record
 
 
 def modes(system: System, tag: str, *, sigma: float, k_cut: float,
-          ordering: str = "lexicographic", route: str = "dense") -> ModesRecord:
+          ordering: str = "lexicographic", route: str = "dense",
+          reference_box=REFERENCE_BOX) -> ModesRecord:
     """The farm convenience: one state point's modes, by ``farm_dir`` or ``tag``.
 
     Written where the archive keeps a run's file, ``modes/<farm_dir>/modes.npz`` (a partitioned farm's
@@ -394,6 +502,7 @@ def modes(system: System, tag: str, *, sigma: float, k_cut: float,
     ``k_cut``: the mode cutoff, in the reciprocal length unit.
     ``ordering``: one of :data:`aipf.pipeline.extract_modes.ORDERINGS`.
     ``route``: one of :data:`aipf.pipeline.extract_modes.ROUTES`.
+    ``reference_box``: the cell the labels are chosen on, as :func:`modes_from_dump` takes it.
     """
     from aipf.data import index
 
@@ -411,4 +520,5 @@ def modes(system: System, tag: str, *, sigma: float, k_cut: float,
         skip_frames=frames_prepared(record, dump),
         composition=composition_label(meta.get("composition") or {},
                                       x_key=system.table_keys["x"]),
-        entry_dir=index.modes_dir(system, record["farm_dir"]))
+        entry_dir=index.modes_dir(system, record["farm_dir"]),
+        reference_box=reference_box)

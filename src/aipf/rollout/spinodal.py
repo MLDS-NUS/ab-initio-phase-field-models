@@ -114,7 +114,12 @@ class Measured:
 
 
 def read_run(system: System, decl: dict, driver: str, run: str) -> Measured:
-    """Scatter one archived run onto ``decl[driver]["grid"]`` and apply the sigma filter to every frame."""
+    """Scatter one archived run onto ``decl[driver]["grid"]`` and apply the sigma filter to every frame.
+
+    A run whose archive records a reference cell (:data:`aipf.pipeline.modes.REFERENCE_BOX_KEY`) is read
+    in it: every frame's ``V``, ``k`` and returned box is the cell's."""
+    from aipf.pipeline.modes import REFERENCE_BOX_KEY
+
     arch = decl["archive"]
     grid = tuple(int(g) for g in decl[driver]["grid"])
     run_dir = system.paths.raw() / decl[driver]["modes_tree"] / run
@@ -125,6 +130,9 @@ def read_run(system: System, decl: dict, driver: str, run: str) -> Measured:
         if qc is not None and qc.is_file():
             hi = int(json.loads(qc.read_text())[arch["quality_key"]])
         boxes = np.asarray(z[arch["box"]][:hi])
+        if REFERENCE_BOX_KEY in z:
+            cell = np.asarray(z[REFERENCE_BOX_KEY], dtype=np.float64)
+            boxes = np.repeat(cell[None, :], len(boxes), axis=0)
         amps = np.asarray(z[arch["amplitudes"]][:hi])
         if int(arch["amplitudes_channel_axis"]) == 2:
             amps = np.moveaxis(amps, -1, -2)

@@ -30,11 +30,14 @@ _WEAK_FORMS = ("weak", "weak_mid")
 
 @dataclass(frozen=True)
 class ArchiveKeys:
-    """The key names one archive uses, and which axis holds the channel; every field required.
+    """The key names one archive uses, and which axis holds the channel; every field required but
+    ``reference_box``.
 
     ``amplitudes_channel_axis``: ``1`` for ``(frames, channels, modes)``, ``2`` for
     ``(frames, modes, channels)``.
-    ``quality_file`` and ``quality_key`` are declared together or both ``None``."""
+    ``quality_file`` and ``quality_key`` are declared together or both ``None``.
+    ``reference_box``: the key of an optional reference cell ``(3,)``, read when a run carries it
+    (:attr:`ModeRun.reference_box`); ``None`` reads none."""
 
     file_name: str
     amplitudes: str
@@ -47,6 +50,7 @@ class ArchiveKeys:
     composition_fallback: Optional[str]
     quality_file: Optional[str]
     quality_key: Optional[str]
+    reference_box: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "composition", tuple(self.composition))
@@ -73,7 +77,9 @@ class ArchiveKeys:
 class ModeRun:
     """One run's whole timeline in memory; ``amplitudes`` is ``(n_frames, n_channels, n_modes)`` complex.
 
-    ``boxes`` is ``(n_frames, 3)`` or ``(3,)``; ``composition`` follows the declared key order."""
+    ``boxes`` is ``(n_frames, 3)`` or ``(3,)``; ``composition`` follows the declared key order.
+    ``reference_box`` ``(3,)``, when the archive records one, is the cell every window's ``k`` and ``V``
+    are read in (:attr:`cell`); ``None`` reads them in the frames' own boxes."""
 
     tag: str
     amplitudes: np.ndarray
@@ -82,6 +88,12 @@ class ModeRun:
     temperature: float
     frame_interval: float
     composition: Tuple[float, ...]
+    reference_box: Optional[np.ndarray] = None
+
+    @property
+    def cell(self) -> np.ndarray:
+        """The boxes ``k`` is read in: the reference cell ``(3,)`` when recorded, else ``boxes``."""
+        return self.boxes if self.reference_box is None else self.reference_box
 
     @property
     def n_frames(self) -> int:
@@ -92,11 +104,14 @@ class ModeRun:
         return int(self.amplitudes.shape[1])
 
     def box_mean(self, start: int, stop: int) -> np.ndarray:
-        """The box a window ``[start, stop)`` is read in; a fixed-box run returns its box unaveraged."""
+        """The box a window ``[start, stop)`` is read in; a fixed-box run returns its box unaveraged, a
+        run with a reference cell returns the cell."""
         if stop <= start:
             raise ValueError(
                 f"window [{start}, {stop}) is empty: there is no box to "
                 f"average over")
+        if self.reference_box is not None:
+            return self.reference_box
         if self.boxes.ndim == 1:
             return self.boxes
         return self.boxes[start:stop].mean(axis=0)
@@ -167,6 +182,16 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
                 stored = np.moveaxis(stored, 2, 1)
             amplitudes = np.ascontiguousarray(stored)
             boxes = np.array(payload[keys.box])
+            reference = None
+            if keys.reference_box is not None and \
+                    keys.reference_box in payload:
+                reference = np.array(payload[keys.reference_box],
+                                     dtype=np.float64)
+                if reference.shape != (3,):
+                    raise ValueError(
+                        f"{path}: {keys.reference_box} has shape "
+                        f"{tuple(reference.shape)}, which is not one cell of "
+                        f"three edge lengths")
             if limit is not None:
                 total = amplitudes.shape[0]
                 amplitudes = amplitudes[:limit + 1]
@@ -182,7 +207,8 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
                 boxes=boxes,
                 temperature=float(payload[keys.temperature]),
                 frame_interval=float(payload[keys.frame_interval]),
-                composition=_composition(payload, keys, directory.name)))
+                composition=_composition(payload, keys, directory.name),
+                reference_box=reference))
     if not runs:
         raise FileNotFoundError(
             f"no run matching {pattern!r} under {root} holds a "
@@ -384,7 +410,7 @@ class ModeWindowDataset(Dataset):
             self.offsets, self.lam = np.array([0]), np.array([1.0])
         self._taps: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
         #: Per run, the modes scattered (:func:`band_keep`), or ``None`` for all of them.
-        self.keep = [band_keep(r.labels, r.boxes, settings.band_k_max) for r in runs]
+        self.keep = [band_keep(r.labels, r.cell, settings.band_k_max) for r in runs]
         self.samples: list[Tuple[int, int]] = [
             (index, centre)
             for index, run in enumerate(runs)

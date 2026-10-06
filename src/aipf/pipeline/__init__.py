@@ -14,6 +14,7 @@ from .extract_modes import (  # noqa: F401
     ORDERINGS,
     REFERENCE_BOXES,
     ROUTES,
+    explicit_box,
     frames_to_skip,
     mode_amplitudes,
     mode_series,
@@ -25,6 +26,7 @@ from .coarse_grain import (  # noqa: F401
     COMPOSITION_FORMS,
     EDGE_MODES,
     SPACINGS,
+    TAIL_REASONS,
     Frame,
     box_lengths,
     composition_field,
@@ -32,6 +34,7 @@ from .coarse_grain import (  # noqa: F401
     emit_indices,
     grid_for_spacing,
     read_dump,
+    read_dump_chain,
     read_timesteps,
     smooth_in_time,
 )

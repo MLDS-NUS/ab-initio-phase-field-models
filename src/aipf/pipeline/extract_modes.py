@@ -19,7 +19,7 @@ from .kde import DEVICES, _as_atom_types, _resolve_device
 TWO_PI = 2.0 * np.pi
 
 #: Box the mode labels are chosen on: ``"time_mean"`` (barostatted run) or ``"first_frame"`` (fixed box).
-#: The two give mode sets of different size.
+#: The two give mode sets of different size. A stated cell ``(Lx, Ly, Lz)`` is the third form.
 REFERENCE_BOXES = ("time_mean", "first_frame")
 
 #: Row order of the mode list: ``"lexicographic"`` (enclosing cube, first axis slowest)
@@ -58,12 +58,31 @@ def _labels(nvec) -> np.ndarray:
     return labels.astype(np.float64)
 
 
-def reference_box(box_lengths, *, rule: str) -> np.ndarray:
+def explicit_box(box) -> np.ndarray:
+    """A stated reference cell as ``(3,)`` float64 edges, exactly as given; refused unless three
+    positive finite lengths."""
+    try:
+        lengths = np.array(box, dtype=np.float64)
+    except (TypeError, ValueError):
+        lengths = np.empty(0)
+    if lengths.shape != (3,) or not np.all(np.isfinite(lengths)) \
+            or not np.all(lengths > 0.0):
+        raise ValueError(
+            f"reference box {box!r} is not three positive finite edge "
+            f"lengths: a stated cell is (Lx, Ly, Lz), or the rule is one of "
+            f"{REFERENCE_BOXES}")
+    return lengths
+
+
+def reference_box(box_lengths, *, rule) -> np.ndarray:
     """The ``(3,)`` box a whole timeline's labels are chosen on.
 
-    ``box_lengths`` are the KEPT frames' ``(n_frames, 3)`` edges. ``rule`` is one of :data:`REFERENCE_BOXES`.
+    ``box_lengths`` are the KEPT frames' ``(n_frames, 3)`` edges. ``rule`` is one of :data:`REFERENCE_BOXES`,
+    or a stated cell ``(Lx, Ly, Lz)`` (:func:`explicit_box`), returned as given whatever the frames' boxes.
     """
-    if rule not in REFERENCE_BOXES:
+    if not isinstance(rule, str):
+        stated = explicit_box(rule)
+    elif rule not in REFERENCE_BOXES:
         raise ValueError(f"rule={rule!r} is not one of {REFERENCE_BOXES}")
     lengths = np.asarray(box_lengths, dtype=np.float64)
     if lengths.ndim != 2 or lengths.shape[1] != 3:
@@ -80,6 +99,8 @@ def reference_box(box_lengths, *, rule: str) -> np.ndarray:
         raise ValueError(
             f"box_lengths has a non-positive edge: {lengths.min():.6g}"
         )
+    if not isinstance(rule, str):
+        return stated
     if rule == "time_mean":
         return lengths.mean(axis=0)
     return lengths[0].copy()

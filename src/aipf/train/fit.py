@@ -198,7 +198,7 @@ def _anchors_from_system(system: System, anchors):
 def _archive_keys(system: System) -> ArchiveKeys:
     """How this system's mode archive spells its quantities; the names come from
     :mod:`aipf.pipeline.modes`, the writer."""
-    from aipf.pipeline.modes import ARCHIVE_KEYS, SIDE_KEYS
+    from aipf.pipeline.modes import ARCHIVE_KEYS, REFERENCE_BOX_KEY, SIDE_KEYS
 
     return ArchiveKeys(
         file_name=_MODES_FILE,
@@ -211,7 +211,8 @@ def _archive_keys(system: System) -> ArchiveKeys:
         composition=SIDE_KEYS,
         composition_fallback=system.table_keys["x"],
         quality_file=_QUALITY_FILE,
-        quality_key=_QUALITY_KEY)
+        quality_key=_QUALITY_KEY,
+        reference_box=REFERENCE_BOX_KEY)
 
 
 #: The trees a declared ``source_root`` can sit in: ``"raw"`` (``system.paths.raw()``) or

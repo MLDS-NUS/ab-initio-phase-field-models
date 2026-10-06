@@ -103,9 +103,11 @@ tiers. `index.index_fields(system)` lists the trees under `<raw>/fields/` with t
 ## Modes
 
 A mode archive holds, for every frame, the Fourier sums of each channel's atoms over the
-wavevectors `k = 2 pi n / L` with `|k| <= k_cut`, `n` integer, on the time-mean box of the run.
+wavevectors `k = 2 pi n / L` with `|k| <= k_cut`, `n` integer, on the time-mean box of the run
+(the default reference cell; see [The reference cell](#the-reference-cell)).
 
-    aipf.pipeline.modes.modes(system, tag, *, sigma, k_cut, ordering="lexicographic", route="dense")
+    aipf.pipeline.modes.modes(system, tag, *, sigma, k_cut, ordering="lexicographic", route="dense",
+                              reference_box="time_mean")
 
 `aipf modes` calls it. `tag` is a run tag or `farm_dir` of the manifest. It writes
 `<data>/<system>/modes/<farm_dir>/modes.npz` and `provenance.json`, the layout an archive keeps,
@@ -122,14 +124,16 @@ refused), `T` and the frame interval come from the metadata.
 | `k_cut` | the mode cutoff, in the reciprocal length unit |
 | `ordering` | `lexicographic` (the enclosing cube, first axis slowest) or `shell` (ascending wavenumber) |
 | `route` | `dense` (the whole phase matrix, on a GPU when one is visible) or `separable` (per-axis factors, on the CPU) |
+| `reference_box` | the cell the labels are chosen on, as `modes_from_dump` |
 
     aipf.pipeline.modes.modes_from_dump(dump, *, sigma, k_cut, atom_types, fields, ordering, route,
                                         T, dt_frame, skip_frames, composition=None,
-                                        cache_dir=None, entry_dir=None) -> ModesRecord
+                                        cache_dir=None, entry_dir=None,
+                                        reference_box="time_mean") -> ModesRecord
 
 | parameter | meaning |
 |---|---|
-| `dump` | the trajectory, a LAMMPS text dump |
+| `dump` | the trajectory, a LAMMPS text dump; or a list of dumps, a restart chain (below) |
 | `sigma`, `k_cut`, `ordering`, `route` | as `modes` |
 | `atom_types` | the dump types summed, one per column before combination |
 | `fields` | `"per_type"`, or the combinations `check_fields` returns |
@@ -139,10 +143,53 @@ refused), `T` and the frame interval come from the metadata.
 | `composition` | label scalars stored beside the modes, or `None` |
 | `cache_dir` | keep one entry per provenance, under a key |
 | `entry_dir` | keep exactly this directory, replaced when the provenance differs |
+| `reference_box` | `"time_mean"` (default), `"first_frame"`, or a stated cell `(Lx, Ly, Lz)` of positive finite lengths |
 
 With neither `cache_dir` nor `entry_dir` nothing is written; both is refused. The provenance is
 every input, the dump's sha256 included: the same inputs read the stored file back, other inputs (a
 new `k_cut`, a rewritten dump) recompute and replace it.
+
+### The reference cell
+
+The amplitudes are sums in each frame's own scaled coordinates, `s = (r - lo) / L(t)`, so an affine
+change of the box leaves them as they are. What the reference cell decides is the label set
+(`|2 pi n / L_ref| <= k_cut`), every `k` and the volume a density is divided by.
+
+- `"time_mean"`, the default: the labels are chosen on the mean box of the kept frames, and a reader
+  divides each window by the volume of its own mean box. The identity, the archive and every reader
+  are what they were before the option existed.
+- `"first_frame"`: the labels are chosen on the first kept frame's box. It and `"time_mean"` give mode
+  sets of different size on a barostatted run.
+- `(Lx, Ly, Lz)`: a stated cell, stored exactly (float64, no rounding).
+
+Any rule but the default is recorded in the identity (the name, or the three floats exactly) and in
+`provenance.json`, and the archive gains the key `reference_box`, the cell `(3,)` float64; `box` stays
+each frame's own edges. A declared `mean` is then `mean * V_ref`. A reader that finds the key reads the
+run in the cell: the window box and volume, `k`, the band of `band_keep`, the run weight, and the
+rollouts' boxes, volumes and sigma filter (`spinodal.read_run`, which the slab shares) are the cell's.
+`modes.recorded_reference(directory)` gives `pipeline.anchors.run_mobility` the cell an archive
+records, or `"time_mean"` for one without the key. An archive without the key reads exactly as before.
+
+In the cell, the `k = 0` density `N / V_ref` is constant over a run whose box shrinks under the
+barostat; in the frames' own boxes it follows the volume, which conserved dynamics cannot reproduce.
+Seeds averaged together need identical labels, and a time-mean or first-frame box differs a little
+from seed to seed, so the labels can too: state one cell for all of them.
+
+### Restart chains
+
+A list of dumps is read as one timeline, file by file in the order given
+(`coarse_grain.read_dump_chain`). A frame whose timestep is at or below the last one kept is a
+restart's overlap and is dropped; the first copy is kept. A file may end in NUL padding or in a cut
+frame (a job killed while writing): its complete frames are kept, the tail is skipped, and the next
+file is read. In a chain every line of a frame ends in a newline, the header has the LAMMPS layout,
+and anything that is not a frame with a frame header after it raises: corruption inside a file is
+not a tail. `skip_frames` counts frames of the joined timeline.
+
+The identity holds every file's path and sha256 (`source`, `source_sha256` as lists, in chain
+order); `provenance["chain"]` holds, per file, `source`, `frames_kept`, `frames_overlap`,
+`tail_bytes` and `tail` (`null`, `"nul_padding"` or `"truncated_frame"`). The chain is read as a
+stream under `"first_frame"` or a stated cell, and held in memory under `"time_mean"`, as a single
+dump is. A single path is read by `read_dump` exactly as before, and a list of one file is a chain.
 
 `defaults["mode_fields"]` is `"per_type"` (one channel per species, the sum over its dump type) or
 one combination per species in channel order, `{"name": species, "weights": {dump type: w},
@@ -159,6 +206,7 @@ What training and the rollouts read, under a tree:
 | `<tag>/modes.npz` | `rho_k` | `(n_frames, n_modes, n_channels)` complex64 | the amplitudes |
 | | `nvec` | `(n_modes, 3)` int16 | the integer labels `n` |
 | | `box` | `(n_frames, 3)` float64 | the box edges per frame |
+| | `reference_box` | `(3,)` float64 | optional: the reference cell, written only under a rule other than `time_mean` |
 | | `T_K` | float64 | the temperature |
 | | `dt_frame_ps` | float64 | the time between frames |
 | | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label |
