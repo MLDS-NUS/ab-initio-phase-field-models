@@ -241,7 +241,10 @@ FLUX_EINSUM = {3: "bijxyz,bjxyz->bixyz", 2: "bijxy,bjxy->bixy"}
 
 def half_spectrum_grid(half_shape, declared=None) -> Tuple[int, ...]:
     """The real-space grid of a two-dimensional half spectrum ``(Gx, Gyr)``: the ``declared`` grid when its
-    half spectrum has that shape (an odd ``Gy`` included), else ``(Gx, 2 * (Gyr - 1))``."""
+    half spectrum has that shape (an odd ``Gy`` included), else ``(Gx, 2 * (Gyr - 1))``.
+    The declared grid wins whenever it matches: Gy = 6 and Gy = 7 have the same ``Gyr = 4``, so an
+    ``(8, 6)`` state handed to a model declared on ``(8, 7)`` is read as ``Gy = 7``. A half spectrum
+    cannot tell the two apart; the 3D lookups assume an even ``Gz`` in the same way."""
     Gx, Gyr = (int(s) for s in half_shape)
     if declared is not None and len(declared) == 2:
         dx, dy = (int(g) for g in declared)
@@ -295,8 +298,9 @@ class OpsCache:
 
     def ops_for(self, shape, device=None) -> SpectralOps:
         """The :class:`SpectralOps` for an rfft shape ``(..., Gx, Gy, Gzr)``; ``Gz = 2 * (Gzr - 1)``.
-        In two dimensions ``(..., Gx, Gyr)``: the seed grid when it has that half spectrum, else
-        ``Gy = 2 * (Gyr - 1)`` (:func:`half_spectrum_grid`)."""
+        In two dimensions ``(..., Gx, Gyr)``: the seed grid whenever it has that half spectrum (so an
+        even-``Gy`` state of the same ``Gyr`` is read on an odd seed's ``Gy``), else ``Gy = 2 * (Gyr - 1)``
+        (:func:`half_spectrum_grid`)."""
         if self.ndim == 2:
             return self.ops_for_grid(half_spectrum_grid(shape[-2:], self.grid), device)
         Gx, Gy, Gzr = (int(s) for s in shape[-3:])

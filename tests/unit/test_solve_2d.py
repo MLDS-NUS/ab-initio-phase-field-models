@@ -200,6 +200,53 @@ def test_a_2d_semi_implicit_rollout_is_its_z_invariant_3d_twin_sliced_in_z(twins
     assert torch.allclose(r3[..., 0], r2, atol=2e-6)
 
 
+def _unmasked_twins(grid2):
+    """The toy without the Nyquist masks on ``grid2`` and on ``(*grid2, GZ)``, same weights."""
+    torch.manual_seed(0)
+    m3 = NdimToyModel((*grid2, GZ), 2, nyquist_mask=False, kappa=0.5, kB=1.0)
+    with torch.no_grad():
+        for p in m3.parameters():
+            p.add_(0.2 * torch.randn_like(p))
+    m2 = NdimToyModel(grid2, 2, nyquist_mask=False, kappa=0.5, kB=1.0)
+    weights = {k: v for k, v in m3.state_dict().items() if not k.startswith("ops.")}
+    m2.load_state_dict({**m2.state_dict(), **weights})
+    g = torch.Generator().manual_seed(1)
+    rho2 = 0.45 + 0.05 * torch.randn(1, 2, *grid2, generator=g)
+    rho3 = rho2.unsqueeze(-1).expand(1, 2, *grid2, GZ).contiguous()
+    return (m2, m2.ops.rfft(rho2) / math.prod(grid2)), (m3, m3.ops.rfft(rho3) / math.prod(m3.ops.grid))
+
+
+def _drifts(pair2, pair3):
+    (m2, h2), (m3, h3) = pair2, pair3
+    F2 = _real(m2.ops, m2(h2, BOX2.view(1, 2), T))
+    F3 = _real(m3.ops, m3(h3, BOX3.view(1, 3), T))
+    return F2, F3
+
+
+@pytest.mark.parametrize("grid2", [(7, 6), (9, 6)])
+def test_without_nyquist_masks_an_odd_gx_2d_model_is_still_its_z_invariant_3d_twin(grid2):
+    """The y Nyquist wavenumber is -Gy/2 on the 3D full axis and +Gy/2 on the 2D half axis; harmless."""
+    pair2, pair3 = _unmasked_twins(grid2)
+    F2, F3 = _drifts(pair2, pair3)
+    assert float(F2.abs().max()) > 0.1
+    assert torch.allclose(F3, F3[..., :1].expand_as(F3), atol=1e-5)
+    assert torch.allclose(F3[..., 0], F2, atol=1e-5)
+    (m2, h2), (m3, h3) = pair2, pair3
+    t2 = rollout_deterministic(m2, h2, BOX2.view(1, 2), T, 2e-3, 10, method="heun", **EXPLICIT)
+    t3 = rollout_deterministic(m3, h3, BOX3.view(1, 3), T, 2e-3, 10, method="heun", **EXPLICIT)
+    assert torch.allclose(_real(m3.ops, t3)[..., 0], _real(m2.ops, t2), atol=2e-6)
+
+
+@pytest.mark.parametrize("grid2", [(8, 6), (8, 7), (6, 8)])
+def test_without_nyquist_masks_an_even_gx_2d_model_differs_from_its_twin_by_an_x_nyquist_term(grid2):
+    """As docs/reference/functional.md, "Two dimensions", says: the unmasked x-Nyquist line is dropped by
+    the 3D layout's last inverse transform and kept by the 2D one, as a real (-1)^x pattern in x."""
+    F2, F3 = _drifts(*_unmasked_twins(grid2))
+    diff = F2 - F3[..., 0]
+    assert float(diff.abs().max()) > 0.1 * float(F3.abs().max())
+    assert torch.allclose(diff[..., 1:, :], -diff[..., :-1, :], atol=1e-5)
+
+
 def test_the_stabiliser_hook_is_handed_the_2d_real_field(twins):
     m2, _ = twins
     seen = []

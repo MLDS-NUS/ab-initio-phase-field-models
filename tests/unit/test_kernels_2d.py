@@ -83,11 +83,31 @@ def test_the_nonlocal_kernel_on_a_two_axis_grid_is_two_dimensional_and_conserves
     assert tuple(F.shape) == tuple(rho_hat.shape)
     assert float(F[..., 0, 0].abs().max()) < 1e-7
     assert float(F.abs().max()) > 1e-6
-    # the real-space seam agrees with the k-space fast path
-    mu = model.chemical_potential(rho, boxes, T)
-    assert tuple(mu.shape) == (2, 2, 8, 6)
     assert tuple(model.mobility(rho, T).shape) == (2, 2, 2, 8, 6)
     assert tuple(model.bulk_free_energy_density(rho, T).shape) == (2, 1, 8, 6)
+
+    # mu, assembled independently: the pointwise part plus W_hat(|k|) rho_hat, W_hat from the evaluator
+    mu = model.chemical_potential(rho, boxes, T)
+    flat = rho.permute(0, 2, 3, 1).reshape(-1, 2)
+    kBT = (model.kB * T).view(2, 1, 1).expand(2, 8, 6).reshape(-1)
+    mu_loc = model.f_local.mu_pointwise(flat, kBT).view(2, 8, 6, 2).permute(0, 3, 1, 2)
+    kmag = model.ops.k2(boxes).sqrt()[:, 0]
+    W = model.kernel.evaluator.w_hat(model.kernel.radial_set, kmag)          # (2, 8, 4, 2, 2)
+    term = torch.einsum("bxyij,bjxy->bixy", W.to(rho_hat.dtype), rho_hat)
+    assert torch.allclose(mu, mu_loc + model.ops.irfft(term * 48), atol=1e-5)
+
+    # and the real-space seam (an override routes forward through it) gives the fast path's drift
+    seam = _nonlocal((8, 6))
+    seam.load_state_dict(model.state_dict())
+    seam.chemical_potential = lambda r, b, t: NonlocalKernel.chemical_potential(seam, r, b, t)
+    assert torch.allclose(seam(rho_hat, boxes, T), F, atol=1e-6)
+
+
+def test_a_3d_nonlocal_kernel_refuses_a_two_dimensional_evaluator():
+    with pytest.raises(ValueError, match="dim=2"):
+        _nonlocal((8, 6, 4), kernel_evaluator=AnalyticRadialTransform(2.5, 64, 128, 12.0, dim=2))
+    model = _nonlocal((8, 6, 4), kernel_evaluator=AnalyticRadialTransform(2.5, 64, 128, 12.0))
+    assert model.kernel.evaluator.dim == 3
 
 
 def test_a_2d_nonlocal_kernel_refuses_an_evaluator_that_does_not_declare_two_dimensions():

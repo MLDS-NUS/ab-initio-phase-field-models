@@ -241,7 +241,18 @@ A two-dimensional model is an effective model, not the z average of a three-dime
 `k_z = 0` plane of 3D Model B dynamics is not closed: the nonlinear terms couple the `k_z != 0` modes
 into it, so the z average of a 3D trajectory does not obey any functional of the z average alone. The
 z-invariance check in `tests/unit/test_solve_2d.py` (a 2D rollout equals the 3D rollout of the same
-field held constant along z, sliced in z) checks the solvers, which agree exactly when the 3D field
-has no `k_z != 0` content to begin with; it says nothing about that closure. For the same reason the
+field held constant along z, sliced in z) checks the solvers, which agree to float precision when the
+3D field has no `k_z != 0` content to begin with; it says nothing about that closure. That agreement
+holds under `nyquist_mask=True`, and under `nyquist_mask=False` when `Gx` is odd. With
+`nyquist_mask=False` and an even `Gx`, the odd-order operators multiply the x-Nyquist line by
+`i k_N`, which is not the transform of a real field there. The final inverse transform treats such a
+line differently in the two layouts. In 3D the line lies on the `k_z = 0` plane and the last
+(half-axis, z) inverse transform drops it. In 2D the half axis is y, so the line survives at every
+interior `k_y` as a real `(-1)^x` pattern in x. A mask-off 2D model on an even `Gx` therefore differs
+from its z-invariant 3D twin by such a term, of the size of the drift itself. 3D has the same
+behaviour on its `k_z != 0` planes. The 2D operators are the plain `rfft2` ones and are left as they
+are; `nyquist_mask=True` (or an odd `Gx`) is what makes the two layouts agree. The y-Nyquist
+wavenumber, `-Gy/2` on the 3D full axis and `+Gy/2` on the 2D half axis, makes no difference. For
+the same reason the
 2D `W(r)` is not the 3D one: the z-projected kernel `int W3(sqrt(rho^2 + z^2)) dz` has as its Hankel
 transform `Ŵ3(k)` at `k_z = 0`, and a 2D model learns its own `W` from 2D data.

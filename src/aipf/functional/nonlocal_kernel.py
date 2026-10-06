@@ -127,6 +127,11 @@ class NonlocalKernel(nn.Module):
             Gx, Gy = grid
             self.grid = (int(Gx), int(Gy))
         else:
+            if kernel_evaluator is not None and getattr(kernel_evaluator, "dim", 3) != 3:
+                raise ValueError(
+                    f"grid {tuple(grid)} is three-dimensional and the kernel_evaluator "
+                    f"{type(kernel_evaluator).__name__} declares dim={kernel_evaluator.dim!r}; a "
+                    f"two-dimensional transform of W would be read as a three-dimensional one")
             Gx, Gy, Gz = grid
             self.grid = (int(Gx), int(Gy), int(Gz))
         self.n_species = int(n_species)
