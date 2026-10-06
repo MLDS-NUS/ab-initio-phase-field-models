@@ -100,13 +100,13 @@ Each system also carries a small training sample, `data/<system>/sample/`, so th
 from a clean checkout with no MD data:
 
 ```bash
-aipf train --system feb --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
 aipf train --system hhe --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
 aipf train --system lj  --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --run sample
+aipf train --system feb --source sample --anchors none     --resume-optimizer no --seed 0 --epochs 1 --run sample
 ```
 
-Each trains every loss term its system declares (add `--device cpu` to stay off a GPU), in
-under a minute, and writes
+The H/He and Lennard-Jones runs train every loss term their systems declare, the Fe-B run the
+drift term and the kernel hinge (add `--device cpu` to stay off a GPU). Each takes under a minute and writes
 `data/<system>/ckpt/sample/final.ckpt`, which `aipf diagnose --ckpt` reads. The sample is there to
 exercise the pipeline, not to reproduce the published models: it holds a window or two of a
 few runs, so a model trained on it carries no physics. See
@@ -144,7 +144,7 @@ aipf diagnose   --system lj --ckpt $AIPF_DATA/lj/ckpt/my-run/final.ckpt --stage 
 ```
 
 [docs/guides/workflow.md](docs/guides/workflow.md) runs it end to end on the Lennard-Jones mixture,
-with the output of every command, and then retrains iron-boron at full size.
+with the output of every command, and then generates iron-boron MD data at full size.
 [docs/guides/new-system.md](docs/guides/new-system.md) declares a system of your own.
 
 The raw MD archive the published models were trained on is not part of the repository; it is
@@ -190,7 +190,6 @@ aipf.toml.example  the template of the local, untracked aipf.toml
 Working and tested today: the three published models, the quick start, every paper figure and the
 MD-to-model chain on the Lennard-Jones mixture. Still being completed:
 
-- the Fe-B retraining recipe is being validated;
 - the documentation, in places;
 - the DOI of the raw MD archive, once it exists.
 

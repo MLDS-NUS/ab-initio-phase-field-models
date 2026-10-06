@@ -143,54 +143,6 @@
    "md5": "e5ae2cb4a335d8ddfe56913b90059506"
   },
   {
-   "path": "fields/training_derived/M_table_v2_trainexcl.npz",
-   "role": "table",
-   "dropped_keys": [],
-   "bytes": 98968,
-   "md5": "379770367136cce0ebc35e8ac0d556db"
-  },
-  {
-   "path": "fields/training_derived/M_table_5GPa_trainexcl.npz",
-   "role": "table",
-   "dropped_keys": [],
-   "bytes": 97474,
-   "md5": "3da5ac8ad20e10265b2310408be96a10"
-  },
-  {
-   "path": "fields/training_derived/M_table_10GPa_trainexcl.npz",
-   "role": "table",
-   "dropped_keys": [],
-   "bytes": 91982,
-   "md5": "36bf6ad475321665a39b954b461f3453"
-  },
-  {
-   "path": "fields/training_derived/S_table_v2_trainexcl_gstable.npz",
-   "role": "table",
-   "dropped_keys": [
-    "provenance_json"
-   ],
-   "bytes": 331860,
-   "md5": "0563462e2e02a16829093c83fdc53996"
-  },
-  {
-   "path": "fields/training_derived/S_table_5GPa_trainexcl_gstable.npz",
-   "role": "table",
-   "dropped_keys": [
-    "provenance_json"
-   ],
-   "bytes": 327251,
-   "md5": "a0be2fa0a4e97882aaaa9f62b457cb17"
-  },
-  {
-   "path": "fields/training_derived/S_table_10GPa_trainexcl_gstable.npz",
-   "role": "table",
-   "dropped_keys": [
-    "provenance_json"
-   ],
-   "bytes": 301338,
-   "md5": "eb0d4ee03e7aa763173e1ce75261fb39"
-  },
-  {
    "path": "eos_0GPa/eos_n_x_T_v2.csv",
    "role": "table",
    "bytes": 10647,
@@ -209,5 +161,5 @@
    "md5": "ff7210576c68766ee02a1db7c74338ec"
   }
  ],
- "total_bytes": 2505687
+ "total_bytes": 1256814
 }

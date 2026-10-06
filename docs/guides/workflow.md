@@ -5,7 +5,7 @@ the data index, Fourier modes, training, diagnosis. Every command below was run 
 from the checkout root. Outputs are quoted from that run, trimmed, with each path shown as the
 variable that held it (`$WORK`, `$AIPF_LAMMPS`). The same chain runs as a test,
 `tests/test_workflow_lj.py`. Section 7 trains each system on the small sample bundled with the
-repository, and section 8 runs the iron-boron system at full size.
+repository, and section 8 generates iron-boron MD data at full size.
 Every command and its flags are in [../reference/cli.md](../reference/cli.md).
 
 ## 0. Install and site facts
@@ -335,25 +335,25 @@ megabytes in all:
   `hhe`; one per temperature at four temperatures for `lj`), each cut to its first training window and to the modes with
   max |n_i| <= 2. The `lj` runs keep the four windows that fill one batch, since its declared loader
   drops a partial batch;
-- the anchor and equation-of-state tables the system's training declaration reads, at the same
-  relative paths as under the raw root;
+- for `hhe` and `lj`, the tables their training declarations read, at the same relative paths as
+  under the raw root; the `feb` sample is trained with `--anchors none`, the drift term and the kernel
+  hinge;
 - `MANIFEST.json`, which lists every file with its frames, its mode cut and its md5.
 
 ```bash
-aipf train --system feb --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --device cpu --run sample
 aipf train --system hhe --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --device cpu --run sample
 aipf train --system lj  --source sample --anchors declared --resume-optimizer no --seed 0 --epochs 1 --device cpu --run sample
+aipf train --system feb --source sample --anchors none     --resume-optimizer no --seed 0 --epochs 1 --device cpu --run sample
 ```
 
 `--source sample` takes the sources from `defaults["training"]["sample"]` and reads the anchor tables
 from the sample wherever the declaration reads the raw root. Nothing else in the declaration
-changes, so every loss term the system declares is trained, and `MANIFEST.json` in the run
-directory lists them under `terms_trained`. No raw root and no `aipf.toml` are needed. Each command
+changes, and `MANIFEST.json` in the run directory lists the terms trained under `terms_trained`. No raw root and no `aipf.toml` are needed. Each command
 runs on a CPU in minutes and prints its run directory, `data/<system>/ckpt/sample/` by default.
 `aipf diagnose` reads the result like any other checkpoint:
 
 ```bash
-aipf diagnose --system feb --ckpt data/feb/ckpt/sample/final.ckpt --stage kappa
+aipf diagnose --system hhe --ckpt data/hhe/ckpt/sample/final.ckpt --stage kappa
 aipf diagnose --system hhe --ckpt data/hhe/ckpt/sample/final.ckpt --stage kappa
 aipf diagnose --system lj  --ckpt data/lj/ckpt/sample/final.ckpt  --stage one_field_phase_diagram
 ```
@@ -362,18 +362,16 @@ The sample is there so that the pipeline can be exercised from end to end. It is
 copy of the training data. A model trained on it has seen a window or two of a few runs in a narrow
 band of modes, so it carries no physics: its phase diagram, its gradient-energy matrix and its
 mobility mean nothing, and no number it gives should be compared with the published models.
-Training those again needs the raw MD archive, available from the authors on request. Section 8
-does it for iron-boron.
+Training those again needs the raw MD archive, available from the authors on request.
 
-## 8. Fe-B: training the published model again
+## 8. Fe-B: generating MD data at full size
 
 The iron-boron system `feb` runs the same chain at full size, with its machine-learned potential.
 Its commands were run on one node with an A100 (40 GB) and through the batch queue, and the outputs
 quoted are from those runs.
 Besides the site facts of section 0 it needs the Fe-B potential (`AIPF_MACE_POTENTIAL_FEB`, its md5
 checked against the one `experiments/feb/system.py` declares), the `pbs_*` facts for `--pbs`, and,
-for training, the Fe-B raw root, the archived MD data the published model was trained on. That
-archive is not part of the repository; it is available from the authors on request.
+a raw root to write the run into.
 
 ### 8.1 One new run
 
@@ -424,47 +422,18 @@ average is 32.05 A, and 15155 modes). The keys, types and layout are those of th
 published model was trained on, `fields/modes_<P>GPa_v2/<tag>/modes.npz`. `aipf modes` keeps every
 production frame; the archived files drop the first 5 ps after the quench from the melt.
 
-### 8.3 Training on the published partition
-
-The published model was trained on six sources, a non-equilibrium and an equilibrium set at each of
-0, 5 and 10 GPa. Each is every `cube_*` run of one archived tree minus a list of excluded runs (572 in
-all, 356 runs kept), scattered onto a 32^3 grid, with a drift weight of 15000. They are declared in
-`experiments/feb/training_sources.json` and selected by `--source declared`. The archived modes reach
-|k| = 3 1/A, which on the longest boxes (33.5 to 36 A) is a label of 16 or 17, past a 32^3 grid; the
-training declaration's `"band_k_max": 2.0` keeps the modes with |k| <= 2 1/A in any box the run
-visits, and the run trains on those. The raw root must hold `fields/modes_{0,5,10}GPa_v2/`, the
-measured tables under `fields/training_derived/` and the equation-of-state tables `eos_{0,5,10}GPa/`
-(the archive of section 8's opening paragraph, available from the authors).
+### 8.3 Diagnosing the published model
 
 ```text
-$ export AIPF_RAW_FEB=<the Fe-B raw root> AIPF_DATA=$WORK/feb-data
-$ aipf train --system feb --run retrain --seed 4 --epochs 60 --source declared \
-    --anchors declared --resume-optimizer no --device cuda --log-every-step --pbs --walltime-h 24
-$WORK/feb-data/feb/ckpt/retrain/job.pbs
-<job id>
-```
-
-Without `--pbs` the same command trains in this process. With `--pbs --dry-run` it writes the job
-file and submits nothing. Loading the 356 runs needs about 72 GB of host memory, so the job needs
-`pbs_mem` of 80 GB or more. One step trains one batch of 6 windows from each source; the largest
-source sets the epoch at 216 steps, so 60 epochs are 12960 steps, about two to three hours on one
-A100. The run trains `L_dyn`, `L_M`, `L_S`, `L_bulk`, `L_P` and the kernel hinge `L_W` (the declared
-`lambda_wpsd`), and `MANIFEST.json` lists them under `terms_trained`. The hinge is part of the recipe,
-not an optional regulariser: it is what keeps the k = 0 kernel attractive (see `docs/reference/training.md`).
-
-A fresh run starts from the initialisation `--seed` gives and draws its batches in its own order,
-so it does not reproduce the published run bit for bit. Diagnose it with the same two stages as the
-published model:
-
-```text
-$ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
+$ aipf diagnose --system feb --ckpt published \
     --stage stability_map --T-grid 1150,2650,25 --pressure 0 --pressure 5 --pressure 10
-$ aipf diagnose --system feb --ckpt $AIPF_DATA/feb/ckpt/retrain/final.ckpt \
+$ aipf diagnose --system feb --ckpt published \
     --stage phase_diagram --T-grid 1200,2600,50 --pressure 0 --pressure 5 --pressure 10
 ```
 
-The same two stages with `--ckpt published` diagnose the published model; the `stability_map` stage
-reproduces the published Fe-B Gamma map in about 10 minutes on one CPU thread.
+The `stability_map` stage reproduces the published Fe-B Gamma map in about 10 minutes on one CPU
+thread. Both stages read the equation-of-state tables tracked under `experiments/feb/eos/`, so they
+run from a clean checkout.
 
 ## 9. A new system
 

@@ -25,6 +25,9 @@ MAX_ABS_N = 2
 PATH_LIKE = re.compile(r"(^|[\s\"'=(:])(/|~/|\.\.?/)|[A-Za-z_][\w.-]*/[\w.-]+")
 
 
+#: Systems whose sample is trained with ``--anchors none`` (the drift term and the kernel hinge).
+DRIFT_ONLY_SAMPLE = ("feb",)
+
 def _manifest(name):
     return json.loads((paths.sample_dir(name) / "MANIFEST.json").read_text())
 
@@ -131,7 +134,8 @@ def test_the_sample_system_reads_no_raw_root(name, monkeypatch, tmp_path):
     assert [row[0] for row in table] == list(load(name).defaults["training"]["sample"])
     assert unmatched_sources(system, table) == []
     tables = system.defaults["training"]["tables"]
-    for role in ("m_table", "s_table", "eos_csvs"):
+    roles = ("eos_csvs",) if name in DRIFT_ONLY_SAMPLE else ("m_table", "s_table", "eos_csvs")
+    for role in roles:
         if role in tables:
             declared = tables[role] if isinstance(tables[role], dict) else {0.0: tables[role]}
             for _, found in _resolve(system.paths.raw, declared, role, paths.tracked_tables(name)):
@@ -155,15 +159,19 @@ def test_one_epoch_on_the_sample_trains_every_declared_term(name, monkeypatch, t
     from aipf.cli.main import main
     monkeypatch.setenv("AIPF_DATA", str(tmp_path))
     monkeypatch.setenv(paths.raw_env_name(name), str(tmp_path / "no-raw-root"))
+    anchors = "none" if name in DRIFT_ONLY_SAMPLE else "declared"
     code = main(["train", "--system", name, "--run", "sample", "--seed", "0", "--epochs", "1",
-                 "--source", "sample", "--resume-optimizer", "no", "--anchors", "declared",
+                 "--source", "sample", "--resume-optimizer", "no", "--anchors", anchors,
                  "--device", "cpu", "--log-every-step"])
     assert code == 0
     run_dir = tmp_path / name / "ckpt" / "sample"
     manifest = json.loads((run_dir / "MANIFEST.json").read_text())
     assert manifest["global_step"] >= 1
-    assert manifest["declared_weights_without_data"] == {}
-    assert not (run_dir / "UNTRAINED_TERMS.txt").exists()
+    if anchors == "declared":
+        assert manifest["declared_weights_without_data"] == {}
+        assert not (run_dir / "UNTRAINED_TERMS.txt").exists()
+    else:
+        assert "L_dyn" in manifest["terms_trained"] and "L_W" in manifest["terms_trained"]
     assert "L_dyn" in manifest["terms_trained"]
     assert [s["name"] for s in manifest["sources"]] == list(load(name).defaults["training"]["sample"])
     steps = json.loads((run_dir / "steps.json").read_text())
