@@ -791,8 +791,10 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     # the model is built under the run's own model stream, forked from the global one and restored
     with seeded_rng(cfg.seed_for("model")):
         model = build_functional(system)
-    # the number of axes is the model's declared one; refused here, before anything is loaded or written
-    _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
+    # the number of axes is the model's declared one; refused here, before anything is loaded or written.
+    # A three-dimensional model without a projection is the run it always was, and is not checked here
+    if projection is not None or model_ndim(model) != 3:
+        _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
     saved = (None if init_from is None
              else _load_weights_into(model, init_from,
                                      system.paths.raw, system, path=init_path))
