@@ -115,11 +115,12 @@ _TIMESTEP = b"ITEM: TIMESTEP"
 def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
     """Yield the frames of a restart chain of LAMMPS text dumps, in file order, each step once.
 
-    The last writer wins: a file that starts at step ``S`` replaces every frame at or after ``S`` in the
-    files before it, a branch no later file continues. Every file's first step is read before any frame,
-    and a file that starts below the one before it raises (a glob sorts ``chunk_10`` before ``chunk_2``).
-    Within a file the steps rise; across a junction the step advances by the stride of the file before it
-    (or, if that kept fewer than two frames, of the file after it), or the chain raises. A file may end in
+    The last writer wins: a file whose first complete frame is at step ``S`` replaces every frame at or
+    after ``S`` in the files before it, a branch no later file continues. Every file's first step is read
+    before any frame, and a file that starts below the one before it raises (a glob sorts ``chunk_10``
+    before ``chunk_2``). Within a file the steps rise; across a junction the step advances by the stride
+    of the file before it (or, if that kept fewer than two frames, the next stride any file shows, else
+    the last one shown; none anywhere and it is accepted), or the chain raises. A file may end in
     NUL padding or a cut frame (:data:`TAIL_REASONS`): its complete frames are kept, the tail is skipped
     and the next file read. Anything else that is not a frame, with a frame after it, raises.
     :func:`read_dump` is left as it is: this reader holds every line to a newline and the frame layout.
@@ -140,6 +141,8 @@ def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
                 f"before chunk_2")
     last = None        # (step, file) of the last frame kept
     last_stride = None  # the stride of the file that holds it, if it kept two frames
+    known = None        # the latest stride any file has shown
+    pending = []       # junctions behind one-frame files, checked once a stride is known
     for index, path in enumerate(paths):
         cutoff = next((step for step in firsts[index + 1:] if step is not None),
                       None)
@@ -149,7 +152,6 @@ def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
         report.append(entry)
         read = None
         stride = None
-        pending = None
         for frame in _complete_frames(path, entry):
             step = frame.timestep
             if read is not None and step <= read:
@@ -165,13 +167,13 @@ def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
                 if last is not None and last_stride is not None:
                     _check_junction(last, (step, path), last_stride)
                 elif last is not None:
-                    # the file before kept one frame: this file's own stride decides
-                    pending = last
+                    # the file before kept one frame: the next stride shown decides
+                    pending.append((last, (step, path)))
             else:
-                stride = step - entry["last_step"]
-                if pending is not None:
-                    _check_junction(pending, (entry["first_step"], path), stride)
-                    pending = None
+                stride = known = step - entry["last_step"]
+                for before, after in pending:
+                    _check_junction(before, after, stride)
+                pending = []
             if entry["first_step"] is None:
                 entry["first_step"] = step
             entry["last_step"] = step
@@ -179,19 +181,19 @@ def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
             yield frame
         if entry["frames_kept"]:
             last, last_stride = (entry["last_step"], path), stride
+    # no stride shown after them: the latest one shown before decides; none anywhere, accepted
+    if known is not None:
+        for before, after in pending:
+            _check_junction(before, after, known)
 
 
 def _first_step(path) -> int | None:
-    """A dump's first timestep from its first two lines, or ``None`` if it does not start with a frame."""
+    """A dump's first COMPLETE frame's timestep, or ``None`` if it does not start with one: a file
+    holding only a cut frame supersedes nothing."""
     with open(path, "rb") as handle:
         first = handle.readline(_LINE_LIMIT)
-        value = handle.readline(_LINE_LIMIT)
-    if not first.startswith(_TIMESTEP) or not _whole(first) or not _whole(value):
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
+        frame = _strict_frame(first, handle) if first else None
+    return None if frame is None else frame.timestep
 
 
 def _check_junction(before, after, stride: int) -> None:

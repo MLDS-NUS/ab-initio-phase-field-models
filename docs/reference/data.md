@@ -180,17 +180,19 @@ from seed to seed, so the labels can too: state one cell for all of them.
 A list of dumps is read as one timeline, file by file in the order given
 (`coarse_grain.read_dump_chain`). The rules:
 
-- **Order.** Every file's first timestep is read before any frame. A file that starts below the one
+- **Order.** Every file's first complete frame is read before any other frame. A file that starts below the one
   before it raises, naming both: the list is out of order (a sorted glob puts `chunk_10` before
   `chunk_2`).
-- **Overlap: the last writer wins.** A file that starts at step `S` replaces every frame at or after
-  `S` in the files before it; those frames belong to a branch no later file continues. A restart that
+- **Overlap: the last writer wins.** A file whose first complete frame is at step `S` replaces every
+  frame at or after `S` in the files before it (a file holding only a cut frame replaces nothing); those frames belong to a branch no later file continues. A restart that
   rewrites exactly the step it restarted from therefore keeps the later file's copy.
-- **Gaps.** Across a junction the step advances by the stride of the file before it, or, if that file
-  kept fewer than two frames, of the file after it; if neither has two, the junction is accepted.
-  Anything else raises, naming both files, both steps and the stride.
-- **Inside a file** the steps rise: a step at or below the one before it raises. No constant stride
-  is required inside a file.
+- **Gaps.** Across a junction the step advances by the stride of the file before it. If that file
+  kept fewer than two frames, the junction waits for the next stride any later file shows, or, if
+  none does, is checked against the last stride shown before it; a chain that shows no stride
+  anywhere (every file one frame) is accepted. Anything else raises, naming both files, both steps
+  and the stride.
+- **Inside a file** the steps rise: a step at or below the one before it raises. A stride that
+  changes inside one file is not checked, as `read_dump` never checked it.
 - **Tails.** A file may end in NUL padding or in a cut frame (a job killed while writing): its
   complete frames are kept, the tail is skipped, and the next file is read. Anything that is not a
   frame with a frame header after it raises: corruption inside a file is not a tail.

@@ -161,6 +161,37 @@ def test_a_junction_between_two_one_frame_files_is_accepted(tmp_path):
     assert _steps([a, b])[0] == [0, 500]
 
 
+def test_junctions_behind_one_frame_files_wait_for_the_first_stride_shown(
+        tmp_path):
+    """0 to 700 is checked when the third file shows its stride of 100, and refused."""
+    files = [_write(tmp_path / f"{i}.dump", steps) for i, steps in
+             enumerate(([0], [700], [800, 900]))]
+    with pytest.raises(ValueError, match="from step 0 .* to step 700 .*stride is 100"):
+        _steps(files)
+    files = [_write(tmp_path / f"ok{i}.dump", steps) for i, steps in
+             enumerate(([0], [100], [200, 300]))]
+    assert _steps(files)[0] == [0, 100, 200, 300]
+
+
+def test_junctions_after_the_last_stride_shown_are_checked_against_it(tmp_path):
+    files = [_write(tmp_path / f"{i}.dump", steps) for i, steps in
+             enumerate(([0, 100], [200], [700]))]
+    with pytest.raises(ValueError, match="from step 200 .* to step 700 .*stride is 100"):
+        _steps(files)
+
+
+def test_a_file_holding_only_a_cut_frame_supersedes_nothing(tmp_path):
+    a = _write(tmp_path / "a.dump", [0, 100, 200, 300])
+    cut = _frame(200)
+    b = tmp_path / "b.dump"
+    b.write_text(cut[:len(cut) // 2])
+    c = _write(tmp_path / "c.dump", [400, 500])
+    steps, report = _steps([a, b, c])
+    assert steps == [0, 100, 200, 300, 400, 500]
+    assert report[0]["frames_superseded"] == 0
+    assert report[1]["frames_kept"] == 0 and report[1]["tail"] == "truncated_frame"
+
+
 def test_a_superseded_branch_leaves_no_gap(tmp_path):
     """The stride is read on the frames kept: the junction is 0 to 100, not 300 to 100."""
     a = _write(tmp_path / "a.dump", [0, 100, 200, 300])
