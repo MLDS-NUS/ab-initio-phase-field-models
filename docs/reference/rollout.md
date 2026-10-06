@@ -67,7 +67,7 @@ then the Nyquist modes are made Hermitian and the state is projected. A model wi
 `t = 0` `(1, n, Gx, Gy, Gz)`, unclamped, and `T` `(1,)`, and its `(n, n)` return is refused unless finite,
 symmetric and positive semi-definite to a relative `1e-6`. `m_stab` is then left undeclared, and a
 declared one is refused, so the drivers that pass the system's `Noise.m_stab` refuse such a model.
-Which of the three set `M_s` is logged at `INFO` by `aipf.rollout.imex`. The conserved noise is
+`aipf.rollout.imex` logs which of the three set `M_s`: the hook at `INFO`, `mean` and `max` at `DEBUG`. The conserved noise is
 `n_hat = G(k) i k . zeta_hat`, `zeta = noise_scale sqrt(2 kB T / (dV dt)) L w`, `L L^T = M`, `w`
 standard normal per cell, direction and channel, with
 `G(k) = exp(-k^2 sigma^2 / 2)` (`gaussian`) or 1 (`none`). It reads the model's `kernel.w_hat` and
