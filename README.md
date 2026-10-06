@@ -197,8 +197,8 @@ Issues and questions are welcome on GitHub.
 
 ## Citation
 
-If you use this code, please cite the paper and the software. GitHub's "Cite this repository"
-button reads [CITATION.cff](CITATION.cff).
+If you use this code, please cite the paper. GitHub's "Cite this repository" button reads
+[CITATION.cff](CITATION.cff).
 
 ```bibtex
 @article{chen2026aipf,
@@ -208,15 +208,6 @@ button reads [CITATION.cff](CITATION.cff).
   year    = {2026},
   doi     = {10.48550/arXiv.2610.01432},
   url     = {https://arxiv.org/abs/2610.01432}
-}
-
-@software{chen_aipf_2026,
-  author  = {Chen, Mengyi},
-  title   = {Ab initio phase-field models},
-  version = {0.1.0},
-  year    = {2026},
-  url     = {https://github.com/mengyi-chen/ab-initio-phase-field-models},
-  license = {MIT}
 }
 ```
 
