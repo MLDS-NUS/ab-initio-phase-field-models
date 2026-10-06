@@ -123,9 +123,10 @@ def run(args: argparse.Namespace) -> int:
         ckpt = _published(system)
         if ckpt is None:
             return 2
-    from aipf.diagnose.run import check_declared, request_T_grid
+    from aipf.diagnose.run import check_declared, check_diagnosable, request_T_grid
     from aipf.diagnose.run import run as diagnose
     try:
+        check_diagnosable(system)
         request_T_grid(declared, tuple(args.stage), tuple(args.pressure or ()),
                        args.t_grid, override_declared=args.override_declared)
         check_declared(declared, tuple(args.stage))

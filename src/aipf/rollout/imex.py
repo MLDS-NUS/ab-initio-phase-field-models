@@ -1,9 +1,12 @@
 """The semi-implicit (IMEX) scheme the published rollouts ran, deterministic and with conserved noise.
 Frozen operator ``A = I + dt k^2 M_s H(k)``, ``H = Hess f_loc(rho_bar) + W_hat(k)``; per step
 ``rho^{n+1} = A^-1 (rho^n + dt F(rho^n) + dt k^2 M_s H rho^n + dt n_hat)``, then hermitianise, then project.
-Reads the model's ``kernel.w_hat`` and ``f_local`` (a pair-kernel functional); other forms are refused."""
+Reads the model's ``kernel.w_hat`` and ``f_local`` (a pair-kernel functional); other forms are refused.
+A model with a ``stabilizer_mobility(rho, T)`` method sets ``M_s`` itself, and ``m_stab`` is then left
+undeclared (:func:`stabilizer_mobility`)."""
 from __future__ import annotations
 
+import logging
 import math
 from contextlib import contextmanager
 from typing import Iterator, List, Optional
@@ -23,6 +26,11 @@ from .noise import (NOISE_EVAL_FRAC, check_noise_eval, draw_w,
 #: How the state projection restores mass: ``"shift"`` writes ``k=0`` back (the published rollouts),
 #: ``"headroom"`` is :func:`aipf.solve.project_state` (never below ``lo``).
 MASS_RESTORES = ("shift", "headroom")
+
+_LOG = logging.getLogger(__name__)
+
+#: Relative tolerance of the stabiliser's symmetry and positive semi-definiteness checks.
+_STABILIZER_RTOL = 1e-6
 
 
 def _require_pair_kernel(model) -> None:
@@ -68,6 +76,49 @@ def pointwise_guard(model, floor: Optional[float]) -> Iterator[None]:
             model.mobility = mob0
         else:
             del model.mobility
+
+
+def _stabilizer_hook(model, m_stab):
+    """The model's ``stabilizer_mobility``, or ``None`` with ``m_stab`` checked; a declared ``m_stab``
+    beside the hook is refused, since the two would each set ``M_s``."""
+    hook = getattr(model, "stabilizer_mobility", None)
+    if hook is None:
+        check_m_stab(m_stab)
+        return None
+    if m_stab is not UNDECLARED:
+        raise ValueError(
+            f"m_stab={m_stab!r} is declared and {type(model).__name__} has a "
+            f"stabilizer_mobility, which sets M_s itself; leave m_stab undeclared for "
+            f"this model, or roll out one without the method")
+    return hook
+
+
+def stabilizer_mobility(hook, rho: torch.Tensor, T_t: torch.Tensor) -> torch.Tensor:
+    """``M_s`` from a model's hook, called once on the real-space field at ``t = 0`` ``(1, n, Gx, Gy, Gz)``
+    and ``T_t`` ``(1,)``; refused unless ``(n, n)``, finite, symmetric and positive semi-definite to a
+    relative ``_STABILIZER_RTOL``."""
+    n = int(rho.shape[1])
+    M = hook(rho, T_t)
+    if not isinstance(M, torch.Tensor) or tuple(M.shape) != (n, n):
+        shape = tuple(M.shape) if isinstance(M, torch.Tensor) else type(M).__name__
+        raise ValueError(
+            f"stabilizer_mobility returned {shape}, not an ({n}, {n}) tensor: M_s is one "
+            f"matrix over the species, frozen for the whole rollout")
+    M = M.detach().to(device=rho.device, dtype=rho.dtype)
+    if not bool(torch.isfinite(M).all()):
+        raise ValueError(f"stabilizer_mobility returned a non-finite M_s: {M.tolist()}")
+    tol = _STABILIZER_RTOL * float(M.abs().max())
+    if float((M - M.T).abs().max()) > tol:
+        raise ValueError(
+            f"stabilizer_mobility returned a non-symmetric M_s: {M.tolist()}. A mobility "
+            f"is symmetric (Onsager), and the frozen operator is built on that")
+    lowest = float(torch.linalg.eigvalsh(M.double())[0])
+    if lowest < -tol:
+        raise ValueError(
+            f"stabilizer_mobility returned an M_s with eigenvalue {lowest!r} < 0: "
+            f"{M.tolist()}. A negative mobility makes the implicit operator "
+            f"anti-diffusive, which is what it exists to damp")
+    return M
 
 
 def _full_grid(rho_hat0: torch.Tensor, what: str) -> tuple:
@@ -192,9 +243,10 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
     saved states ``(n_saved, n, Gx, Gy, Gzr)`` on the CPU. ``noise=None`` is deterministic; otherwise a
     dict with ``kBT_noise``, ``noise_scale``, ``noise_mode``, ``sigma_noise``, ``noise_eval``,
     ``predictor_floor``. ``v_ext``/``kbt_field``: a static external potential and a per-cell ``kBT``
-    (:func:`pointwise_fields`). Every other knob is declared."""
+    (:func:`pointwise_fields`). Every other knob is declared, except ``m_stab`` for a model with a
+    ``stabilizer_mobility``, which must leave it undeclared."""
     _require_pair_kernel(model)
-    m_stab = check_m_stab(m_stab)
+    hook = _stabilizer_hook(model, m_stab)
     _check_projection(state_proj, state_clamp, domain, mass_restore)
     if clamp_rho is UNDECLARED:
         raise ValueError(
@@ -223,12 +275,12 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
             T_t = torch.tensor([kBT / kB], device=device)
         return _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps,
                     save_every, m_stab, state_proj, state_clamp, domain,
-                    mass_restore, noise, generator, w_scale)
+                    mass_restore, noise, generator, w_scale, hook)
 
 
 def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
          m_stab, state_proj, state_clamp, domain, mass_restore, noise,
-         generator, w_scale=None) -> torch.Tensor:
+         generator, w_scale=None, hook=None) -> torch.Tensor:
     device = rho_hat.device
     Hb = local_hessian(model, rho_bar, kBT)
     Gx, Gy, Gzr = (int(s) for s in rho_hat.shape[-3:])
@@ -239,10 +291,15 @@ def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
     kmag = torch.sqrt(kx * kx + ky * ky + kz * kz)[:, 0]
     k2 = (kmag * kmag).unsqueeze(-1).unsqueeze(-1)
     H_k = model.kernel.w_hat(kmag) + Hb
-    if m_stab == "mean":
+    if hook is not None:
+        M_s = stabilizer_mobility(hook, ops.irfft(rho_hat * N), T_t)
+        _LOG.info("M_s from %s.stabilizer_mobility", type(model).__name__)
+    elif m_stab == "mean":
         M_s = model.mobility(rho_bar.view(1, n, 1, 1, 1), T_t)[0, :, :, 0, 0, 0]
+        _LOG.info("M_s from m_stab='mean'")
     else:
         M_s = max_norm_mobility(model, ops.irfft(rho_hat * N), T_t)
+        _LOG.info("M_s from m_stab='max'")
     dtL = dt * k2 * torch.einsum("ij,...jk->...ik", M_s, H_k)
     A_inv = _inverse(torch.eye(n, device=device) + dtL).to(torch.complex64)
     MH = dtL.to(torch.complex64)

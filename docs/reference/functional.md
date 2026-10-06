@@ -140,3 +140,40 @@ A new rung is a class with the four protocol methods, registered with
 `MODEL_REGISTRY.register(name, cls)`, its module listed in `build._FORM_MODULES`, its form added to
 `aipf.system.FUNCTIONAL_FORMS`, and a translation in `build._TRANSLATIONS` that maps the declaration
 onto the constructor. Until it has a translation, `build` refuses the form by name.
+
+## A model defined elsewhere
+
+A model this package does not define is declared with a factory:
+
+    Functional(form, local, kernel, kwargs, factory=make_model)
+
+`build(system, **overrides)` calls `make_model(system, **overrides)` and returns what it gives back,
+with the overrides recorded as `build_overrides`; `rung_kwargs` refuses such a functional, having
+nothing to translate. `form`, `local` and `kernel` are then names only and are not checked against
+the ladder. `kwargs` carries at least `grid` and `nyquist_mask`, which training and the rollouts read
+off the declaration. The factory is left out of the functional's `repr` and equality. A variant
+declares its own factory the same way, and its `mobility` may be `None`. A run's `MANIFEST.json`
+records the factory as `model_factory: "module:qualname"`.
+
+`system.py` is executed outside `sys.modules`, so the factory and the classes it builds are imported
+from an installed package, not defined in `system.py`. A checkpoint holds the model's `state_dict`
+and no class: a reload builds the model from the declaration again and loads the weights strictly.
+
+What the model must provide, and which part of the package reads it:
+
+| what | read by | checked |
+|---|---|---|
+| a `torch.nn.Module` with at least one parameter | training, checkpoints | by `build` |
+| `forward`, `chemical_potential`, `bulk_free_energy_density`, `mobility`, as in [the protocol](#the-protocol) | training, the solvers | by `build` |
+| `_cache`, an `aipf.spectral.OpsCache`, and `ops`, its `SpectralOps` (`_cache.ops`), with the declared `nyquist_mask` | training (the operators per grid), the explicit solvers | by `build` |
+| `kernel.w_hat(k)`: `(*k.shape, n, n)` from `|k|` alone, no grid or box argument | the semi-implicit scheme's frozen operator | when it runs |
+| `f_local.f_pointwise(rho, kBT)` (`rho` `(P, n)`, `kBT` `(P,)`, out `(P,)`) and `f_local.mu_pointwise(rho, kBT)` (out `(P, n)`) | the semi-implicit scheme's frozen Hessian and its guards | when it runs |
+| optionally `stabilizer_mobility(rho, T)` | the semi-implicit scheme's `M_s` ([rollout.md](rollout.md#the-scheme)) | when it runs |
+
+The rollouts' guards act by replacing methods on the instance for the length of a rollout:
+`clamp_rho`, `v_ext` and `kbt_field` in the semi-implicit scheme replace `f_local.mu_pointwise` and
+`mobility`; `clamp_rho` in the explicit solvers replaces `chemical_potential` and `mobility`. A
+`forward` that reads `mu` through `self.chemical_potential`, the pointwise part of it through
+`self.f_local.mu_pointwise`, and `M` through `self.mobility` sees every guard; a `forward` that
+bypasses them does not, and must not be rolled out with those options. `aipf diagnose` reads parts
+of this package's own rungs and refuses a functional built by a factory.

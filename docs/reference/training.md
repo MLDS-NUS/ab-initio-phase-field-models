@@ -24,7 +24,7 @@ declaration answers. Exactly one of `steps` and `epochs`.
 |---|---|
 | `final.ckpt` | the Lightning checkpoint after the last step |
 | `hparams.yaml` | every `TrainConfig` field of the run; a `warnings` entry lists declared weights that had no data |
-| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape |
+| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape; `model_factory` for a functional built by a factory |
 | `steps.json` | with `--log-every-step`: `{"loss": [...], "terms": [...]}` per step, written after the first step, every 50 steps, at the end and on failure |
 | `UNTRAINED_TERMS.txt` | only when a term carries a non-zero weight and no data fed it |
 | `job.pbs`, `job.log` | with `--pbs` |

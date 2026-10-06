@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from aipf.data.rows import measured_rows
-from aipf.functional.build import build
+from aipf.functional.build import build, factory_name
 from aipf.system import Checkpoint, System
 from aipf.train.ckpt_compat import CONFIG_SCHEMA_TAGS, NEW_CONFIG_SCHEMA_TAG
 from aipf.train.checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
@@ -126,6 +126,18 @@ def request_T_grid(declared: Mapping[str, Any], stages: Sequence[str],
 #: also has ``mu_roots``, which needs a ``mu`` and a symmetry point the isobaric ``g(x)`` of a
 #: two-species system does not have; the one-field stage reads it (``one_field["readoff"]``).
 PHASE_DIAGRAM_BINODAL_ROUTES = ("convex_hull",)
+
+
+def check_diagnosable(system: System) -> None:
+    """Refuse a functional built by a factory: the stages read a rung's own parts (``f_local``, ``kernel``,
+    ``kB``), which such a model need not have."""
+    functional = getattr(system, "functional", None)
+    if functional is not None and getattr(functional, "factory", None) is not None:
+        raise ValueError(
+            f"system {system.name!r} declares its functional by a factory "
+            f"({factory_name(functional.factory)}), and the diagnosis reads the parts of this "
+            f"package's own rungs; a model this package does not define is diagnosed by "
+            f"its own code")
 
 
 def check_declared(declared: Mapping[str, Any], stages: Sequence[str]) -> None:
@@ -901,6 +913,7 @@ def run(system: System, ckpt: Any, *, stages: Sequence[str],
     ``pressures``: the isobars, in the manifolds' pressure unit (GPa for the shipped systems).
     ``T_grid``: the temperatures (K). ``override_declared``: as :func:`request_T_grid`.
     ``declared``: the system's ``defaults["diagnose"]`` keywords, forwarded to the stages."""
+    check_diagnosable(system)
     bad = sorted(set(stages) - set(STAGES))
     if bad:
         raise ValueError(f"unknown stage(s) {bad}; one of {STAGES}")

@@ -21,7 +21,7 @@ import lightning as L
 import torch
 import yaml
 
-from aipf.functional.build import build as build_functional
+from aipf.functional.build import build as build_functional, factory_name
 from aipf.system import Checkpoint, System
 
 from .ckpt_compat import CONFIG_SCHEMA_TAGS, NEW_CONFIG_SCHEMA_TAG
@@ -822,8 +822,17 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
                       else _plain(penalties.provenance())),
         "kernel_hinge": None if hinge is None else hinge.provenance(),
         "written_at": datetime.now(timezone.utc).isoformat(),
+        **_factory_record(system),
     }, indent=1, sort_keys=True))
     return run_dir
+
+
+def _factory_record(system: System) -> Dict[str, str]:
+    """``{"model_factory": "module:qualname"}`` for a functional built by a factory; empty for a rung,
+    whose manifest is as it always was."""
+    if getattr(system.functional, "factory", None) is None:
+        return {}
+    return {"model_factory": factory_name(system.functional.factory)}
 
 
 def _resolve_weights(declared: Checkpoint, raw, system: System | None = None) -> Path:

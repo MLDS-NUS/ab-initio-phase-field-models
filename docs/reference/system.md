@@ -80,20 +80,24 @@ and every location tried. `verify_under(root)` checks a declared `path` under on
 
 ## Functional and Mobility
 
-    Functional(form, local, kernel, kwargs)
+    Functional(form, local, kernel, kwargs, factory=None)
     Mobility(form, T_form, kwargs)
 
 `form` is one of `landau`, `square_gradient`, `nonlocal_kernel`, `neural_operator`. `kernel` is
 required for `nonlocal_kernel` and must be `None` otherwise. `kwargs` are the constructor arguments
 in the declaration's spelling; every argument the constructor takes must be declared. The
 admissible values are listed in [functional.md](functional.md) and [mobility.md](mobility.md).
+`factory` builds a model this package does not define; `form`, `local` and `kernel` are then not
+checked, and `kwargs` carries `grid` and `nyquist_mask`
+([functional.md](functional.md#a-model-defined-elsewhere)).
 
 ## Variant
 
     Variant(functional, mobility, checkpoint, defaults)
 
 A second model of the same system, sharing its constants, paths and data. `checkpoint` is a
-`Checkpoint` or `None`; `defaults` replaces top-level keys of the system's `defaults`. A variant's
+`Checkpoint` or `None`; `mobility` is `None` only beside a functional with a `factory`; `defaults`
+replaces top-level keys of the system's `defaults`. A variant's
 name is one directory name: its tracked checkpoint sits at
 `data/<system>/ckpt/published/<name>/final.ckpt`. The reduced-unit system declares two, `fh` and
 `landau`, the Flory-Huggins and Landau square-gradient baselines.
