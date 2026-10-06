@@ -9,6 +9,7 @@ import torch
 
 from aipf.solve.noise import declared_noise
 from aipf.solve.trust_domain import in_domain
+from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.system import System
 
 from .imex import local_hessian, rollout_imex
@@ -19,6 +20,7 @@ from .spinodal import noise_for, trust_domain
 
 def homogeneous_state(rho_bar, grid, device) -> torch.Tensor:
     """Only ``k = 0`` set, to ``rho_bar``."""
+    refuse_two_dimensions(len(grid), "the FDT gate")
     Gx, Gy, Gz = (int(g) for g in grid)
     h = torch.zeros((1, len(rho_bar), Gx, Gy, Gz // 2 + 1),
                     dtype=torch.complex64, device=device)
@@ -45,6 +47,8 @@ def run_one(system: System, model, decl: dict, *, box, rho_bar, grid, T: float,
             device: str, v_ext=None, kbt_field=None) -> dict:
     """One noisy rollout with the projection off (``"floor"`` at 0) and its per-mode ratios to ``S_pred``.
     ``v_ext``/``kbt_field`` pass through to the scheme; ``S_pred`` assumes them uniform (``kbt_field = kB T``)."""
+    refuse_two_dimensions(model_ndim(model), "the FDT gate")
+    refuse_two_dimensions(len(grid), "the FDT gate")
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
     noise = dict(noise_for(system, decl, T, eps), noise_eval=noise_eval)

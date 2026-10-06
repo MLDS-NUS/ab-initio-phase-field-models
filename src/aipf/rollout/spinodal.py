@@ -17,7 +17,7 @@ import torch
 from aipf.paths import PUBLISHED_DIRNAME
 from aipf.solve.noise import declared_noise
 from aipf.solve.trust_domain import TrustDomain
-from aipf.spectral import SpectralOps
+from aipf.spectral import SpectralOps, model_ndim, refuse_two_dimensions
 from aipf.system import System
 from aipf.train.dataset import scatter_modes
 
@@ -82,6 +82,7 @@ def load_model(system: System, path: Path) -> torch.nn.Module:
     state = saved["state_dict"] if "state_dict" in saved else \
         saved["model_state_dict"]
     model = build(system)
+    refuse_two_dimensions(model_ndim(model), "the spinodal and slab drivers")
     if set(state) <= set(model.state_dict()):
         merged = dict(model.state_dict())
         merged.update(state)

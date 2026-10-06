@@ -185,3 +185,63 @@ if it reads `M` through `self.mobility`. A model with the hook takes no `m_stab`
 `spinodal`, `slab` and FDT drivers always pass the system's declared `Noise.m_stab`, so such a model
 is rolled out by calling `aipf.rollout.imex.rollout_imex` directly. `aipf diagnose` reads parts of
 this package's own rungs and refuses a functional built by a factory.
+
+## Two dimensions
+
+A model is two-dimensional when its declared `grid` has two entries, `(Gx, Gy)`. The number of axes
+is read from that declaration (`model.ops.ndim`), never from a tensor's shape: a half spectrum
+`(B, n, Gx, Gyr)` read as three axes would take the species axis for `Gx`. `aipf.spectral.make_ops`
+builds `SpectralOps` for three axes and `SpectralOps2D` for two, and an `OpsCache` seeded with a
+two-axis grid holds `SpectralOps2D` and reads two trailing axes on every lookup. In two dimensions the
+half (`rfft`) axis is `y`:
+
+| | 3D | 2D |
+|---|---|---|
+| `rho_hat` | `(B, n, Gx, Gy, Gz//2+1)` | `(B, n, Gx, Gy//2+1)` |
+| `boxes` | `(B, 3)` | `(B, 2)`, `(Lx, Ly)` |
+| `M(rho, T)` | `(B, n, n, Gx, Gy, Gz)` | `(B, n, n, Gx, Gy)` |
+| persistent buffers | `NX`, `NY`, `NZ`, `MULT` `(1, 1, 1, 1, Gzr)` | `NX`, `NY`, `MULT` `(1, 1, 1, Gyr)` |
+| `ops.ndim` | 3 (a class attribute, not state) | 2 |
+
+`MULT` is the multiplicity along the half axis in both: `sum |full fft|^2 = sum MULT |rfft|^2`, with
+the `k = 0` and, for an even length, the Nyquist entry counted once. The Nyquist masks of the odd-order
+operators are the same rule on each axis.
+
+What runs in two dimensions: `nonlocal_kernel`, a model built by a factory on a two-axis `grid`, the
+explicit integrators and the semi-implicit scheme of [rollout.md](rollout.md#the-scheme), `hermitianize`
+and the state projections, and `Field`. The pair kernel's `Ŵ(k)` is then the Hankel transform of the
+same radial `W(r)`,
+
+    Ŵ(k) = 2 pi int_0^R_cut r W(r) J0(k r) dr,
+
+`AnalyticRadialTransform(..., dim=2)`, on the same `r_quad` and `k_table` buffers (`dim` is an
+attribute, so the state dict is the 3D one's). A two-dimensional `nonlocal_kernel` builds it itself and
+refuses an evaluator that does not declare `dim=2`.
+
+What is three-dimensional only, and raises `NotImplementedError` naming itself when a two-dimensional
+model or grid reaches it: the `landau`, `fh`, `square_gradient` and `neural_operator` rungs, the
+`lattice_sum` evaluator, `W_hat(0)` (`w_hat_zero_radial`, `w_hat_zero_quadrature`) and `kappa_eff`,
+the anchor tables, the convexity and Gamma-path penalties, the kernel hinge, `aipf diagnose` (and the
+model isobars `aipf md` draws through it), the `slab`, `spinodal` and FDT drivers and their observables,
+and the KDE deposit, whose positions are three-dimensional. A Lightning-hparams or k-modes checkpoint
+drops its grid buffers on load, so the number of axes it was saved on (its `ops.NX` rank, 3 when not
+saved) is compared with the model's first and a mismatch is refused; this package's own checkpoints
+load strictly and differ in those buffers anyway.
+
+The noise of a two-dimensional model needs one more number. Its variance is `2 kBT / (dV dt)`, and a
+grid of `(Lx, Ly)` cells fixes only the area `dA` of a cell; `dV = dA * depth`, with `depth` declared
+on every noisy solver call (`rollout_sde`, `step_sde_euler_maruyama`, `rollout_imex` with `noise`). It
+says what the densities are: `depth = 1.0` for areal densities (per unit area), the reference cell's
+`Lz` for volumetric densities averaged along z. There is no default; a noisy 2D call without `depth` is
+refused, and a 3D call with one is refused too (its `dV` comes from its box). Deterministic 2D rollouts
+read no `depth`. The stationary spectrum is then `S(k) = V <|rho_hat_k|^2> = kBT H(k)^-1` with
+`V = Lx Ly depth`.
+
+A two-dimensional model is an effective model, not the z average of a three-dimensional one. The
+`k_z = 0` plane of 3D Model B dynamics is not closed: the nonlinear terms couple the `k_z != 0` modes
+into it, so the z average of a 3D trajectory does not obey any functional of the z average alone. The
+z-invariance check in `tests/unit/test_solve_2d.py` (a 2D rollout equals the 3D rollout of the same
+field held constant along z, sliced in z) checks the solvers, which agree exactly when the 3D field
+has no `k_z != 0` content to begin with; it says nothing about that closure. For the same reason the
+2D `W(r)` is not the 3D one: the z-projected kernel `int W3(sqrt(rho^2 + z^2)) dz` has as its Hankel
+transform `Ŵ3(k)` at `k_z = 0`, and a 2D model learns its own `W` from 2D data.

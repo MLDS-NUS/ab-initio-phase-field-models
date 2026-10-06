@@ -7,7 +7,7 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from aipf.losses.dyn import l_dyn
-from aipf.spectral import SpectralOps
+from aipf.spectral import SpectralOps, model_ndim, ops_ndim, refuse_two_dimensions
 
 WHatFn = Callable[[torch.Tensor], torch.Tensor]
 
@@ -66,6 +66,7 @@ def structure_factor(rho_hat: torch.Tensor, ops: SpectralOps,
 
     ``rho_hat`` ``(B, n_species, Gx, Gy, Gzr)``; returns ``(k_centers (n_bins,), S (B, n_bins))``,
     NaN in empty shells."""
+    refuse_two_dimensions(ops_ndim(ops), "structure_factor")
     if n_bins < 1:
         raise ValueError(f"n_bins must be >= 1, got {n_bins}")
     kmag = ops.k2(boxes).sqrt()                                   # (B,1,Gx,Gy,Gzr)
@@ -106,6 +107,7 @@ def rollout_drift(model, rho_hat_traj: torch.Tensor, boxes_traj: torch.Tensor,
 
     Trajectories ``(T_frames, B, ...)`` with per-frame boxes and ``T``; ``alpha``, ``k_max`` required.
     Returns ``(T_frames - 1,)``."""
+    refuse_two_dimensions(model_ndim(model), "rollout_drift")
     actual = finite_difference_rate(rho_hat_traj, dt)
     n_frames = rho_hat_traj.shape[0]
     per_frame = []

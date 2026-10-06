@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from .base import MODEL_REGISTRY
-from aipf.spectral import OpsCache
+from aipf.spectral import OpsCache, refuse_two_dimensions
 
 __all__ = ["Landau", "FloryHuggins", "landau_f", "landau_mu", "regular_solution_f",
            "regular_solution_mu", "ideal_mixing_f", "ideal_mixing_mu", "landau_curvature",
@@ -143,6 +143,7 @@ class _BasisExpansionRung(nn.Module):
     def __init__(self, grid: Tuple[int, int, int], n_species: int, *,
                  nyquist_mask: bool):
         super().__init__()
+        refuse_two_dimensions(len(grid), f"the {type(self).__name__} functional")
         self._cache = OpsCache(grid, n_species, nyquist_mask=nyquist_mask)
         self.ops = self._cache.ops
         self.n_species = int(n_species)

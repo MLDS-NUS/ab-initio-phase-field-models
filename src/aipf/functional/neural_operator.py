@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from .base import MODEL_REGISTRY
-from aipf.spectral import OpsCache
+from aipf.spectral import OpsCache, refuse_two_dimensions
 
 __all__ = ["NeuralOperator"]
 
@@ -65,6 +65,7 @@ class NeuralOperator(nn.Module):
                  n_layers: int = _DEFAULT_LAYERS,
                  hidden: int = _DEFAULT_HIDDEN, *, nyquist_mask: bool) -> None:
         super().__init__()
+        refuse_two_dimensions(len(grid), "the neural_operator functional")
         if n_species < 1:
             raise ValueError(f"n_species must be >= 1, got {n_species}")
         if n_layers < 1:

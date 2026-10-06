@@ -84,6 +84,13 @@ standard normal per cell, direction and channel, with
 
 The semi-implicit scheme above takes `floor` and `domain` only.
 
+Both schemes run a two-dimensional model (`model.ops.ndim == 2`): `rho_hat` `(1, n, Gx, Gy//2+1)` in a
+box `(2,)` for the semi-implicit one, `(B, 2)` boxes for the explicit ones, `kbt_field` `(Gx, Gy)`,
+`v_ext` `(n, Gx, Gy)`, the noise drawn `(B, n, 2, Gx, Gy)` and `stabilizer_mobility` handed
+`(1, n, Gx, Gy)`. Under noise the call declares `depth`, the cell's extent along the averaged axis
+(`dV = dA * depth`; 1.0 for areal densities, `Lz` for volumetric ones), and a three-dimensional call
+declares none. See [functional.md](functional.md#two-dimensions).
+
 ## Outputs
 
 `spinodal_<run>_<det|s<seed>>.npz`: `t_model`, `Phi_model`, `L_model`, `Sk_model`, `t_md`, `Phi_md`,

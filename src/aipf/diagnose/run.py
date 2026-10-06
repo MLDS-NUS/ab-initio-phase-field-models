@@ -21,6 +21,7 @@ import torch
 
 from aipf.data.rows import measured_rows
 from aipf.functional.build import build, factory_name
+from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.system import Checkpoint, System
 from aipf.train.ckpt_compat import CONFIG_SCHEMA_TAGS, NEW_CONFIG_SCHEMA_TAG
 from aipf.train.checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
@@ -195,6 +196,7 @@ def load_model(system: System, path: Path) -> torch.nn.Module:
     saved = torch.load(path, map_location="cpu", weights_only=False)
     state = _state_dict(saved)
     model = build(system)
+    refuse_two_dimensions(model_ndim(model), "the diagnosis")
     if _is_kmodes(saved):
         return load_kmodes_into(model, saved).double().eval()
     if set(state) <= set(model.state_dict()):

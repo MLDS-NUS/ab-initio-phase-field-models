@@ -138,6 +138,11 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+class _TwoDimensionalGrid(NotImplementedError, ValueError):
+    """A two-entry grid: not implemented (the deposit is three-dimensional), and a ``ValueError`` as a grid of
+    any other wrong length is."""
+
+
 def _as_grid(grid) -> tuple[int, int, int]:
     """One integer, or three, into a per-axis resolution."""
     try:
@@ -145,6 +150,11 @@ def _as_grid(grid) -> tuple[int, int, int]:
     except TypeError:
         axes = (int(grid),) * 3
     else:
+        if n_axes == 2:
+            raise _TwoDimensionalGrid(
+                f"grid has 2 entries: the density field is deposited from three-dimensional "
+                f"atom positions onto a (Gx, Gy, Gz) mesh, and a two-dimensional grid is not "
+                f"implemented here; deposit in 3D and average along the axis instead")
         if n_axes != 3:
             raise ValueError(
                 f"grid has {n_axes} entries: it is one resolution for a "

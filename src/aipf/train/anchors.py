@@ -16,6 +16,7 @@ import torch
 
 from aipf.data.rows import measured_rows
 from aipf.paths import tracked_tables
+from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.train.pressure import pressure_from_model
 
 _LOG = logging.getLogger(__name__)
@@ -602,6 +603,7 @@ class AnchorTables:
     def batch(self, model, kB: float) -> Dict[str, Dict[str, Any]]:
         """The entries ``compute_losses`` reads, model side rebuilt with a graph (a per-step object);
         an anchor with no rows is left out."""
+        refuse_two_dimensions(model_ndim(model), "the anchor losses")
         w_hat = _w_hat_of(model)
         out: Dict[str, Dict[str, Any]] = {}
         if self.mobility_rho.shape[0]:

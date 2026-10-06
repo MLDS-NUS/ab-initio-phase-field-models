@@ -6,6 +6,13 @@ from __future__ import annotations
 
 import numpy as np
 
+from aipf.spectral import refuse_two_dimensions
+
+
+def _refuse_two_dimensional_field(a, what: str) -> None:
+    """A ``(F, n, Gx, Gy)`` field is two-dimensional; these measures read ``(F, n, Gx, Gy, Gz)``."""
+    refuse_two_dimensions(2 if np.ndim(a) == 4 else 3, what)
+
 
 def weighted_var_c(rho, x_channel: int):
     """``(Phi (F,), c, cbar)``: density-weighted ``Var(c)``, the field ``c`` and its weighted mean."""
@@ -20,6 +27,7 @@ def weighted_var_c(rho, x_channel: int):
 def decomp_metrics(rho, box_L, x_channel: int):
     """``(Phi (F,), L (F,), Sk (F, G/2-1))`` on a cubic grid; ``Sk`` on integer wavenumbers ``1..G/2-1``,
     ``L = box_L / k1`` with ``k1`` the ``S``-weighted mean integer wavenumber."""
+    _refuse_two_dimensional_field(rho, "decomp_metrics")
     ng = rho.shape[-1]
     Phi, c, cbar = weighted_var_c(rho, x_channel)
     S = np.abs(np.fft.fftn(c - cbar, axes=(1, 2, 3))) ** 2
@@ -36,6 +44,7 @@ def decomp_metrics(rho, box_L, x_channel: int):
 
 def conc_profile(rho, x_channel: int, axis: int):
     """``c`` along the spatial ``axis`` (0, 1 or 2), density-weighted over the other two; ``(F, G_axis)``."""
+    _refuse_two_dimensional_field(rho, "conc_profile")
     lateral = tuple(2 + a for a in range(3) if a != axis)
     lat = np.asarray(rho).sum(axis=lateral, dtype=np.float64)       # (F, n, G)
     return lat[:, x_channel] / np.maximum(lat.sum(axis=1), 1e-9)
@@ -93,6 +102,7 @@ def field_frames(t_model, t_md, stride: int):
 def mode_wavevectors(box, grid):
     """``(|k|, multiplicity)`` of every stored rfft mode, ``(Gx, Gy, Gzr)``; multiplicity 2 off the
     ``k_z = 0`` and Nyquist planes."""
+    refuse_two_dimensions(len(grid), "mode_wavevectors")
     Gx, Gy, Gz = (int(g) for g in grid)
     Gzr = Gz // 2 + 1
     kx = (2.0 * np.pi * np.fft.fftfreq(Gx) * Gx / box[0]).reshape(Gx, 1, 1)
@@ -108,6 +118,7 @@ def mode_wavevectors(box, grid):
 
 def measure_S_modes(frames, V: float):
     """``S_ij(k) = V mean_F[rho_hat_i conj(rho_hat_j)]`` from stored ``(F, n, Gx, Gy, Gzr)`` states."""
+    _refuse_two_dimensional_field(frames, "measure_S_modes")
     a = np.asarray(frames).astype(np.complex128)
     return np.einsum("fixyz,fjxyz->xyzij", a, a.conj()) * (V / a.shape[0])
 

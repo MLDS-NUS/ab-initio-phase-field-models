@@ -11,6 +11,8 @@ import torch
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq, curve_fit
 
+from aipf.spectral import model_ndim, refuse_two_dimensions
+
 #: The declared read-offs, each with the keys its block must carry.
 READOFFS = {
     "mu_roots": ("dtype", "phi_grid", "phi_clip", "min_width", "bracket_eps", "mu_w0", "tc_w0",
@@ -23,6 +25,7 @@ _POWER_BASE_FLOOR = 1e-12
 
 
 def _check_model(model) -> None:
+    refuse_two_dimensions(model_ndim(model), "the one-field route")
     f = model.f_local
     if model.n_species != 1 or f.ideal_form != "lattice":
         raise NotImplementedError(
