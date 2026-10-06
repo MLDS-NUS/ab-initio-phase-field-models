@@ -115,26 +115,94 @@ _TIMESTEP = b"ITEM: TIMESTEP"
 def read_dump_chain(paths, *, report: list) -> Iterator[Frame]:
     """Yield the frames of a restart chain of LAMMPS text dumps, in file order, each step once.
 
-    A frame whose timestep is at or below the last one kept is a restart's overlap and is dropped. A file
-    may end in NUL padding or a cut frame (:data:`TAIL_REASONS`): its complete frames are kept, the tail is
-    skipped and the next file read. Anything else that is not a frame, with a frame after it, raises.
+    The last writer wins: a file that starts at step ``S`` replaces every frame at or after ``S`` in the
+    files before it, a branch no later file continues. Every file's first step is read before any frame,
+    and a file that starts below the one before it raises (a glob sorts ``chunk_10`` before ``chunk_2``).
+    Within a file the steps rise; across a junction the step advances by the stride of the file before it
+    (or, if that kept fewer than two frames, of the file after it), or the chain raises. A file may end in
+    NUL padding or a cut frame (:data:`TAIL_REASONS`): its complete frames are kept, the tail is skipped
+    and the next file read. Anything else that is not a frame, with a frame after it, raises.
     :func:`read_dump` is left as it is: this reader holds every line to a newline and the frame layout.
 
     ``report`` gets one dict per file as it is opened, final once the iteration ends: ``source``,
-    ``frames_kept``, ``frames_overlap``, ``tail_bytes`` and ``tail`` (``None`` or a reason).
+    ``first_step`` and ``last_step`` (of the frames kept, ``None`` for none), ``frames_kept``,
+    ``frames_superseded``, ``tail_bytes`` and ``tail`` (``None`` or a reason).
     """
-    last = None
-    for path in paths:
-        entry = {"source": str(path), "frames_kept": 0, "frames_overlap": 0,
-                 "tail_bytes": 0, "tail": None}
+    paths = list(paths)
+    firsts = [_first_step(path) for path in paths]
+    known = [(path, step) for path, step in zip(paths, firsts) if step is not None]
+    for (before, low), (after, high) in zip(known, known[1:]):
+        if high < low:
+            raise ValueError(
+                f"{after} starts at step {high}, below {before}, which starts at "
+                f"{low}: the chain is out of order. A restart chain is named in "
+                f"the order it was written, and a sorted glob puts chunk_10 "
+                f"before chunk_2")
+    last = None        # (step, file) of the last frame kept
+    last_stride = None  # the stride of the file that holds it, if it kept two frames
+    for index, path in enumerate(paths):
+        cutoff = next((step for step in firsts[index + 1:] if step is not None),
+                      None)
+        entry = {"source": str(path), "first_step": None, "last_step": None,
+                 "frames_kept": 0, "frames_superseded": 0, "tail_bytes": 0,
+                 "tail": None}
         report.append(entry)
+        read = None
+        stride = None
+        pending = None
         for frame in _complete_frames(path, entry):
-            if last is not None and frame.timestep <= last:
-                entry["frames_overlap"] += 1
+            step = frame.timestep
+            if read is not None and step <= read:
+                raise ValueError(
+                    f"{path}: step {step} follows step {read} inside the file; "
+                    f"a chain reads each file's steps rising, and only a file's "
+                    f"first step may restart below the one before it")
+            read = step
+            if cutoff is not None and step >= cutoff:
+                entry["frames_superseded"] += 1
                 continue
-            last = frame.timestep
+            if entry["frames_kept"] == 0:
+                if last is not None and last_stride is not None:
+                    _check_junction(last, (step, path), last_stride)
+                elif last is not None:
+                    # the file before kept one frame: this file's own stride decides
+                    pending = last
+            else:
+                stride = step - entry["last_step"]
+                if pending is not None:
+                    _check_junction(pending, (entry["first_step"], path), stride)
+                    pending = None
+            if entry["first_step"] is None:
+                entry["first_step"] = step
+            entry["last_step"] = step
             entry["frames_kept"] += 1
             yield frame
+        if entry["frames_kept"]:
+            last, last_stride = (entry["last_step"], path), stride
+
+
+def _first_step(path) -> int | None:
+    """A dump's first timestep from its first two lines, or ``None`` if it does not start with a frame."""
+    with open(path, "rb") as handle:
+        first = handle.readline(_LINE_LIMIT)
+        value = handle.readline(_LINE_LIMIT)
+    if not first.startswith(_TIMESTEP) or not _whole(first) or not _whole(value):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _check_junction(before, after, stride: int) -> None:
+    """Refuse a junction ``(step, file)`` to ``(step, file)`` that does not advance by ``stride``."""
+    (low, older), (high, newer) = before, after
+    if high - low != stride:
+        raise ValueError(
+            f"the chain jumps from step {low} ({older}) to step {high} "
+            f"({newer}), and the stride is {stride}: steps are missing or "
+            f"repeated at the junction, and the timeline would carry a gap "
+            f"nobody sees")
 
 
 def _complete_frames(path, entry: dict) -> Iterator[Frame]:
@@ -168,9 +236,13 @@ def _strict_frame(first: bytes, handle) -> Frame | None:
             [float(v) for v in line.split()[:2]]
     except ValueError:
         return None
-    body = [handle.readline(_LINE_LIMIT) for _ in range(n_atoms)]
-    if not all(_whole(line) for line in body):
-        return None
+    body = []
+    for _ in range(n_atoms):
+        # stop at the first line that is not one, whatever count the header declared
+        line = handle.readline(_LINE_LIMIT)
+        if not _whole(line):
+            return None
+        body.append(line)
     return _parse_frame(timestep, [line.decode() for line in header[4:7]],
                         header[7].decode().split()[2:],
                         [line.decode() for line in body])

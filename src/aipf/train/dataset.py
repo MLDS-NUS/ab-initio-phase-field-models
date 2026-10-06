@@ -10,7 +10,7 @@ import dataclasses
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
@@ -50,7 +50,8 @@ class ArchiveKeys:
     composition_fallback: Optional[str]
     quality_file: Optional[str]
     quality_key: Optional[str]
-    reference_box: Optional[str] = None
+    # out of repr and equality, so a declaration without it prints and compares as it always did
+    reference_box: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "composition", tuple(self.composition))

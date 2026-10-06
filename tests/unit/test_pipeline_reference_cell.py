@@ -27,6 +27,10 @@ from aipf.train.dataset import (ArchiveKeys, ModeRun, ModeWindowDataset,
 #: A stated cell with no short binary spelling, so a rounded copy anywhere would show.
 STATED_CELL = (50.315273, 50.315273, 50.315273)
 
+#: The sha256 of ``_write_dump(path, _shrinking())`` and of its default call's ``rho_k`` bytes.
+DUMP_SHA256 = "3c24f95cb9ed34a7dfed2753fb7ef968707f3e98f66bbe03378e64461969dd3c"
+RHO_K_SHA256 = "c1e60a6095cefa339a120710459573d161998089ba93b8c117fe53d64cce98b1"
+
 #: A cell for the ten-Angstrom toy dumps below.
 CELL = (10.1, 10.1, 10.1)
 
@@ -130,6 +134,10 @@ def test_the_default_identity_is_the_one_written_before_the_cell_existed(
     with np.load(tmp_path / "cache" / key / "modes.npz") as payload:
         assert sorted(payload.files) == ["T_K", "box", "dt_frame_ps", "nvec",
                                          "rho_k"]
+        rho_k = payload["rho_k"]
+    # the dump and its amplitudes as the code before the cell wrote them, on the processor and on a GPU
+    assert expected["source_sha256"] == DUMP_SHA256
+    assert hashlib.sha256(rho_k.tobytes()).hexdigest() == RHO_K_SHA256
 
 
 def test_naming_the_default_rule_is_the_default_call(tmp_path):
@@ -327,6 +335,12 @@ def test_a_run_in_a_cell_reads_as_a_fixed_box_run_in_that_cell():
 def _samples_with(run, settings):
     dataset = ModeWindowDataset([run], settings)
     return [dataset[i] for i in range(len(dataset))]
+
+
+def test_the_declared_key_leaves_the_declarations_repr_and_equality_as_they_were():
+    plain = KEYS.replace(reference_box=None)
+    assert "reference_box" not in repr(KEYS)
+    assert repr(KEYS) == repr(plain) and KEYS == plain
 
 
 def test_training_declares_the_key_the_writer_writes():

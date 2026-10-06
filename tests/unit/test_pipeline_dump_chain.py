@@ -1,7 +1,8 @@
 """A run written as a restart chain of dumps, read as one timeline without a joined copy.
 
-Each restart rewrites the steps since its restart file, so a step can be in two files; it is read
-once. A killed job leaves its file ending in NUL padding or in a cut frame: the complete frames are
+Each restart rewrites the steps since its restart file, so a step can be in two files; the last
+writer wins. A gap at a junction, a file out of order and a step that goes back inside a file raise.
+A killed job leaves its file ending in NUL padding or in a cut frame: the complete frames are
 kept and the next file read. Corruption with a frame after it is not a tail and raises. A single path
 is read by ``read_dump`` exactly as before.
 
@@ -45,7 +46,8 @@ def _write(path, steps, *, tail=b""):
 
 
 def _chain(tmp_path, *tails):
-    """Steps 0-300 then a restart at 300 that rewrites step 300 and runs to 500."""
+    """Steps 0-300 then a restart at 300 that rewrites step 300 and runs to 500. ``_frame`` writes one
+    step alike wherever it is, so the copy kept makes no difference here."""
     a = _write(tmp_path / "chunk_0.dump", [0, 100, 200, 300],
                tail=tails[0] if tails else b"")
     b = _write(tmp_path / "chunk_1.dump", [300, 400, 500])
@@ -82,24 +84,95 @@ def test_a_chain_with_an_overlap_is_the_single_dump_of_its_distinct_steps(
     assert steps == [f.timestep for f in coarse_grain.read_dump(joined)]
 
 
-def test_the_first_copy_of_an_overlapping_step_is_the_one_kept(tmp_path):
+def test_the_later_copy_of_an_overlapping_step_is_the_one_kept(tmp_path):
+    """The last writer wins: the restart's copy of the step it restarted from."""
     a = _write(tmp_path / "a.dump", [0, 100])
     b = tmp_path / "b.dump"
     b.write_text(_frame(100, seed=7) + _frame(200))
     report = []
     frames = list(coarse_grain.read_dump_chain([a, b], report=report))
-    first = next(f for f in coarse_grain.read_dump(a) if f.timestep == 100)
-    assert np.array_equal(frames[1].positions, first.positions)
-    assert [(e["frames_kept"], e["frames_overlap"]) for e in report] == \
-        [(2, 0), (1, 1)]
+    later = next(f for f in coarse_grain.read_dump(b) if f.timestep == 100)
+    assert [f.timestep for f in frames] == [0, 100, 200]
+    assert np.array_equal(frames[1].positions, later.positions)
+    assert [(e["frames_kept"], e["frames_superseded"]) for e in report] == \
+        [(1, 1), (2, 0)]
 
 
-def test_a_restart_from_further_back_drops_every_step_already_read(tmp_path):
+def test_a_restart_from_further_back_replaces_every_step_it_rewrites(tmp_path):
+    """The earlier file's frames from the restart on are a branch nothing continues."""
     a = _write(tmp_path / "a.dump", [0, 100, 200, 300])
-    b = _write(tmp_path / "b.dump", [100, 200, 300, 400])
+    b = tmp_path / "b.dump"
+    b.write_text("".join(_frame(s, seed=s + 7) for s in (100, 200, 300, 400)))
+    report = []
+    frames = list(coarse_grain.read_dump_chain([a, b], report=report))
+    assert [f.timestep for f in frames] == [0, 100, 200, 300, 400]
+    rewritten = list(coarse_grain.read_dump(b))
+    for kept, written in zip(frames[1:], rewritten):
+        assert np.array_equal(kept.positions, written.positions)
+    assert report[0]["frames_superseded"] == 3
+    assert (report[0]["first_step"], report[0]["last_step"]) == (0, 0)
+    assert (report[1]["first_step"], report[1]["last_step"]) == (100, 400)
+
+
+def test_a_restart_from_the_same_first_step_replaces_the_whole_file(tmp_path):
+    a = _write(tmp_path / "a.dump", [0, 100, 200])
+    b = _write(tmp_path / "b.dump", [0, 100, 200, 300])
     steps, report = _steps([a, b])
-    assert steps == [0, 100, 200, 300, 400]
-    assert report[1]["frames_overlap"] == 3
+    assert steps == [0, 100, 200, 300]
+    assert report[0]["frames_kept"] == 0 and report[0]["frames_superseded"] == 3
+    assert report[0]["first_step"] is None and report[0]["last_step"] is None
+
+
+# ---------------------------------------------------------------------------
+# order and gaps
+# ---------------------------------------------------------------------------
+
+def test_a_chain_out_of_order_is_refused_naming_both_files(tmp_path):
+    early = _write(tmp_path / "chunk_2.dump", [0, 100])
+    late = _write(tmp_path / "chunk_10.dump", [200, 300])
+    with pytest.raises(ValueError, match="out of order.*chunk_10 before"
+                       ) as refused:
+        _steps(sorted([early, late]))
+    assert "chunk_2.dump" in str(refused.value)
+    assert "chunk_10.dump" in str(refused.value)
+    assert _steps([early, late])[0] == [0, 100, 200, 300]
+
+
+def test_a_gap_at_a_junction_is_refused_naming_files_steps_and_stride(tmp_path):
+    a = _write(tmp_path / "a.dump", [0, 100, 200])
+    b = _write(tmp_path / "b.dump", [400, 500])
+    with pytest.raises(ValueError, match="from step 200 .*a.dump.* to step "
+                       "400 .*b.dump.*stride is 100"):
+        _steps([a, b])
+
+
+def test_a_gap_behind_a_one_frame_file_is_judged_on_the_next_files_stride(
+        tmp_path):
+    one = _write(tmp_path / "a.dump", [0])
+    with pytest.raises(ValueError, match="stride is 100"):
+        _steps([one, _write(tmp_path / "b.dump", [200, 300])])
+    assert _steps([one, _write(tmp_path / "c.dump", [100, 200])])[0] == \
+        [0, 100, 200]
+
+
+def test_a_junction_between_two_one_frame_files_is_accepted(tmp_path):
+    a = _write(tmp_path / "a.dump", [0])
+    b = _write(tmp_path / "b.dump", [500])
+    assert _steps([a, b])[0] == [0, 500]
+
+
+def test_a_superseded_branch_leaves_no_gap(tmp_path):
+    """The stride is read on the frames kept: the junction is 0 to 100, not 300 to 100."""
+    a = _write(tmp_path / "a.dump", [0, 100, 200, 300])
+    b = _write(tmp_path / "b.dump", [100, 200])
+    assert _steps([a, b])[0] == [0, 100, 200]
+
+
+@pytest.mark.parametrize("steps", [[0, 100, 50, 200], [0, 100, 100, 200]])
+def test_a_step_that_goes_back_inside_a_file_is_refused(tmp_path, steps):
+    a = _write(tmp_path / "a.dump", steps)
+    with pytest.raises(ValueError, match="inside the file"):
+        _steps([a])
 
 
 def test_the_provenance_names_every_file_its_digest_and_what_was_kept(tmp_path):
@@ -112,10 +185,12 @@ def test_the_provenance_names_every_file_its_digest_and_what_was_kept(tmp_path):
     assert p["source_sha256"] == [hashlib.sha256(f.read_bytes()).hexdigest()
                                   for f in (a, b)]
     assert p["chain"] == [
-        {"source": str(a), "frames_kept": 4, "frames_overlap": 0,
-         "tail_bytes": 0, "tail": None},
-        {"source": str(b), "frames_kept": 2, "frames_overlap": 1,
-         "tail_bytes": 0, "tail": None}]
+        {"source": str(a), "first_step": 0, "last_step": 200,
+         "frames_kept": 3, "frames_superseded": 1, "tail_bytes": 0,
+         "tail": None},
+        {"source": str(b), "first_step": 300, "last_step": 500,
+         "frames_kept": 3, "frames_superseded": 0, "tail_bytes": 0,
+         "tail": None}]
     assert json.loads((tmp_path / "e" / "provenance.json").read_text()) == p
 
 
@@ -161,8 +236,18 @@ def test_a_nul_padded_file_keeps_its_frames_and_the_next_file_is_read(tmp_path):
     rec = modes_from_dump([a, b], **PARAMS)
     _same(rec, modes_from_dump([clean_a, clean_b], **PARAMS))
     assert rec.provenance["chain"][0] == {
-        "source": str(a), "frames_kept": 4, "frames_overlap": 0,
+        "source": str(a), "first_step": 0, "last_step": 200,
+        "frames_kept": 3, "frames_superseded": 1,
         "tail_bytes": len(padding), "tail": "nul_padding"}
+
+
+def test_a_padding_longer_than_the_scan_chunk_is_still_padding(tmp_path):
+    padding = b"\0" * (3 << 20)
+    a, b = _chain(tmp_path, padding)
+    steps, report = _steps([a, b])
+    assert steps == [0, 100, 200, 300, 400, 500]
+    assert report[0]["tail"] == "nul_padding"
+    assert report[0]["tail_bytes"] == len(padding)
 
 
 @pytest.mark.parametrize("cut", [10, 60, 200, -1])
@@ -174,7 +259,7 @@ def test_a_cut_last_frame_ends_its_file_and_the_next_file_is_read(tmp_path, cut)
     a.write_bytes(text[:start + cut] if cut > 0 else text[:cut])
     steps, report = _steps([a, b])
     assert steps == [0, 100, 200, 300, 400, 500]
-    assert report[0]["frames_kept"] == 3 and report[1]["frames_overlap"] == 0
+    assert report[0]["frames_kept"] == 3 and report[0]["frames_superseded"] == 0
     assert report[0]["tail"] == "truncated_frame"
     assert report[0]["tail_bytes"] == len(a.read_bytes()) - start
 
@@ -217,6 +302,34 @@ def test_corruption_with_a_frame_after_it_raises(tmp_path, insert):
         _steps([a, b])
     with pytest.raises(ValueError, match="frame header follows"):
         modes_from_dump([a, b], **PARAMS)
+
+
+def test_a_frame_header_split_across_the_scan_chunks_is_still_found(tmp_path):
+    """The next ``ITEM: TIMESTEP`` starts five bytes before the 1 MiB chunk boundary of the scan."""
+    a, b = _chain(tmp_path)
+    text = a.read_bytes()
+    start = text.index(b"ITEM: TIMESTEP\n200\n")
+    junk = b"x" * ((1 << 20) - 5)
+    a.write_bytes(text[:start] + junk + text[start:])
+    with pytest.raises(ValueError, match=f"follows at offset {start + len(junk)}"):
+        _steps([a, b])
+
+
+def test_a_cut_frame_that_declares_millions_of_atoms_stops_at_its_last_row(
+        tmp_path):
+    """The rows are read until one is missing, not as many as the header declares."""
+    import time
+
+    a, b = _chain(tmp_path)
+    text = a.read_bytes()
+    start = text.rindex(b"ITEM: TIMESTEP")
+    a.write_bytes(text[:start] + text[start:].replace(
+        b"ITEM: NUMBER OF ATOMS\n8\n", b"ITEM: NUMBER OF ATOMS\n50000000\n"))
+    began = time.perf_counter()
+    steps, report = _steps([a, b])
+    assert time.perf_counter() - began < 10.0
+    assert steps == [0, 100, 200, 300, 400, 500]
+    assert report[0]["tail"] == "truncated_frame"
 
 
 def test_a_frame_with_fewer_rows_than_it_declares_raises(tmp_path):

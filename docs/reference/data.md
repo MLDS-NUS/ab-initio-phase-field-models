@@ -178,18 +178,34 @@ from seed to seed, so the labels can too: state one cell for all of them.
 ### Restart chains
 
 A list of dumps is read as one timeline, file by file in the order given
-(`coarse_grain.read_dump_chain`). A frame whose timestep is at or below the last one kept is a
-restart's overlap and is dropped; the first copy is kept. A file may end in NUL padding or in a cut
-frame (a job killed while writing): its complete frames are kept, the tail is skipped, and the next
-file is read. In a chain every line of a frame ends in a newline, the header has the LAMMPS layout,
-and anything that is not a frame with a frame header after it raises: corruption inside a file is
-not a tail. `skip_frames` counts frames of the joined timeline.
+(`coarse_grain.read_dump_chain`). The rules:
+
+- **Order.** Every file's first timestep is read before any frame. A file that starts below the one
+  before it raises, naming both: the list is out of order (a sorted glob puts `chunk_10` before
+  `chunk_2`).
+- **Overlap: the last writer wins.** A file that starts at step `S` replaces every frame at or after
+  `S` in the files before it; those frames belong to a branch no later file continues. A restart that
+  rewrites exactly the step it restarted from therefore keeps the later file's copy.
+- **Gaps.** Across a junction the step advances by the stride of the file before it, or, if that file
+  kept fewer than two frames, of the file after it; if neither has two, the junction is accepted.
+  Anything else raises, naming both files, both steps and the stride.
+- **Inside a file** the steps rise: a step at or below the one before it raises. No constant stride
+  is required inside a file.
+- **Tails.** A file may end in NUL padding or in a cut frame (a job killed while writing): its
+  complete frames are kept, the tail is skipped, and the next file is read. Anything that is not a
+  frame with a frame header after it raises: corruption inside a file is not a tail.
+
+A chain is stricter than `read_dump`, which stays as it was: every line of a frame ends in a newline,
+so a final frame missing only its trailing newline counts as cut; the header has the plain LAMMPS
+layout, so `ITEM: UNITS` or `ITEM: TIME` items and blank lines between frames raise, though
+`read_dump` steps over them. `skip_frames` counts frames of the joined timeline.
 
 The identity holds every file's path and sha256 (`source`, `source_sha256` as lists, in chain
-order); `provenance["chain"]` holds, per file, `source`, `frames_kept`, `frames_overlap`,
-`tail_bytes` and `tail` (`null`, `"nul_padding"` or `"truncated_frame"`). The chain is read as a
-stream under `"first_frame"` or a stated cell, and held in memory under `"time_mean"`, as a single
-dump is. A single path is read by `read_dump` exactly as before, and a list of one file is a chain.
+order); `provenance["chain"]` holds, per file, `source`, `first_step` and `last_step` (of the frames
+kept, `null` for none), `frames_kept`, `frames_superseded`, `tail_bytes` and `tail` (`null`,
+`"nul_padding"` or `"truncated_frame"`). The chain is read as a stream under `"first_frame"` or a
+stated cell, and held in memory under `"time_mean"`, as a single dump is. A single path is read by
+`read_dump` exactly as before, and a list of one file is a chain.
 
 `defaults["mode_fields"]` is `"per_type"` (one channel per species, the sum over its dump type) or
 one combination per species in channel order, `{"name": species, "weights": {dump type: w},

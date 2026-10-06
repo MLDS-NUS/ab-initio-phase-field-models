@@ -385,8 +385,10 @@ def modes_from_dump(dump, *, sigma: float, k_cut: float,
     ``<tree>/<tag>/modes.npz``). With neither nothing is cached; both is refused.
 
     A list or tuple of dumps is a restart chain (:func:`aipf.pipeline.coarse_grain.read_dump_chain`):
-    overlapping steps read once, a NUL-padded or cut tail skipped, every file's sha256 in the identity
-    and its frames kept, overlap and tail in ``provenance["chain"]``. ``skip_frames`` counts frames of
+    a restart replaces the steps it rewrites (the last writer wins), a gap at a junction, a file out of
+    order or a step that goes back inside a file raises, a NUL-padded or cut tail is skipped. Every
+    file's sha256 is in the identity, its steps, frames kept and superseded and its tail in
+    ``provenance["chain"]``. ``skip_frames`` counts frames of
     the joined timeline. A single path is read by :func:`aipf.pipeline.coarse_grain.read_dump`, as before.
 
     A ``reference_box`` other than :data:`REFERENCE_BOX` is recorded in the identity and written as
