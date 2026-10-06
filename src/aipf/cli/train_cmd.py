@@ -10,7 +10,8 @@ from typing import Optional, Sequence, Tuple, Union
 from aipf.cli import variant
 from aipf.paths import PUBLISHED_DIRNAME
 
-#: How one training source is spelled; SUBDIR is relative to the system's declared source root.
+#: How one training source is spelled; SUBDIR is relative to the system's declared source root. A
+#: two-dimensional model's source (``--projection``) spells two lengths, ``GX,GY``.
 SOURCE_SPELLING = "NAME=SUBDIR:PATTERN:GX,GY,GZ"
 
 #: ``--source declared``: the system's own ``defaults["training"]["sources"]``, exclusions included.
@@ -26,6 +27,13 @@ _KEYWORDS = (DECLARED, SAMPLE)
 #: A field grid is three lengths. A source that gives fewer has not said
 #: what shape its fields are.
 _GRID_RANK = 3
+
+#: The grid of a source read through ``--projection`` is two lengths, ``(Gx, Gy)``.
+_PROJECTED_GRID_RANK = 2
+
+#: ``--projection``'s values, :data:`aipf.train.projection.PROJECTIONS` spelled here so the parser
+#: imports no training module.
+PROJECTIONS = ("kz0-volumetric", "kz0-areal")
 
 
 def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
@@ -52,11 +60,12 @@ def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
             f"{text!r} names an absolute tree {subdir!r}; SUBDIR is relative "
             f"to the system's declared source root "
             f"(defaults['training']['source_root'])")
-    if len(grid) != _GRID_RANK or not subdir or not pattern:
+    if len(grid) not in (_GRID_RANK, _PROJECTED_GRID_RANK) or not subdir or not pattern:
         raise argparse.ArgumentTypeError(
             f"{text!r} is not a source. Spell it {SOURCE_SPELLING}: the "
             f"subdirectory, the glob and {_GRID_RANK} grid lengths are all "
-            f"required")
+            f"required ({_PROJECTED_GRID_RANK}, GX,GY, for a two-dimensional "
+            f"model trained through --projection)")
     return (name, subdir, pattern, grid)
 
 
@@ -118,6 +127,14 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                         "is a different experiment and not a cheaper "
                         "version of the same one. A system that declares no "
                         "tables trains the drift term whichever is passed")
+    p.add_argument("--projection", default=None, choices=PROJECTIONS,
+                   help="train a two-dimensional model (a factory model declared on a two-axis "
+                        "grid) on the k_z = 0 plane of the three-dimensional archives: "
+                        "'kz0-volumetric' scatters rho_k / V_ref (the z mean of the density), "
+                        "'kz0-areal' rho_k / (Lx_ref Ly_ref) (the density integrated along z). "
+                        "The archives must record their reference cell, every --source grid is "
+                        "GX,GY, and only the drift term trains (--anchors none). Off by default: "
+                        "a three-dimensional model reads the archives as they are")
     p.add_argument("--log-every-step", action="store_true",
                    help="also write the per-step loss series")
     p.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"),
@@ -135,6 +152,33 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--dry-run", action="store_true",
                    help="with --pbs: write the job file and submit nothing")
     p.set_defaults(func=run)
+
+
+def _anchors_of(args: argparse.Namespace):
+    """``--anchors`` as ``fit`` takes it: ``"declared"`` -> ``None`` (the declaration answers),
+    ``"none"`` -> ``NO_ANCHORS`` (drift-only)."""
+    from aipf.train.anchors import NO_ANCHORS
+    return None if args.anchors == "declared" else NO_ANCHORS
+
+
+def _projection_refusal(args: argparse.Namespace, table) -> Optional[str]:
+    """Why ``--projection`` and the source grids (or ``--anchors``) contradict each other, or ``None``.
+    A projected source's grid is two lengths and a three-dimensional one's three; the anchor tables
+    are three-dimensional only."""
+    rank = _GRID_RANK if args.projection is None else _PROJECTED_GRID_RANK
+    wrong = [row[0] for row in table if len(row[3]) != rank]
+    if wrong and args.projection is None:
+        return (f"--source {', '.join(wrong)}: a two-length grid GX,GY is a two-dimensional "
+                f"model's, which trains on the k_z = 0 plane of the archives: pass --projection "
+                f"(one of {', '.join(PROJECTIONS)})")
+    if wrong:
+        return (f"--projection {args.projection}: --source {', '.join(wrong)} spells "
+                f"{_GRID_RANK} grid lengths; the k_z = 0 plane scatters onto a two-axis grid, "
+                f"GX,GY")
+    if args.projection is not None and args.anchors != "none":
+        return (f"--projection {args.projection} trains a two-dimensional model, and the anchor "
+                f"tables are three-dimensional only: pass --anchors none (the drift term alone)")
+    return None
 
 
 def unmatched_sources(system, table) -> list:
@@ -212,6 +256,8 @@ def _job_command(args: argparse.Namespace) -> list:
     if args.init_from_published:
         command.append(f"--init-from-{PUBLISHED_DIRNAME}")
     command += ["--resume-optimizer", args.resume_optimizer, "--anchors", args.anchors]
+    if args.projection is not None:
+        command += ["--projection", args.projection]
     if args.log_every_step:
         command.append("--log-every-step")
     command += ["--device", args.device]
@@ -297,6 +343,10 @@ def run(args: argparse.Namespace) -> int:
     table = _source_table(system, args.source)
     if table is None:
         return 2
+    refusal = _projection_refusal(args, table)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     refusals = unmatched_sources(system, table)
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
@@ -304,6 +354,14 @@ def run(args: argparse.Namespace) -> int:
 
     if args.pbs:
         # a batch job would only fail on it later: refused here, by name, before a job exists
+        if args.projection is not None:
+            from aipf.train.fit import DimensionMismatch, _specs_from, check_dimensions
+            try:
+                check_dimensions(system, _specs_from(system, table, [row[0] for row in table]),
+                                 projection=args.projection, anchors=_anchors_of(args))
+            except DimensionMismatch as refused:
+                print(f"aipf train: --projection {args.projection}: {refused}", file=sys.stderr)
+                return 2
         if resume_optimizer:
             from aipf.train.fit import OptimizerLayoutMismatch, check_optimizer_resumable
             try:
@@ -323,25 +381,27 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     # the driver's own helper assembles the specs, so the CLI and a Python caller agree
-    from aipf.train.anchors import NO_ANCHORS
     from aipf.train.fit import _specs_from, fit
     sources = _specs_from(system, table, [row[0] for row in table])
 
-    # "declared" -> None (the declaration answers); "none" -> NO_ANCHORS (drift-only)
-    anchors = None if args.anchors == "declared" else NO_ANCHORS
+    anchors = _anchors_of(args)
 
     # a saved optimizer whose parameter groups do not fit this model's in count, shape or
     # recorded order is refused by fit, by name, before the run directory exists; every
     # published checkpoint is refused this way (they record no parameter names)
-    from aipf.train.fit import OptimizerLayoutMismatch
+    from aipf.train.fit import DimensionMismatch, OptimizerLayoutMismatch
     try:
         run_dir = fit(system, run_name=args.run_name, sources=sources,
                       seed=args.seed, steps=args.steps, epochs=args.epochs,
                       init_from=init_from, resume_optimizer=resume_optimizer,
                       anchors=anchors, log_every_step=args.log_every_step,
-                      device=args.device, deterministic=args.deterministic)
+                      device=args.device, deterministic=args.deterministic,
+                      **({} if args.projection is None else {"projection": args.projection}))
     except OptimizerLayoutMismatch as refused:
         print(f"aipf train: --resume-optimizer yes: {str(refused).rstrip('.')}.", file=sys.stderr)
+        return 2
+    except DimensionMismatch as refused:
+        print(f"aipf train: {refused}", file=sys.stderr)
         return 2
     print(run_dir)
     return 0
