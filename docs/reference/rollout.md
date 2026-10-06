@@ -64,7 +64,7 @@ amplitude `kB T`; the density edges from `System.trust_domain`. A system that de
 
 then the Nyquist modes are made Hermitian and the state is projected. A model with a
 `stabilizer_mobility(rho, T)` method sets `M_s` itself: it is called once, on the real-space field at
-`t = 0` `(1, n, Gx, Gy, Gz)` and `T` `(1,)`, and its `(n, n)` return is refused unless finite,
+`t = 0` `(1, n, Gx, Gy, Gz)`, unclamped, and `T` `(1,)`, and its `(n, n)` return is refused unless finite,
 symmetric and positive semi-definite to a relative `1e-6`. `m_stab` is then left undeclared, and a
 declared one is refused, so the drivers that pass the system's `Noise.m_stab` refuse such a model.
 Which of the three set `M_s` is logged at `INFO` by `aipf.rollout.imex`. The conserved noise is

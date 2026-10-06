@@ -108,6 +108,32 @@ def test_a_variant_carries_its_own_factory():
     assert type(build(system)) is toy.ToyFactoryModel
 
 
+def test_a_variant_without_a_mobility_is_refused_beside_a_rung():
+    from aipf.system import Variant
+
+    rung = load("lj").functional
+    with pytest.raises(TypeError, match="Variant.mobility is a NoneType"):
+        Variant(functional=rung, mobility=None, checkpoint=None, defaults={})
+    assert Variant(functional=toy.toy_functional(), mobility=None, checkpoint=None,
+                   defaults={}).mobility is None
+
+
+class _CallableFactory:
+    def __call__(self, system, **overrides):
+        return toy.build_toy(system, **overrides)
+
+
+def test_a_factory_is_named_by_the_function_it_runs():
+    from functools import partial
+
+    from aipf.functional.build import factory_name
+
+    assert factory_name(toy.build_toy) == "toy_factory_model:build_toy"
+    assert factory_name(partial(toy.build_toy, kappa=0.3)) == "toy_factory_model:build_toy"
+    assert factory_name(partial(partial(toy.build_toy), kappa=0.3)) == "toy_factory_model:build_toy"
+    assert factory_name(_CallableFactory()) == f"{__name__}:_CallableFactory"
+
+
 def test_build_calls_the_factory_with_the_system_and_the_overrides():
     seen = []
 
@@ -154,6 +180,12 @@ def _no_parameters(system, **overrides):
     return model
 
 
+def _other_ops(system, **overrides):
+    model = toy.build_toy(system, **overrides)
+    model.ops = SpectralOps(toy.GRID, 2, nyquist_mask=True)
+    return model
+
+
 @pytest.mark.parametrize("factory,kind,match", [
     (lambda system: {"model": "not one"}, TypeError, "returned a dict, not a torch.nn.Module"),
     (lambda system: _NoBulk(toy.GRID, 2, nyquist_mask=True, kappa=0.5, kB=1.0),
@@ -163,6 +195,9 @@ def _no_parameters(system, **overrides):
     (_without("ops"), TypeError, "ops is not an aipf.spectral.SpectralOps"),
     (lambda system: toy.build_toy(system, nyquist_mask=False), ValueError,
      "nyquist_mask=False and the declaration says True"),
+    (_other_ops, TypeError, "ops is not its _cache.ops"),
+    (lambda system: toy.ToyFactoryModel((6, 6, 6), 2, nyquist_mask=True, kappa=0.5, kB=1.0),
+     ValueError, "grid \\(6, 6, 6\\) and the declaration says \\(4, 4, 4\\)"),
 ])
 def test_a_factory_that_breaks_the_contract_is_refused_by_name(factory, kind, match):
     system = dataclasses.replace(_system(), functional=toy.toy_functional(factory))
@@ -243,6 +278,16 @@ def test_a_factory_model_trains_saves_reloads_strictly_and_rolls_out(declared_de
         assert torch.allclose(traj[:, :, 0, 0, 0].real, h0[0, :, 0, 0, 0].real.expand(5, 2))
 
 
+def test_aipf_diagnose_on_a_factory_system_is_one_refusal_exit_2(declared_demo, tmp_path, capsys):
+    from aipf.cli.main import main
+
+    assert main(["diagnose", "--system", "demo", "--ckpt", str(tmp_path / "x.ckpt"),
+                 "--stage", "kappa", "--out", str(tmp_path / "out")]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("aipf diagnose: ") and "toy_factory_model:build_toy" in err
+    assert not (tmp_path / "out").exists()
+
+
 def test_the_manifest_of_a_rung_has_no_factory_entry():
     for name in ("lj", "hhe", "feb"):
         assert _factory_record(load(name)) == {}
@@ -295,12 +340,15 @@ def test_a_hook_returning_the_mean_mobility_is_the_mean_scheme_bit_for_bit():
 
 
 @pytest.mark.parametrize("m_stab", ["mean", "max"])
-def test_without_the_hook_m_stab_decides_as_before(caplog, m_stab):
+def test_without_the_hook_m_stab_decides_and_says_so_at_debug(caplog, m_stab):
+    """The new code against itself: a ``None`` hook is no hook. That the scheme without a hook is the
+    scheme it was, bit for bit, is pinned by ``tests/golden`` (the semi-implicit cases, mean and max)."""
     plain, _ = _pair()
     h0 = _field()
-    with caplog.at_level(logging.INFO, logger="aipf.rollout.imex"):
+    with caplog.at_level(logging.DEBUG, logger="aipf.rollout.imex"):
         want = rollout_imex(plain, h0, BOX, T, 1e-2, 4, m_stab=m_stab, **IMEX)
     assert f"M_s from m_stab='{m_stab}'" in caplog.text
+    assert all(r.levelno == logging.DEBUG for r in caplog.records if r.name == "aipf.rollout.imex")
     plain.stabilizer_mobility = None
     assert torch.equal(rollout_imex(plain, h0, BOX, T, 1e-2, 4, m_stab=m_stab, **IMEX), want)
     with pytest.raises(ValueError, match="m_stab must be declared"):
@@ -329,11 +377,21 @@ def test_a_hook_returning_no_admissible_M_s_is_refused(returned, match):
         rollout_imex(plain, _field(), BOX, T, 1e-2, 1, **IMEX)
 
 
-def test_a_hook_within_the_tolerance_is_taken():
+@pytest.mark.parametrize("asymmetry,taken", [(1e-6, True), (4e-6, False)])
+def test_the_hook_is_symmetric_to_one_part_in_a_million(asymmetry, taken):
+    """``max |M| = 2``, so the tolerance is ``2e-6``: half of it is taken, twice it is refused."""
     plain, _ = _pair()
-    M = torch.tensor([[2.0, 0.5], [0.5 + 1e-7, 1.0]])
+    M = torch.tensor([[2.0, 0.5], [0.5 + asymmetry, 1.0]])
     plain.stabilizer_mobility = lambda rho, T_t: M
-    assert torch.isfinite(rollout_imex(plain, _field(), BOX, T, 1e-2, 2, **IMEX).real).all()
+    if taken:
+        assert torch.isfinite(rollout_imex(plain, _field(), BOX, T, 1e-2, 2, **IMEX).real).all()
+    else:
+        with pytest.raises(ValueError, match="non-symmetric"):
+            rollout_imex(plain, _field(), BOX, T, 1e-2, 2, **IMEX)
+
+
+def test_a_zero_hook_is_taken():
+    plain, _ = _pair()
     plain.stabilizer_mobility = lambda rho, T_t: torch.zeros(2, 2)
     assert torch.isfinite(rollout_imex(plain, _field(), BOX, T, 1e-2, 2, **IMEX).real).all()
 
@@ -375,3 +433,32 @@ def test_the_clamp_reaches_the_model_through_its_pointwise_mu():
     plain.f_local.mu_pointwise = spy
     _imex(plain, _field(low=0.02), 0.1)
     assert seen and min(seen) >= 0.1
+
+
+# ---------------------------------------------------------------------------
+# the anchor tables on a model without a rung's parts
+# ---------------------------------------------------------------------------
+
+def test_the_anchors_read_a_factory_models_w_hat_and_refuse_the_routes_it_lacks():
+    from aipf.train.anchors import _w_hat_of, _w_hat_zero
+
+    plain, _ = _pair()
+    w_hat = _w_hat_of(plain)
+    rho = torch.full((3, 2), 0.4)
+    assert torch.equal(_w_hat_zero(plain, w_hat, rho, None, {"route": "evaluator"}),
+                       torch.zeros(3, 2, 2))
+    with pytest.raises(ValueError, match="'radial'.*w_hat_zero_quadrature.*--anchors none"):
+        _w_hat_zero(plain, w_hat, rho, None, {"route": "radial", "r_max": 2.0, "n_points": 9})
+    with pytest.raises(ValueError, match="'lattice'.*kernel.evaluator.*--anchors none"):
+        _w_hat_zero(plain, w_hat, rho, None, {"route": "lattice"})
+
+
+def test_the_anchors_refuse_a_model_with_no_curvature_and_no_n_species():
+    from aipf.train.anchors import _w_hat_of
+
+    plain, _ = _pair()
+    del plain.kernel
+    assert _w_hat_of(plain)(torch.zeros(5)).shape == (5, 2, 2)
+    del plain.n_species
+    with pytest.raises(ValueError, match="no n_species.*--anchors none"):
+        _w_hat_of(plain)

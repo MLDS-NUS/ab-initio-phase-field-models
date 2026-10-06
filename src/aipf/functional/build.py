@@ -7,6 +7,7 @@ declared with a ``factory`` is built by calling it, and the model it returns is 
 the drivers read (:func:`check_factory_model`)."""
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Any, Dict
 
@@ -287,7 +288,10 @@ def build(system, variant: str | None = None, **overrides: Any) -> torch.nn.Modu
 
 
 def factory_name(factory) -> str:
-    """``module:qualname`` of a factory, as a run's manifest records it."""
+    """``module:qualname`` of a factory, as a run's manifest records it; a ``functools.partial`` names the
+    function it wraps, a callable object its class."""
+    while isinstance(factory, functools.partial):
+        factory = factory.func
     module = getattr(factory, "__module__", None) or type(factory).__module__
     qualname = getattr(factory, "__qualname__", None) or type(factory).__qualname__
     return f"{module}:{qualname}"
@@ -297,7 +301,8 @@ def check_factory_model(model, system) -> None:
     """Refuse what ``system.functional.factory`` returned unless training, the checkpoint reload and the
     explicit solvers can use it: an ``nn.Module`` with the ``FreeEnergyModel`` methods, at least one
     parameter, ``_cache`` (an :class:`aipf.spectral.OpsCache`) and ``ops`` (its
-    :class:`aipf.spectral.SpectralOps`) under the declared ``nyquist_mask``. The semi-implicit scheme's
+    :class:`aipf.spectral.SpectralOps`, the same object as ``_cache.ops``) on the declared ``grid``
+    and under the declared ``nyquist_mask``. The semi-implicit scheme's
     own needs are checked when it runs."""
     name = factory_name(system.functional.factory)
     if not isinstance(model, torch.nn.Module):
@@ -323,6 +328,16 @@ def check_factory_model(model, system) -> None:
             f"the factory {name} returned a {type(model).__name__} whose ops is not an "
             f"aipf.spectral.SpectralOps (the OpsCache's own, _cache.ops); the explicit solvers "
             f"read the Nyquist convention from it")
+    if model.ops is not model._cache.ops:
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__} whose ops is not its "
+            f"_cache.ops; training reads the operators from the one and the solvers from the "
+            f"other, so they are one object (self.ops = self._cache.ops)")
+    grid = tuple(int(g) for g in system.functional.kwargs["grid"])
+    if tuple(model._cache.grid) != grid:
+        raise ValueError(
+            f"the factory {name} built its operators on grid {tuple(model._cache.grid)} and the "
+            f"declaration says {grid}; training reads the one and the model the other")
     declared = bool(system.functional.kwargs["nyquist_mask"])
     if bool(model.ops.nyquist_mask) != declared:
         raise ValueError(

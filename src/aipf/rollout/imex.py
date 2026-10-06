@@ -296,10 +296,10 @@ def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
         _LOG.info("M_s from %s.stabilizer_mobility", type(model).__name__)
     elif m_stab == "mean":
         M_s = model.mobility(rho_bar.view(1, n, 1, 1, 1), T_t)[0, :, :, 0, 0, 0]
-        _LOG.info("M_s from m_stab='mean'")
+        _LOG.debug("M_s from m_stab='mean'")
     else:
         M_s = max_norm_mobility(model, ops.irfft(rho_hat * N), T_t)
-        _LOG.info("M_s from m_stab='max'")
+        _LOG.debug("M_s from m_stab='max'")
     dtL = dt * k2 * torch.einsum("ij,...jk->...ik", M_s, H_k)
     A_inv = _inverse(torch.eye(n, device=device) + dtL).to(torch.complex64)
     MH = dtL.to(torch.complex64)

@@ -153,7 +153,8 @@ nothing to translate. `form`, `local` and `kernel` are then names only and are n
 the ladder. `kwargs` carries at least `grid` and `nyquist_mask`, which training and the rollouts read
 off the declaration. The factory is left out of the functional's `repr` and equality. A variant
 declares its own factory the same way, and its `mobility` may be `None`. A run's `MANIFEST.json`
-records the factory as `model_factory: "module:qualname"`.
+records the factory as `model_factory: "module:qualname"` (a `functools.partial` is recorded as the
+function it wraps).
 
 `system.py` is executed outside `sys.modules`, so the factory and the classes it builds are imported
 from an installed package, not defined in `system.py`. A checkpoint holds the model's `state_dict`
@@ -165,15 +166,22 @@ What the model must provide, and which part of the package reads it:
 |---|---|---|
 | a `torch.nn.Module` with at least one parameter | training, checkpoints | by `build` |
 | `forward`, `chemical_potential`, `bulk_free_energy_density`, `mobility`, as in [the protocol](#the-protocol) | training, the solvers | by `build` |
-| `_cache`, an `aipf.spectral.OpsCache`, and `ops`, its `SpectralOps` (`_cache.ops`), with the declared `nyquist_mask` | training (the operators per grid), the explicit solvers | by `build` |
+| `_cache`, an `aipf.spectral.OpsCache` on the declared `grid`, and `ops`, the same object as `_cache.ops`, with the declared `nyquist_mask` | training (the operators per grid), the explicit solvers | by `build` |
 | `kernel.w_hat(k)`: `(*k.shape, n, n)` from `|k|` alone, no grid or box argument | the semi-implicit scheme's frozen operator | when it runs |
 | `f_local.f_pointwise(rho, kBT)` (`rho` `(P, n)`, `kBT` `(P,)`, out `(P,)`) and `f_local.mu_pointwise(rho, kBT)` (out `(P, n)`) | the semi-implicit scheme's frozen Hessian and its guards | when it runs |
 | optionally `stabilizer_mobility(rho, T)` | the semi-implicit scheme's `M_s` ([rollout.md](rollout.md#the-scheme)) | when it runs |
+| `mobility`, `bulk_free_energy_density`, `chemical_potential`; the field-wide curvature through `kernel.w_hat(k)`, else `curvature_at_wavevector(k)`, else zero sized by `n_species`; for the `W(0)` routes `radial` and `lattice`, `kernel.w_hat_zero_quadrature` and `kernel.evaluator` | the anchor tables, with `--anchors declared` ([training.md](training.md)) | when a batch is built; a missing one is refused by name |
 
-The rollouts' guards act by replacing methods on the instance for the length of a rollout:
-`clamp_rho`, `v_ext` and `kbt_field` in the semi-implicit scheme replace `f_local.mu_pointwise` and
-`mobility`; `clamp_rho` in the explicit solvers replaces `chemical_potential` and `mobility`. A
+The rollouts' guards act by replacing methods on the instance for the length of a rollout. In the
+semi-implicit scheme `clamp_rho` replaces `f_local.mu_pointwise` and `mobility`, while `v_ext` and
+`kbt_field` replace `f_local.mu_pointwise` only; in the explicit solvers `clamp_rho` replaces
+`chemical_potential` and `mobility`. A
 `forward` that reads `mu` through `self.chemical_potential`, the pointwise part of it through
 `self.f_local.mu_pointwise`, and `M` through `self.mobility` sees every guard; a `forward` that
-bypasses them does not, and must not be rolled out with those options. `aipf diagnose` reads parts
-of this package's own rungs and refuses a functional built by a factory.
+bypasses them does not, and must not be rolled out with those options.
+
+`stabilizer_mobility` receives the field itself, unclamped; under `clamp_rho` the clamp reaches it only
+if it reads `M` through `self.mobility`. A model with the hook takes no `m_stab`, while the
+`spinodal`, `slab` and FDT drivers always pass the system's declared `Noise.m_stab`, so such a model
+is rolled out by calling `aipf.rollout.imex.rollout_imex` directly. `aipf diagnose` reads parts of
+this package's own rungs and refuses a functional built by a factory.
