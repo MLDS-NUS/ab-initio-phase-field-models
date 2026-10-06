@@ -209,6 +209,27 @@ kept, `null` for none), `frames_kept`, `frames_superseded`, `tail_bytes` and `ta
 stated cell, and held in memory under `"time_mean"`, as a single dump is. A single path is read by
 `read_dump` exactly as before, and a list of one file is a chain.
 
+### The k_z = 0 projection
+
+A two-dimensional model trains on the `k_z = 0` plane of a three-dimensional archive
+([training.md](training.md#two-dimensions)). `aipf.train.project_kz0(run, areal=...)` takes a `ModeRun`
+as read and returns the two-dimensional run: the labels with `n_z == 0` as `(n_x, n_y)`, their
+amplitudes unchanged, the boxes and the reference cell cut to `(Lx, Ly)`, and `depth` set. A window
+of it divides by `Lx_ref Ly_ref * depth`:
+
+| `areal` | `depth` | `rho_hat` | density |
+|---|---|---|---|
+| `False` (`"kz0-volumetric"`) | `Lz_ref` | `rho_k / V_ref` | the z mean of the 3D density, per unit volume |
+| `True` (`"kz0-areal"`) | `1.0` | `rho_k / (Lx_ref Ly_ref)` | the 3D density integrated along z, per unit area; `Lz_ref` times the volumetric one |
+
+The volumetric half spectrum is the 3D one's `k_z = 0` plane, cut to `n_y >= 0`, and the real-space
+field it makes is the z average of the 3D field (`tests/unit/test_train_projection.py`). Only an
+archive with a reference cell (`modes_from_dump(reference_box=...)`) is projected, since the frames
+of an NPT run each have their own `Lz`; one without is refused, naming the writer's option.
+`aipf.train.projection_depth(run_or_dir, areal=...)` is the run's `depth`, from a `ModeRun` as read,
+a run directory or its `modes.npz`: what a noisy two-dimensional rollout of the model trained on it
+declares.
+
 `defaults["mode_fields"]` is `"per_type"` (one channel per species, the sum over its dump type) or
 one combination per species in channel order, `{"name": species, "weights": {dump type: w},
 "mean": m or None}`. A combination stores `sum_t w_t rho_t(k)`, and a `mean` replaces its zero mode

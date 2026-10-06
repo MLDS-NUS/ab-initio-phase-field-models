@@ -209,7 +209,8 @@ operators are the same rule on each axis.
 
 What runs in two dimensions: `nonlocal_kernel`, a model built by a factory on a two-axis `grid`, the
 explicit integrators and the semi-implicit scheme of [rollout.md](rollout.md#the-scheme), `hermitianize`
-and the state projections, and `Field`. The pair kernel's `Ŵ(k)` is then the Hankel transform of the
+and the state projections, `Field`, and training the drift term on the `k_z = 0` plane of
+three-dimensional archives ([training.md](training.md#two-dimensions)). The pair kernel's `Ŵ(k)` is then the Hankel transform of the
 same radial `W(r)`,
 
     Ŵ(k) = 2 pi int_0^R_cut r W(r) J0(k r) dr,
@@ -232,7 +233,9 @@ The noise of a two-dimensional model needs one more number. Its variance is `2 k
 grid of `(Lx, Ly)` cells fixes only the area `dA` of a cell; `dV = dA * depth`, with `depth` declared
 on every noisy solver call (`rollout_sde`, `step_sde_euler_maruyama`, `rollout_imex` with `noise`). It
 says what the densities are: `depth = 1.0` for areal densities (per unit area), the reference cell's
-`Lz` for volumetric densities averaged along z. There is no default; a noisy 2D call without `depth` is
+`Lz` for volumetric densities averaged along z. A model trained through a projection takes the one its
+windows were divided by, `aipf.train.projection_depth(run_dir, areal=...)`
+([data.md](data.md#the-k_z--0-projection)). There is no default; a noisy 2D call without `depth` is
 refused, and a 3D call with one is refused too (its `dV` comes from its box). Deterministic 2D rollouts
 read no `depth`. The stationary spectrum is then `S(k) = V <|rho_hat_k|^2> = kBT H(k)^-1` with
 `V = Lx Ly depth`.
