@@ -7,9 +7,17 @@ code under test, so that a change to that code moves only its outputs. The model
 fixed seed and then given the parameters stored in ``models.pt`` (:func:`use_model_states`): a change
 to how a constructor draws its initial weights is reported once, by the ``models`` group, and does not
 move every rollout. Everything runs on the CPU in float32 (the published precision), one thread.
+
+The outputs are the published source's: :data:`BASELINE_SRC_TREE` is the git tree of ``src/`` they were
+written from, and the generator refuses any other. Moving the baseline is a deliberate edit of that
+constant, in a commit of its own, with every fixture rewritten from the new tree.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import logging
 import math
 import warnings
 from collections import namedtuple
@@ -22,6 +30,11 @@ import torch
 
 #: group -> case name -> the function computing it. One fixture file per group.
 GROUPS: Dict[str, Dict[str, Callable[[], Dict[str, Any]]]] = {}
+
+#: The git tree of ``src/`` every stored output was computed from: ``git rev-parse 1ba9974:src``, the
+#: published source. The generator writes only when ``HEAD:src`` is this tree, and the tests check that
+#: every fixture records it. Changing it is a deliberate move of the baseline, never a side effect.
+BASELINE_SRC_TREE = "097d49860a87a4cd8b81b6ea397921db39212c89"
 
 #: model name -> its builder (a module built under its own seed).
 MODELS: Dict[str, Callable[[], torch.nn.Module]] = {}
@@ -70,6 +83,22 @@ def model_states(models_file: Dict[str, Any]) -> Dict[str, Dict[str, torch.Tenso
 # ---------------------------------------------------------------------------
 
 HERE = Path(__file__).resolve().parent
+#: The repository these tests belong to; the package they test is ``REPO / "src" / "aipf"``.
+REPO = HERE.parents[1]
+
+
+def wrong_package() -> str | None:
+    """``None`` when ``import aipf`` is this repository's ``src/aipf``; otherwise why not, and the fix.
+
+    Another checkout's package (an installed copy, a sibling worktree) would be compared against these
+    outputs and pass or fail for reasons that have nothing to do with this tree."""
+    import aipf
+    where = Path(aipf.__file__).resolve()
+    src = (REPO / "src").resolve()
+    if src in where.parents:
+        return None
+    return (f"`import aipf` found {where}, which is not under {src}: these golden outputs test this "
+            f"repository's source, so run with PYTHONPATH={src}")
 
 
 def fixture_key() -> str:
@@ -83,7 +112,11 @@ def fixture_dir() -> Path:
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:
-    """``t`` as integers of the same width, so that ``-0.0``, ``0.0`` and every NaN compare by bits."""
+    """``t`` as integers of the same width, so that ``-0.0``, ``0.0`` and every NaN compare by bits.
+
+    A lazily conjugated or negated view is materialised first: its bits are the stored ones, not the
+    values it stands for."""
+    t = t.resolve_conj().resolve_neg()
     if t.is_complex():
         t = torch.view_as_real(t)
     if t.is_floating_point():
@@ -111,9 +144,33 @@ def compare(expected: Dict[str, Any], actual: Dict[str, Any]) -> str | None:
                 diff = (want.to(wide) - got.to(wide)).abs()
                 return (f"{key}: differs in {int((a != b).sum())} of {a.numel()} words, "
                         f"max abs diff {float(diff.max()):.6g}")
-        elif want != got:
-            return f"{key}: {want!r} became {got!r}"
+        elif not _same(want, got):
+            return f"{key}: {want!r} ({_type_tree(want)}) became {got!r} ({_type_tree(got)})"
     return None
+
+
+def _same(want: Any, got: Any) -> bool:
+    """Equal and of the same type, all the way down: ``4`` is not ``4.0`` and ``True`` is not ``1``."""
+    if type(want) is not type(got):
+        return False
+    if isinstance(want, (tuple, list)):
+        return len(want) == len(got) and all(_same(a, b) for a, b in zip(want, got))
+    if isinstance(want, dict):
+        return (list(want) == list(got)
+                and all(_same(want[k], got[k]) for k in want))
+    if isinstance(want, float) and math.isnan(want):
+        return math.isnan(got)
+    return want == got
+
+
+def _type_tree(value: Any) -> str:
+    if isinstance(value, (tuple, list)):
+        inner = ", ".join(_type_tree(v) for v in value)
+        return f"{type(value).__name__}[{inner}]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{k!r}: {_type_tree(v)}" for k, v in value.items())
+        return f"dict{{{inner}}}"
+    return type(value).__name__
 
 
 def built(name: str) -> torch.nn.Module:
@@ -136,6 +193,21 @@ def _raises(fn: Callable[[], Any]) -> Dict[str, Any]:
     except Exception as exc:                                    # noqa: BLE001 -- recorded, not handled
         return {"raises": f"{type(exc).__name__}: {exc}"}
     return {"raises": None}
+
+
+@contextlib.contextmanager
+def _quiet():
+    """No warnings, no log record below ERROR and nothing printed, for the length of the block; the
+    process-wide logging switch is put back as it was found, not reset."""
+    disabled = logging.root.manager.disable
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        warnings.simplefilter("ignore")
+        logging.disable(logging.WARNING)
+        try:
+            yield
+        finally:
+            logging.disable(disabled)
 
 
 def _np(a) -> torch.Tensor:
@@ -416,6 +488,22 @@ for _mask in (True, False):
     case("spectral", f"cache/nyquist_{_mask}")(_cache_case(_mask))
 
 
+@case("spectral", "k_axes/float64_boxes")
+def _k_axes_float64():
+    """Boxes in float64 against float32 buffers: the dtype the wavevectors come back in is pinned too."""
+    from aipf.spectral import SpectralOps
+    out: Dict[str, Any] = {}
+    for mask in (True, False):
+        ops = SpectralOps((6, 10, 7), 2, nyquist_mask=mask)
+        boxes = SPECTRAL_BOXES.to(torch.float64) * (1.0 + 1e-9)    # bits a float32 box cannot hold
+        kx, ky, kz = ops.k_axes(boxes)
+        out.update({f"nyquist_{mask}/kx": kx, f"nyquist_{mask}/ky": ky, f"nyquist_{mask}/kz": kz,
+                    f"nyquist_{mask}/k2": ops.k2(boxes),
+                    f"nyquist_{mask}/sigma_filter": ops.sigma_filter(boxes, 1.3),
+                    f"nyquist_{mask}/band_mask": ops.band_mask(boxes, 2.0)})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # kernels: the radial transform, its table, kappa_eff and W_hat(0)
 # ---------------------------------------------------------------------------
@@ -492,6 +580,24 @@ def _model_kernels():
     return out
 
 
+@case("kernels", "uniform_free_energy")
+def _uniform_free_energy():
+    g = torch.Generator().manual_seed(33)
+    out: Dict[str, Any] = {}
+    for name, R_cut in (("nk_gas_n2", 2.5), ("nk_joint_n2", 2.5), ("nk_gas_n1", 2.5),
+                        ("nk_lattice_n1", 2.0)):
+        m = model(name)
+        n = ROLL[name]["n"]
+        rho = torch.tensor(BASE[n]) + 0.1 * torch.rand(5, n, generator=g)
+        T = ROLL[name]["T"] * (1.0 + 0.05 * torch.rand(5, generator=g))
+        with torch.no_grad():
+            w0 = m.kernel.w_hat_zero_radial(R_cut, 101)
+            out[f"{name}/w0"] = w0
+            out[f"{name}/uniform_free_energy"] = m.uniform_free_energy(rho, T, w0)
+            out[f"{name}/kernel_offset"] = m.kernel_offset(rho)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # projection: hermitianize, the state projections and the trust-domain projection
 # ---------------------------------------------------------------------------
@@ -546,12 +652,14 @@ def _shift_case(n: int, state_proj: str, floor: float):
         out = project_state_uniform_shift(
             h, ops, state_proj=state_proj, floor=floor,
             domain=_domain() if state_proj == "domain" else None)
-        return {"out": out}
+        return {"out": out, "unchanged": out is h}
     return run
 
 
 case("projection", "uniform_shift/floor")(_shift_case(1, "floor", 0.4))
 case("projection", "uniform_shift/domain")(_shift_case(2, "domain", 1e-3))
+case("projection", "uniform_shift/floor_zero")(_shift_case(2, "floor", 0.0))
+case("projection", "uniform_shift/floor_negative")(_shift_case(1, "floor", -0.1))
 
 
 @case("projection", "restore_mass_and_trust_domain")
@@ -640,7 +748,9 @@ def _projection_kw(name: str, proj: str) -> Dict[str, Any]:
 
 def _rollout_case(name: str, kind: str, proj: str, *, steps: int = 3, save_every: int = 1,
                   clamp_rho=None, kappa_roll: float = 0.0, v_ext: bool = False,
-                  T_field: bool = False, noise_mode: str = "gaussian", kBT=None, seed: int = 0):
+                  T_field: bool = False, noise_mode: str = "gaussian", kBT=None, seed: int = 0,
+                  unbatched: bool = False):
+    """``unbatched``: ``v_ext`` ``(n, *grid)`` and ``T_field`` ``(*grid)``, one drive for the whole batch."""
     def run():
         from aipf.solve import rollout_deterministic, rollout_sde
         spec = ROLL[name]
@@ -649,6 +759,8 @@ def _rollout_case(name: str, kind: str, proj: str, *, steps: int = 3, save_every
         h0 = _hat(_real_field(n, seed=100 + seed))
         T = torch.full((2,), spec["T"])
         v, tf = _drive(name, seed=200 + seed)
+        if unbatched:
+            v, tf = v[0], tf[0]
         kw = dict(clamp_rho=clamp_rho, kappa_roll=kappa_roll, save_every=save_every,
                   v_ext=v if v_ext else None, T_field=tf if T_field else None,
                   **_projection_kw(name, proj))
@@ -680,6 +792,7 @@ def _step_case(name: str, *, seed: int):
         out = {"euler": step_euler(m, h0, BOXES, T, spec["dt"]),
                "euler_ops": step_euler(m, h0, BOXES, T, spec["dt"], ops=ops),
                "heun": step_heun(m, h0, BOXES, T, spec["dt"], ops=ops),
+               "heun_no_ops": step_heun(m, h0, BOXES, T, spec["dt"]),
                "forward": m(h0, BOXES, T)}
         if spec["full_M"]:
             g = torch.Generator().manual_seed(500 + seed)
@@ -687,6 +800,10 @@ def _step_case(name: str, *, seed: int):
                                                  noise_mode="gaussian", sigma_noise=1.5,
                                                  ops=ops, generator=g)
             out["sde_generator_state"] = g.get_state()
+            g = torch.Generator().manual_seed(500 + seed)
+            out["sde_no_ops"] = step_sde_euler_maruyama(m, h0, BOXES, T, spec["dt"], spec["kBT"],
+                                                        noise_mode="gaussian", sigma_noise=1.5,
+                                                        generator=g)
         return {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in out.items()}
     return run
 
@@ -723,6 +840,12 @@ _EXTRA = {
     "nop_n2/euler_domain_kappa_roll": ("nop_n2", "euler", "domain", dict(kappa_roll=0.2)),
     "nop_n2/sde_v_ext_white": ("nop_n2", "sde", "floor", dict(v_ext=True, noise_mode="none")),
     "nop_n1/heun_v_ext": ("nop_n1", "heun", "box", dict(v_ext=True)),
+    "nk_gas_n2/euler_unbatched_v_ext_T_field": ("nk_gas_n2", "euler", "floor",
+                                                dict(v_ext=True, T_field=True, unbatched=True)),
+    "nk_gas_n2/sde_unbatched_v_ext_T_field": ("nk_gas_n2", "sde", "floor",
+                                              dict(v_ext=True, T_field=True, unbatched=True)),
+    "sg_landau_n1/heun_unbatched_T_field": ("sg_landau_n1", "heun", "box",
+                                            dict(T_field=True, unbatched=True)),
 }
 for _j, (_key, (_name, _kind, _proj, _kw)) in enumerate(_EXTRA.items()):
     case("integrators", _key)(_rollout_case(_name, _kind, _proj, seed=50 + _j, **_kw))
@@ -737,7 +860,9 @@ IMEX_BOX = torch.tensor([7.0, 7.5, 8.0])
 
 def _imex_case(name: str, *, m_stab: str, state_proj: str = "floor", mass_restore: str = "shift",
                clamp_rho=1e-3, noise_eval=None, kbt_field: bool = False, v_ext: bool = False,
-               noise_mode: str = "gaussian", steps: int = 3, save_every: int = 1, seed: int = 0):
+               noise_mode: str = "gaussian", steps: int = 3, save_every: int = 1, seed: int = 0,
+               noise_scale: float = 1.0, floor=None):
+    """``floor``: the ``'floor'`` mode's per-cell floor, by default just under the field's mean."""
     def run():
         from aipf.rollout.imex import rollout_imex
         m = model(name)
@@ -752,13 +877,14 @@ def _imex_case(name: str, *, m_stab: str, state_proj: str = "floor", mass_restor
             fields["v_ext"] = 0.02 * torch.randn(n, *GRID, generator=g)
         noise = None
         if noise_eval is not None:
-            noise = dict(kBT_noise=EV_KB * T, noise_scale=1.0, noise_mode=noise_mode,
+            noise = dict(kBT_noise=EV_KB * T, noise_scale=noise_scale, noise_mode=noise_mode,
                          sigma_noise=1.5 if noise_mode == "gaussian" else None,
                          noise_eval=noise_eval, predictor_floor=1e-4)
         if state_proj == "domain":
             proj = dict(state_proj="domain", state_clamp=1e-3, domain=_domain())
         else:
-            proj = dict(state_proj="floor", state_clamp=min(BASE[n]) - 0.02)
+            proj = dict(state_proj="floor",
+                        state_clamp=min(BASE[n]) - 0.02 if floor is None else floor)
         gen = torch.Generator().manual_seed(800 + seed)
         traj = rollout_imex(m, h0, IMEX_BOX, T, 1e-3, steps, kB=EV_KB, m_stab=m_stab,
                             mass_restore=mass_restore, clamp_rho=clamp_rho, noise=noise,
@@ -776,6 +902,13 @@ for _ms in ("mean", "max"):
                                                            mass_restore=_mr, state_proj="domain")
         _IMEX[f"nk_gas_n1/det/{_ms}/{_mr}/floor"] = dict(name="nk_gas_n1", m_stab=_ms,
                                                           mass_restore=_mr)
+        # A floor far below the field, so nothing is clamped, and twenty steps: on these weak
+        # drifts a change in the last bit of one step's sum can round away in three steps and
+        # survives in twenty (measured: reordering the deterministic right-hand side's sum).
+        for _name in ("nk_gas_n2", "nk_gas_n1", "nk_joint_n2"):
+            _IMEX[f"{_name}/det/{_ms}/{_mr}/light_floor_20_steps"] = dict(
+                name=_name, m_stab=_ms, mass_restore=_mr, floor=1e-3, steps=20, save_every=5,
+                clamp_rho=None if _name == "nk_gas_n1" else 1e-3)
     for _ev in ("ito", "midpoint", "kinetic"):
         for _kf in (False, True):
             _IMEX[f"nk_gas_n2/noisy/{_ev}/{_ms}/kbt_field_{_kf}"] = dict(
@@ -798,6 +931,8 @@ _IMEX.update({
     "nk_gas_n1/noisy/v_ext_kbt_field_unclamped": dict(
         name="nk_gas_n1", m_stab="mean", noise_eval="ito", v_ext=True, kbt_field=True,
         clamp_rho=None),
+    "nk_gas_n2/noisy/zero_noise_scale": dict(name="nk_gas_n2", m_stab="max", noise_eval="ito",
+                                             noise_scale=0.0, floor=1e-3),
     "nk_joint_n2/noisy/midpoint": dict(name="nk_joint_n2", m_stab="max", noise_eval="midpoint",
                                        state_proj="domain"),
 })
@@ -940,14 +1075,8 @@ def _with_runs(fn):
     from aipf.train.dataset import read_mode_runs
     with TemporaryDirectory() as tmp:
         write_archive(Path(tmp))
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            import logging
-            logging.disable(logging.WARNING)
-            try:
-                runs = read_mode_runs(tmp, "run_*", keys=_keys())
-            finally:
-                logging.disable(logging.NOTSET)
+        with _quiet():
+            runs = read_mode_runs(tmp, "run_*", keys=_keys())
     return fn(runs)
 
 
@@ -1036,11 +1165,12 @@ def _l_dyn():
             "real_residual": l_dyn(real, k2, mult, band, alpha=1.0, eps=1e-6)}
 
 
-def _train_case(name: str):
+def _train_case(name: str, bare_ops: bool = False):
+    """``bare_ops``: the module holds one :class:`SpectralOps` on the batch's grid, not an ``OpsCache``."""
     def run():
         from torch.utils.data import default_collate
 
-        from aipf.spectral import OpsCache
+        from aipf.spectral import OpsCache, SpectralOps
         from aipf.train.config import TrainConfig
         from aipf.train.dataset import ModeWindowDataset
         from aipf.train.lit_module import LitModule
@@ -1055,7 +1185,9 @@ def _train_case(name: str):
             for key in ("rho_hat_states", "target_hat"):
                 batch[key] = batch[key][..., :1, :, :, :]
         cfg = TrainConfig(sigma=1.5, k_max=2.2, alpha_loss=0.2, h_inv_eps=1e-6)
-        lit = LitModule(m, OpsCache(TRAIN_GRID, n, nyquist_mask=m.ops.nyquist_mask), cfg)
+        ops = (SpectralOps if bare_ops else OpsCache)(TRAIN_GRID, n,
+                                                      nyquist_mask=m.ops.nyquist_mask)
+        lit = LitModule(m, ops, cfg)
         loss = lit.drift_loss(batch["rho_hat_states"], batch["lam"], batch["target_hat"],
                               batch["boxes"], batch["T"], sample_weight=batch["sample_weight"])
         params = [(k, p) for k, p in m.named_parameters() if p.requires_grad]
@@ -1073,3 +1205,507 @@ def _train_case(name: str):
 
 for _name in ("nk_gas_n2", "nk_lattice_n1", "nop_n2", "sg_landau_n1", "landau_n2"):
     case("train", f"drift_loss/{_name}")(_train_case(_name))
+for _name in ("nk_gas_n2", "nop_n2"):
+    case("train", f"drift_loss_bare_ops/{_name}")(_train_case(_name, bare_ops=True))
+
+
+# ---------------------------------------------------------------------------
+# modes: a LAMMPS text dump on disk, through modes_from_dump, the record's files and the dataset
+# ---------------------------------------------------------------------------
+
+#: The NPT-like trajectory: a cubic box shrinking 4 % over the run around a fixed centre, with a small
+#: anisotropic wobble; two dump types. At ``MODES_K_CUT_EDGE`` the first frame's mode set holds the
+#: ``|n| = 2`` axis modes and the time-mean box's does not, so the reference box is read off the labels.
+NPT_FRAMES = 10
+NPT_EDGE = 8.0
+MODES_K_CUT_EDGE = 1.59
+MODES_K_CUT = 2.0
+#: The training grid of the dataset case: ``|n| <= 2`` at ``MODES_K_CUT`` fits it.
+MODES_GRID = (6, 6, 6)
+
+
+def npt_frames(seed: int = 121, n_atoms: int = 48, shrink: float = 0.04):
+    """``(timestep, bounds (3, 2), ids, types, positions)`` per frame, atoms listed in a seeded order
+    that is not their id order (the reader sorts by id)."""
+    rng = np.random.default_rng(seed)
+    ids = np.arange(1, n_atoms + 1)
+    types = np.where(ids % 3 == 0, 2, 1)
+    s = rng.random((n_atoms, 3))
+    frames = []
+    for t in range(NPT_FRAMES):
+        lengths = NPT_EDGE * (1.0 - shrink * t / (NPT_FRAMES - 1)) \
+            * (1.0 + 0.002 * np.sin(0.9 * t + np.arange(3)))
+        lo = np.array([1.0, -2.0, 0.5]) - 0.5 * lengths
+        s = np.mod(s + 0.015 * rng.standard_normal(s.shape), 1.0)
+        order = rng.permutation(n_atoms)
+        frames.append((250 * t, np.stack([lo, lo + lengths], axis=1), ids[order], types[order],
+                       (lo + s * lengths)[order]))
+    return frames
+
+
+def write_dump(path: Path, frames, *, truncate: bool = False) -> Path:
+    """The frames as a LAMMPS text dump (``dump custom ... id type x y z``), every float by ``repr``;
+    ``truncate`` cuts the file inside the last frame's atom block, as a killed run leaves it."""
+    lines = []
+    for timestep, bounds, ids, types, positions in frames:
+        lines += ["ITEM: TIMESTEP", str(timestep), "ITEM: NUMBER OF ATOMS", str(len(ids)),
+                  "ITEM: BOX BOUNDS pp pp pp"]
+        lines += [f"{float(lo)!r} {float(hi)!r}" for lo, hi in bounds]
+        lines.append("ITEM: ATOMS id type x y z")
+        lines += [f"{int(i)} {int(t)} {float(x)!r} {float(y)!r} {float(z)!r}"
+                  for i, t, (x, y, z) in zip(ids, types, positions)]
+    text = "\n".join(lines) + "\n"
+    if truncate:
+        text = text[:text.rindex("ITEM: ATOMS") + 120]
+    path.write_text(text)
+    return path
+
+
+def _with_dump(fn, **frames_kw):
+    """``fn(tmp, dump)`` with the NPT dump written in a temporary directory ``tmp``."""
+    with TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        dump = write_dump(tmp / "npt.lammpstrj", npt_frames(**frames_kw))
+        return fn(tmp, dump)
+
+
+def _scrub(value: Any, tmp: Path) -> Any:
+    """``value`` with the temporary directory's path spelled ``<tmp>``, in every string it holds."""
+    if isinstance(value, str):
+        return value.replace(str(tmp), "<tmp>")
+    if isinstance(value, dict):
+        return {k: _scrub(v, tmp) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_scrub(v, tmp) for v in value)
+    return value
+
+
+#: Provenance entries that name this machine rather than the computation; their keys are kept.
+_MACHINE_KEYS = {"device_resolved": "<device>"}
+
+
+def _provenance(provenance, tmp: Path, dump: Path) -> Dict[str, Any]:
+    """A record's provenance as sorted JSON with the paths, the dump's digest and the device made
+    machine-independent; the digest is checked against the file's bytes, and that check is stored."""
+    import hashlib
+    p = dict(provenance)
+    out = {"source_sha256_is_the_file": p.get("source_sha256")
+           == hashlib.sha256(dump.read_bytes()).hexdigest()}
+    if "source_sha256" in p:
+        p["source_sha256"] = "<sha256>"
+    p.update({k: v for k, v in _MACHINE_KEYS.items() if k in p})
+    out["provenance"] = json.dumps(_scrub(p, tmp), sort_keys=True)
+    return out
+
+
+def _record(prefix: str, rec) -> Dict[str, Any]:
+    return {f"{prefix}amplitudes": _np(rec.amplitudes), f"{prefix}labels": _np(rec.labels),
+            f"{prefix}boxes": _np(rec.boxes), f"{prefix}T": rec.T, f"{prefix}dt_frame": rec.dt_frame}
+
+
+MODES_BASE = dict(sigma=1.0, k_cut=MODES_K_CUT, atom_types=(1, 2), fields="per_type",
+                  ordering="lexicographic", route="separable", T=9000.0, dt_frame=0.25,
+                  skip_frames=0)
+
+
+def _mode_fields():
+    from aipf.pipeline.modes import check_fields
+    return check_fields(({"name": "A", "weights": {1: 0.75, 2: -0.25}, "mean": 0.05},
+                         {"name": "B", "weights": {2: 1.0}, "mean": None}), species=("A", "B"))
+
+
+@case("modes", "read_dump")
+def _read_dump():
+    from aipf.pipeline import coarse_grain
+
+    def body(tmp, dump):
+        out: Dict[str, Any] = {}
+        frames = list(coarse_grain.read_dump(dump))
+        out["n_frames"] = len(frames)
+        for i, f in enumerate(frames):
+            out[f"frame{i}/timestep"] = f.timestep
+            out[f"frame{i}/box_bounds"] = _np(f.box_bounds)
+            out[f"frame{i}/positions"] = _np(f.positions)
+            out[f"frame{i}/types"] = _np(f.types)
+        out["box_lengths"] = _np(coarse_grain.box_lengths(frames))
+        out["read_timesteps"] = _np(coarse_grain.read_timesteps(dump))
+        out["stride_3/timesteps"] = tuple(f.timestep for f in coarse_grain.read_dump(dump, stride=3))
+        cut = write_dump(tmp / "cut.lammpstrj", npt_frames(), truncate=True)
+        short = list(coarse_grain.read_dump(cut))
+        out["truncated/n_frames"] = len(short)
+        out["truncated/box_lengths"] = _np(coarse_grain.box_lengths(short))
+        out["truncated/read_timesteps"] = _np(coarse_grain.read_timesteps(cut))
+        return out
+    return _with_dump(body)
+
+
+def _modes_case(k_cut: float, ordering: str):
+    def run():
+        from aipf.pipeline.modes import modes_from_dump
+
+        def body(tmp, dump):
+            rec = modes_from_dump(dump, **{**MODES_BASE, "k_cut": k_cut, "ordering": ordering})
+            return {**_record("", rec), **_provenance(rec.provenance, tmp, dump)}
+        return _with_dump(body)
+    return run
+
+
+case("modes", "modes_from_dump/edge_k_cut")(_modes_case(MODES_K_CUT_EDGE, "lexicographic"))
+case("modes", "modes_from_dump/shell")(_modes_case(MODES_K_CUT, "shell"))
+
+
+@case("modes", "modes_from_dump/fields_skip_entry_dir")
+def _modes_entry_dir():
+    """The archive layout: combined channels, leading frames dropped, a composition label, written to
+    ``entry_dir``; the files it wrote, what ``load`` reads back, and the second call's cache hit."""
+    from aipf.pipeline.modes import ModesRecord, modes_from_dump
+
+    def body(tmp, dump):
+        entry = tmp / "tree" / "run_a"
+        kw = {**MODES_BASE, "fields": _mode_fields(), "skip_frames": 2,
+              "composition": {"x_B": 0.3}, "entry_dir": entry}
+        rec = modes_from_dump(dump, **kw)
+        out: Dict[str, Any] = {**_record("", rec), **_provenance(rec.provenance, tmp, dump)}
+        out["files"] = tuple(sorted(p.name for p in entry.iterdir()))
+        with np.load(entry / "modes.npz") as payload:
+            out["npz/keys"] = tuple(payload.files)
+            for k in payload.files:
+                out[f"npz/{k}"] = _np(payload[k])
+        stored = json.loads((entry / "provenance.json").read_text())
+        out.update({f"provenance_json/{k}": v for k, v in _provenance(stored, tmp, dump).items()})
+        out["provenance_json/text_is_sorted_indent_1"] = (
+            (entry / "provenance.json").read_text() == json.dumps(stored, indent=1, sort_keys=True))
+        back = ModesRecord.load(entry)
+        out.update(_record("load/", back))
+        out["load/provenance_equal"] = dict(back.provenance) == dict(rec.provenance)
+        again = modes_from_dump(dump, **kw)
+        out.update(_record("cached/", again))
+        out["cached/provenance_equal"] = dict(again.provenance) == dict(rec.provenance)
+        return out
+    return _with_dump(body)
+
+
+@case("modes", "modes_from_dump/cache_dir")
+def _modes_cache_dir():
+    """The keyed cache: the entry's name is ``_cache_key`` of the identity (the provenance without
+    ``cache_dir``); that key of a machine-independent identity is stored."""
+    from aipf.pipeline import modes as pm
+
+    def body(tmp, dump):
+        cache = tmp / "cache"
+        rec = pm.modes_from_dump(dump, **{**MODES_BASE, "composition": {"x_B": 0.3},
+                                          "cache_dir": cache})
+        identity = {k: v for k, v in rec.provenance.items() if k != "cache_dir"}
+        entries = sorted(p.name for p in cache.iterdir())
+        # the entry's name hashes the temporary path; it is checked below, not stored
+        named = dict(rec.provenance, cache_dir=str(cache / "<key>"))
+        out: Dict[str, Any] = {**_record("", rec), **_provenance(named, tmp, dump)}
+        out["entry_is_the_key"] = entries == [pm._cache_key(identity)]
+        fixed = dict(_scrub(identity, tmp), source_sha256="0" * 64, device_resolved="cpu")
+        out["cache_key/fixed_identity"] = pm._cache_key(fixed)
+        out["cache_key/sorted_identity_keys"] = tuple(sorted(identity))
+        out["constants"] = repr((pm.SCHEMA, pm.REFERENCE_BOX, pm.DEVICE, pm.ARCHIVE_KEYS,
+                                 pm.SIDE_KEYS, pm.PER_TYPE, pm.FIELD_KEYS))
+        return out
+    return _with_dump(body)
+
+
+@case("modes", "combine_fields")
+def _modes_combine():
+    from aipf.pipeline.modes import combine_fields, extracted_types, modes_from_dump
+
+    def body(tmp, dump):
+        rec = modes_from_dump(dump, **MODES_BASE)
+        fields = _mode_fields()
+        return {"combined": _np(combine_fields(rec.amplitudes, rec.labels, rec.boxes, fields,
+                                               (1, 2))),
+                "combined_swapped_columns": _np(combine_fields(rec.amplitudes[..., ::-1],
+                                                               rec.labels, rec.boxes, fields,
+                                                               (2, 1))),
+                "extracted_types": extracted_types(fields, (1, 2))}
+    return _with_dump(body)
+
+
+@case("modes", "dataset_from_dump")
+def _modes_dataset():
+    """Two runs written by ``modes_from_dump`` (the NPT one and a fixed-box one), read the way
+    ``aipf.train.fit`` reads an archive, cut into windows: each window's box is its frames' mean box
+    and its amplitudes are divided by that box's volume."""
+    from types import SimpleNamespace
+
+    from aipf.pipeline.modes import modes_from_dump
+    from aipf.train.dataset import ModeWindowDataset, WindowSettings, read_mode_runs
+    from aipf.train.fit import _archive_keys
+
+    def body(tmp, dump):
+        tree = tmp / "tree"
+        fixed = write_dump(tmp / "nvt.lammpstrj", npt_frames(seed=122, shrink=0.0))
+        for tag, path, x in (("run_npt", dump, 0.3), ("run_nvt", fixed, 0.35)):
+            modes_from_dump(path, **{**MODES_BASE, "composition": {"x_B": x},
+                                     "entry_dir": tree / tag})
+        keys = _archive_keys(SimpleNamespace(table_keys={"x": "x_B"}))
+        with _quiet():
+            runs = read_mode_runs(tree, "run_*", keys=keys)
+        out: Dict[str, Any] = {"keys": repr(keys)}
+        for r, run_ in enumerate(runs):
+            out[f"run{r}/tag"] = run_.tag
+            out[f"run{r}/boxes"] = _np(run_.boxes)
+            out[f"run{r}/composition"] = run_.composition
+            out[f"run{r}/box_mean_1_5"] = _np(run_.box_mean(1, 5))
+        for estimator in ("weak", "savgol"):
+            savgol = estimator == "savgol"
+            ds = ModeWindowDataset(runs, WindowSettings(
+                estimator=estimator, half_width=2, n_states=3, stride=1, grid=MODES_GRID,
+                savgol_window=5 if savgol else None, savgol_poly=2 if savgol else None))
+            out[f"{estimator}/samples"] = tuple(ds.samples)
+            for i in (0, len(ds) // 2 - 1, len(ds) - 1):
+                for k, v in ds[i].items():
+                    out[f"{estimator}/item{i}/{k}"] = v
+        return out
+    return _with_dump(body)
+
+
+# ---------------------------------------------------------------------------
+# build: the declared systems' constructor arguments and the models fit builds from them
+# ---------------------------------------------------------------------------
+
+#: ``(system, variant)``: every declared functional and variant in ``experiments/``.
+BUILDS = (("lj", None), ("lj", "fh"), ("lj", "landau"), ("hhe", None), ("feb", None))
+#: The seed ``fit`` derives the model stream from in these cases.
+BUILD_SEED = 0
+
+
+def _build_case(system: str, variant, **overrides):
+    def run():
+        from aipf.functional.build import build, rung_kwargs
+        from aipf.system import load
+        from aipf.train.config import derive_seed
+        from aipf.train.lit_module import seeded_rng
+        sysm = load(system)
+        kwargs = rung_kwargs(sysm, variant, **overrides)
+        out: Dict[str, Any] = {"kwargs_keys": tuple(sorted(kwargs))}
+        out.update({f"kwargs/{k}": repr(v) for k, v in sorted(kwargs.items())})
+        # as fit builds it: under the run's model stream
+        with seeded_rng(derive_seed(BUILD_SEED, "model")):
+            m = build(sysm, variant, **overrides)
+        out["type"] = type(m).__name__
+        out["build_overrides"] = repr(m.build_overrides)
+        out["state_keys"] = tuple(m.state_dict())
+        out.update({f"state/{k}": v.clone() for k, v in m.state_dict().items()})
+        out["parameter_names"] = tuple(k for k, _ in m.named_parameters())
+        return out
+    return run
+
+
+for _system, _variant in BUILDS:
+    case("build", f"{_system}" + ("" if _variant is None else f"/{_variant}"))(
+        _build_case(_system, _variant))
+case("build", "lj/grid_override")(_build_case("lj", None, grid=(8, 8, 8)))
+case("build", "lj/landau/grid_override")(_build_case("lj", "landau", grid=(8, 8, 16)))
+
+
+# ---------------------------------------------------------------------------
+# datamodule: the split, the samplers and the first batches on the synthetic archive
+# ---------------------------------------------------------------------------
+
+@case("datamodule", "split_runs")
+def _split_runs():
+    from aipf.train.datamodule import SplitSettings, split_runs
+
+    def body(runs):
+        out: Dict[str, Any] = {}
+        settings = {
+            "random_0.34_seed_0": SplitSettings("random", (), 0.34, 0),
+            "random_0.34_seed_7": SplitSettings("random", (), 0.34, 7),
+            "random_0.0": SplitSettings("random", (), 0.0, 3),
+            "random_reversed": SplitSettings("random", (), 0.5, 1),
+            "labels": SplitSettings("labels", ((0.65, 0.35),), 0.0, 0),
+            "none": SplitSettings("none", (), 0.5, 0),
+        }
+        for name, s in settings.items():
+            given = runs[::-1] if name == "random_reversed" else runs
+            train, val = split_runs(given, s)
+            out[f"{name}/train"] = tuple(r.tag for r in train)
+            out[f"{name}/val"] = tuple(r.tag for r in val)
+        return out
+    return _with_runs(body)
+
+
+@case("datamodule", "index_stepping_sampler")
+def _index_stepping():
+    from aipf.train.datamodule import IndexSteppingSampler
+    return {f"{n}_{b}": tuple(tuple(batch) for batch in IndexSteppingSampler(n, b))
+            for n, b in ((7, 3), (10, 4), (5, 5), (3, 8), (1, 1))}
+
+
+def _datamodule_case(order: str, weighting: str, split: str):
+    def run():
+        from aipf.train.datamodule import (LoaderSettings, ModeDataModule, RunWeighting,
+                                           SourceSpec, SplitSettings)
+        with TemporaryDirectory() as tmp:
+            write_archive(Path(tmp))
+            sources = (SourceSpec("first", tmp, "run_*", TRAIN_GRID, 1.0, ()),
+                       SourceSpec("second", tmp, "run_[ab]", (6, 6, 7), 0.5, ("run_b",)))
+            band = (RunWeighting("uniform", None, None, None, None) if weighting == "uniform"
+                    else RunWeighting("inverse_band_power", 1.5, 2.0, 1e-6, 2))
+            dm = ModeDataModule(
+                sources=sources, keys=_keys(), window=_settings("weak", 1.6),
+                split=SplitSettings(split, (), 0.34, 5), weighting=band,
+                loader=LoaderSettings(batch_size=3, num_workers=0, pin_memory=False,
+                                      drop_last=False, order=order))
+            with _quiet():
+                dm.setup()
+            out: Dict[str, Any] = {"source_names": dm.source_names,
+                                   "source_loss_weights": dict(dm.source_loss_weights)}
+            for s in dm.sources:
+                out[f"{s.name}/train_runs"] = tuple(r.tag for r in s.train_runs)
+                out[f"{s.name}/val_runs"] = tuple(r.tag for r in s.val_runs)
+                out[f"{s.name}/run_weights"] = _np(s.train_dataset.run_weights)
+                out[f"{s.name}/train_len"] = len(s.train_dataset)
+                out[f"{s.name}/grid"] = s.window.grid
+            gen = torch.Generator().manual_seed(2024)
+            loader = dm.train_dataloader(generator=gen)
+            with _quiet():
+                first = next(iter(loader))
+            batch = first[0] if isinstance(first, tuple) else first
+            for name, b in batch.items():
+                for k, v in b.items():
+                    out[f"train_batch0/{name}/{k}"] = v
+            out["generator_state_after_train"] = gen.get_state()
+            val = dm.val_dataloader(generator=gen)
+            out["val_loaders"] = None if val is None else len(val)
+            if val is not None:
+                with _quiet():
+                    vb = next(iter(val[0]))
+                out["val_batch0/run_index"] = vb["run_index"]
+                out["val_batch0/rho_hat_states"] = vb["rho_hat_states"]
+        return out
+    return run
+
+
+case("datamodule", "shuffled/uniform/random")(_datamodule_case("shuffled", "uniform", "random"))
+case("datamodule", "index_stepping/inverse_band_power/none")(
+    _datamodule_case("index_stepping", "inverse_band_power", "none"))
+
+
+# ---------------------------------------------------------------------------
+# fit: two optimizer steps of the training driver on a toy system, in this process, on the CPU
+# ---------------------------------------------------------------------------
+
+#: The toy archive's grid and length (``tests/unit/test_train_fit.py`` uses the same shape).
+FIT_GRID = (4, 4, 4)
+FIT_FRAMES = 24
+
+
+def _fit_system(tmp: Path, n_runs: int = 2):
+    """A two-channel reduced-unit ``"demo"`` system and its source, archive written by
+    :class:`ModesRecord` (as ``tests/unit/test_train_fit.py`` builds its own)."""
+    from aipf.paths import Paths
+    from aipf.pipeline.modes import ModesRecord
+    from aipf.system import AnchorRules, Functional, Mobility, System
+    from aipf.train.datamodule import SourceSpec
+    tree = tmp / "fields" / "modes_demo"
+    labels = np.array([(nx, ny, nz) for nx in (-1, 0, 1) for ny in (-1, 0, 1) for nz in (0, 1, 2)],
+                      dtype=np.int64)
+    for i in range(n_runs):
+        rng = np.random.default_rng(130 + i)
+        shape = (FIT_FRAMES, labels.shape[0], 2)
+        amps = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+        boxes = 8.0 * (1.0 + 0.01 * rng.random((FIT_FRAMES, 3)))
+        d = tree / f"run_{chr(ord('a') + i)}"
+        ModesRecord(amplitudes=amps, labels=labels, boxes=boxes, T=1000.0 + 50.0 * i,
+                    dt_frame=0.02, provenance={"composition": {"x_B": 0.5 - 0.1 * i},
+                                               "cache_dir": str(d)}).save(d)
+    functional = Functional(
+        form="nonlocal_kernel", local="mlp", kernel="radial_mlp",
+        kwargs=dict(grid=FIT_GRID, R_cut=2.0, rho_ref=(0.3, 0.3), h_u=4, h_g=4, h_w=4, h_m=4,
+                    fexc_T_ref=1.0, rho_eps=1e-5, activation="gelu", g_form="mlp",
+                    ideal_form="gas", f_exc_form="split", nyquist_mask=True, gauge_fix=False,
+                    enable_TlnT=False, enable_T2=False, tbasis_ortho=False, kernel_n_quad=16,
+                    kernel_n_k_table=17, kernel_k_table_max=8.0, h_g_hat=4, h_g_tilde=4,
+                    T_ref=1000.0, local_input_scale=False))
+    defaults = {
+        "estimator": "weak", "sigma": 1.0, "k_fit_stat": 1.5, "k_max": 2.0, "alpha_loss": 0.0,
+        "h_inv_eps": 1e-6, "lr": 1e-3, "weight_decay": 0.0, "warmup_epochs": 1,
+        "anneal_epochs": 1, "source_loss_weights": {"demo_src": 1.0},
+        "training": {"half_width": 2, "n_states": 3, "stride": 1, "savgol_window": None,
+                     "savgol_poly": None, "run_weighting": "uniform",
+                     "run_weight_probe_every": 10, "val_split": "random", "val_labels": (),
+                     "val_fraction": 0.5, "split_seed": 0, "batch_size": 2, "num_workers": 0,
+                     "pin_memory": False, "drop_last": False, "order": "shuffled",
+                     "lambda_dyn": 1.0, "bulk_residual": "relative_inverse", "eta_min": 1e-6,
+                     "grad_clip": 1.0}}
+    system = System(
+        name="demo", n_species=2, species=("A", "B"), masses={"A": 1.0, "B": 2.0},
+        atom_types={"A": 1, "B": 2},
+        table_keys={"rho": ("rho_A", "rho_B"), "x": "x_B", "x_channel": 1},
+        paths=Paths(system="demo", raw_default=str(tmp)), anchor_rules=AnchorRules({}),
+        constants={"kB": 1.0}, defaults=defaults, functional=functional,
+        mobility=Mobility(form="mlp_scaled", T_form="none",
+                          kwargs=dict(mobility_prefactor="mole_fraction",
+                                      mobility_input_ref=None)))
+    sources = (SourceSpec(name="demo_src", root=str(tree), pattern="run_*", grid=FIT_GRID,
+                          loss_weight=1.0, exclude_tags=()),)
+    return system, sources
+
+
+def _flat(value: Any, prefix: str, out: Dict[str, Any], tmp: Path) -> None:
+    """Tensors as tensors, containers walked, every other leaf as its scrubbed ``repr``."""
+    if isinstance(value, torch.Tensor):
+        out[prefix] = value.detach().clone()
+    elif isinstance(value, dict):
+        out[f"{prefix}/keys"] = repr(_scrub(list(value), tmp))
+        for k, v in value.items():
+            _flat(v, f"{prefix}/{k}", out, tmp)
+    elif isinstance(value, (list, tuple)) and any(isinstance(v, (torch.Tensor, dict, list, tuple))
+                                                  for v in value):
+        out[f"{prefix}/len"] = len(value)
+        for i, v in enumerate(value):
+            _flat(v, f"{prefix}/{i}", out, tmp)
+    else:
+        out[prefix] = _scrub(repr(value), tmp)
+
+
+def _fit_case(**kw):
+    def run():
+        import hashlib
+        import os
+
+        from aipf.train.fit import fit
+        with TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            system, sources = _fit_system(tmp)
+            env = os.environ.pop("AIPF_RAW", None)    # the demo's own raw root, not a user's
+            try:
+                with _quiet():
+                    run_dir = fit(system, run_name="golden", sources=sources, steps=2, seed=0,
+                                  resume_optimizer=False, root=tmp / "data", device="cpu", **kw)
+            finally:
+                if env is not None:
+                    os.environ["AIPF_RAW"] = env
+            out: Dict[str, Any] = {"run_dir": _scrub(str(run_dir), tmp),
+                                   "files": tuple(sorted(p.name for p in run_dir.iterdir()))}
+            ckpt = torch.load(run_dir / "final.ckpt", map_location="cpu", weights_only=False)
+            for key in ("state_dict", "optimizer_states", "lr_schedulers", "global_step", "epoch",
+                        "optimizer_param_names", "config", "config_schema"):
+                _flat(ckpt.get(key), f"ckpt/{key}", out, tmp)
+            out["ckpt/keys"] = tuple(sorted(ckpt))
+            out["ckpt/model_state_dict_matches"] = (
+                sorted(ckpt["model_state_dict"]) == sorted(k[len("model."):]
+                                                           for k in ckpt["state_dict"])
+                and all(torch.equal(v, ckpt["state_dict"][f"model.{k}"])
+                        for k, v in ckpt["model_state_dict"].items()))
+            out["hparams.yaml"] = _scrub((run_dir / "hparams.yaml").read_text(), tmp)
+            manifest = json.loads((run_dir / "MANIFEST.json").read_text())
+            out["manifest/md5_is_the_file"] = manifest["final_md5"] == hashlib.md5(
+                (run_dir / "final.ckpt").read_bytes()).hexdigest()
+            manifest["final_md5"] = "<md5>"
+            manifest["written_at"] = "<time>"
+            out["manifest"] = json.dumps(_scrub(manifest, tmp), sort_keys=True)
+        return out
+    return run
+
+
+case("fit", "two_steps")(_fit_case())
+case("fit", "two_steps_index_stepping_no_split")(_fit_case(split_mode="none",
+                                                           loader_order="index_stepping"))

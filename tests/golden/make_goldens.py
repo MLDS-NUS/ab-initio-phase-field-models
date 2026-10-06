@@ -4,9 +4,12 @@
 
 Run it only on source identical to the published baseline: a golden output records what the package
 computes, so one written from changed source records the change and every later comparison
-passes against it. The script refuses unless ``src/`` has no uncommitted change, and records in each
-file's ``meta`` the commit it ran on, the git tree of ``src/`` at that commit, and the torch and numpy
-versions. Without ``--write`` it refuses and writes nothing.
+passes against it. The script refuses unless ``import aipf`` is this repository's ``src/aipf``
+(``PYTHONPATH=<repo>/src``), ``src/`` has no uncommitted change, and ``git rev-parse HEAD:src`` is
+:data:`cases.BASELINE_SRC_TREE`, the pinned tree of the published source. A branch that changes
+``src/`` therefore cannot rewrite the outputs it is compared against; moving the baseline is a
+deliberate edit of that constant. Each file's ``meta`` records the commit it ran on, the git tree of
+``src/``, and the torch and numpy versions. Without ``--write`` it refuses and writes nothing.
 
 The outputs are float32 on the CPU, one thread, and depend on the torch build and the instruction set
 torch dispatches to (``torch.backends.cpu.get_cpu_capability()``), so they live in one directory per
@@ -63,10 +66,19 @@ def main(argv=None) -> int:
     if not args.write:
         parser.error("refusing to write golden outputs without --write; read this script's "
                      "docstring first")
+    wrong = cases.wrong_package()
+    if wrong is not None:
+        raise SystemExit(wrong)
     dirty = _git("status", "--porcelain", "--", "src")
     if dirty:
         raise SystemExit(f"src/ has uncommitted changes, so it is not the source a golden output "
                          f"may record:\n{dirty}")
+    tree = _git("rev-parse", "HEAD:src")
+    if tree != cases.BASELINE_SRC_TREE:
+        raise SystemExit(f"src/ at HEAD is tree {tree}, not the pinned baseline "
+                         f"{cases.BASELINE_SRC_TREE} (cases.BASELINE_SRC_TREE): golden outputs are "
+                         f"written from the published source only. Run this on a checkout of it; "
+                         f"moving the baseline is a deliberate edit of that constant")
     groups = list(cases.GROUPS) if args.groups is None else args.groups
     unknown = sorted(set(groups) - set(cases.GROUPS))
     if unknown:

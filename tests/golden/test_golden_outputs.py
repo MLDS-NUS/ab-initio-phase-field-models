@@ -7,14 +7,24 @@ key with the output stored under ``tests/golden/<torch version>-<capability>/``,
 ``make_goldens.py`` wrote from the published source. A failure names the case, the first key that
 differs and by how much.
 
-The stored outputs belong to one torch build on one instruction set; on another the tests skip,
-naming the pair and the command that writes them (which must be run on the published source, see its
-docstring).
+The stored outputs belong to one torch build on one instruction set, and the numpy version that
+wrote them; on another build, instruction set or numpy the tests skip, naming what differs and the
+command that writes the outputs (which runs on the published source only, see its docstring). The
+``env`` marker these tests carry stands for exactly that dependency here: the CPU torch build and the
+instruction set it dispatches to, not a data root, a simulator or a GPU.
+
+numpy is checked against each file's ``meta`` rather than folded into the directory name: the
+directory is the torch build the bits depend on throughout, numpy moves only the cases that compute
+with it (the pipeline, the dataset), and a mismatch skips just as an absent torch build does.
+
+The package under test must be this repository's ``src/aipf``; any other (an installed copy, a sibling
+worktree) fails every test here, naming the ``PYTHONPATH`` that fixes it.
 """
 from __future__ import annotations
 
 import functools
 
+import numpy as np
 import pytest
 import torch
 
@@ -28,6 +38,13 @@ FIXTURES = cases.fixture_dir()
 CASES = [(group, name) for group, table in cases.GROUPS.items() for name in table]
 
 
+#: Why the package under test is not this repository's, or ``None``; checked once, at collection.
+WRONG_PACKAGE = cases.wrong_package()
+
+_WRITE = ("write them on the published source with "
+          "`PYTHONPATH=<repo>/src python tests/golden/make_goldens.py --write`")
+
+
 @functools.lru_cache(maxsize=None)
 def _stored(group: str) -> dict:
     return torch.load(FIXTURES / f"{group}.pt", weights_only=True)
@@ -36,9 +53,20 @@ def _stored(group: str) -> dict:
 def _stored_or_skip(group: str) -> dict:
     if not (FIXTURES / f"{group}.pt").is_file():
         pytest.skip(f"no golden outputs for {cases.fixture_key()} (torch {torch.__version__}, "
-                    f"{torch.backends.cpu.get_cpu_capability()}): write them on the published "
-                    f"source with `python tests/golden/make_goldens.py --write`")
-    return _stored(group)
+                    f"{torch.backends.cpu.get_cpu_capability()}; the outputs depend on the CPU torch "
+                    f"build and its instruction set): {_WRITE}")
+    stored = _stored(group)
+    if stored["meta"]["numpy"] != np.__version__:
+        pytest.skip(f"{group}.pt was written with numpy {stored['meta']['numpy']} and this is numpy "
+                    f"{np.__version__}: {_WRITE}")
+    return stored
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _the_package_is_this_repositorys():
+    """Fail, not skip: outputs compared against another checkout's package say nothing about this one."""
+    if WRONG_PACKAGE is not None:
+        pytest.fail(WRONG_PACKAGE, pytrace=False)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -83,4 +111,20 @@ def test_the_stored_outputs_name_the_torch_they_were_written_with(group):
     meta = _stored_or_skip(group)["meta"]
     assert meta["torch"] == torch.__version__
     assert meta["cpu_capability"] == torch.backends.cpu.get_cpu_capability()
-    assert meta["group"] == group and len(meta["commit"]) == 40 and len(meta["src_tree"]) == 40
+    assert meta["numpy"] == np.__version__
+    assert meta["group"] == group and len(meta["commit"]) == 40
+
+
+@pytest.mark.parametrize("group", list(cases.GROUPS))
+def test_the_stored_outputs_were_written_from_the_pinned_baseline(group):
+    """A fixture written from any other ``src/`` would make its own changes the reference."""
+    meta = _stored_or_skip(group)["meta"]
+    assert meta["src_tree"] == cases.BASELINE_SRC_TREE, (
+        f"{group}.pt was written from src/ tree {meta['src_tree']}, not the pinned baseline "
+        f"{cases.BASELINE_SRC_TREE}")
+
+
+def test_every_group_has_one_file_and_every_file_one_group():
+    if not FIXTURES.is_dir():
+        pytest.skip(f"no golden outputs for {cases.fixture_key()}: {_WRITE}")
+    assert {p.stem for p in FIXTURES.glob("*.pt")} == set(cases.GROUPS)
