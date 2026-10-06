@@ -80,7 +80,10 @@ class ModeRun:
 
     ``boxes`` is ``(n_frames, 3)`` or ``(3,)``; ``composition`` follows the declared key order.
     ``reference_box`` ``(3,)``, when the archive records one, is the cell every window's ``k`` and ``V``
-    are read in (:attr:`cell`); ``None`` reads them in the frames' own boxes."""
+    are read in (:attr:`cell`); ``None`` reads them in the frames' own boxes.
+    ``depth`` is set only on a run projected to two dimensions (:func:`aipf.train.projection.project_kz0`):
+    its labels are ``(n_modes, 2)``, its boxes and cell ``(Lx, Ly)``, and a window's volume is the cell's
+    area times ``depth``. ``None`` (every run as read) is a three-dimensional run."""
 
     tag: str
     amplitudes: np.ndarray
@@ -90,6 +93,7 @@ class ModeRun:
     frame_interval: float
     composition: Tuple[float, ...]
     reference_box: Optional[np.ndarray] = None
+    depth: Optional[float] = None
 
     @property
     def cell(self) -> np.ndarray:
@@ -238,7 +242,10 @@ def scatter_modes(amplitudes, labels, volume: float, grid) -> np.ndarray:
     half spectrum.
 
     Labels with third index ``>= 0`` only, first two axes wrapped ``n mod G``, divided by ``volume``
-    in float64."""
+    in float64. A two-axis ``grid`` ``(Gx, Gy)`` takes ``(n_modes, 2)`` labels and scatters onto
+    ``(..., n_channels, Gx, Gy//2+1)`` by the same rule, its half axis ``y`` (:func:`_scatter_modes_2d`)."""
+    if len(grid) == 2:
+        return _scatter_modes_2d(amplitudes, labels, volume, grid)
     Gx, Gy, Gz = (int(g) for g in grid)
     Gzr = Gz // 2 + 1
     amplitudes = np.asarray(amplitudes)
@@ -262,6 +269,39 @@ def scatter_modes(amplitudes, labels, volume: float, grid) -> np.ndarray:
     out = np.zeros(lead + (amplitudes.shape[-2], Gx, Gy, Gzr),
                    dtype=np.complex64)
     out[..., :, ix, iy, iz] = (amplitudes[..., keep] / volume).astype(
+        np.complex64)
+    return out
+
+
+def _scatter_modes_2d(amplitudes, labels, volume: float, grid) -> np.ndarray:
+    """:func:`scatter_modes` on a two-axis grid: labels ``(n_modes, 2)`` with second index ``>= 0`` only
+    (the rfft half axis is ``y``), the first wrapped ``n mod Gx``, divided by ``volume`` in float64."""
+    Gx, Gy = (int(g) for g in grid)
+    Gyr = Gy // 2 + 1
+    amplitudes = np.asarray(amplitudes)
+    labels = np.asarray(labels)
+    if labels.ndim != 2 or labels.shape[1] != 2:
+        raise ValueError(
+            f"labels of shape {tuple(labels.shape)} on the two-axis grid {(Gx, Gy)}: a "
+            f"two-dimensional half spectrum takes (n_x, n_y) labels, which "
+            f"aipf.train.projection.project_kz0 makes from a three-dimensional archive")
+    keep = labels[:, 1] >= 0
+    kept = labels[keep]
+    if kept.shape[0] == 0:
+        raise ValueError(
+            "no label has a non-negative second index: the half spectrum "
+            "would be empty")
+    if (np.abs(kept[:, 0]).max() >= Gx // 2
+            or kept[:, 1].max() >= Gyr):
+        raise ValueError(
+            f"the mode set reaches beyond the grid {(Gx, Gy)}: raise the "
+            f"grid or lower the extraction cutoff")
+    ix = np.mod(kept[:, 0], Gx)
+    iy = kept[:, 1]
+    lead = amplitudes.shape[:-2]
+    out = np.zeros(lead + (amplitudes.shape[-2], Gx, Gyr),
+                   dtype=np.complex64)
+    out[..., :, ix, iy] = (amplitudes[..., keep] / volume).astype(
         np.complex64)
     return out
 
@@ -300,8 +340,9 @@ def savgol_taps(window: int, poly: int, frame_interval: float):
 
 @dataclass(frozen=True)
 class WindowSettings:
-    """How a run's timeline is cut into windows, and onto what ``grid`` ``(Gx, Gy, Gz)``; every
-    field is required except ``band_k_max``, which is optional and defaults to ``None``.
+    """How a run's timeline is cut into windows, and onto what ``grid`` ``(Gx, Gy, Gz)`` (or ``(Gx, Gy)``
+    for runs projected to two dimensions); every field is required except ``band_k_max``, which is
+    optional and defaults to ``None``.
 
     * ``estimator``: one of :data:`ESTIMATORS`.
     * ``half_width``, ``n_states``, ``stride``: the window's half width, its states and the frames
@@ -332,9 +373,10 @@ class WindowSettings:
             if int(getattr(self, name)) < 1:
                 raise ValueError(
                     f"{name}={getattr(self, name)!r} must be at least 1")
-        if len(self.grid) != 3 or any(g < 1 for g in self.grid):
+        if len(self.grid) not in (2, 3) or any(g < 1 for g in self.grid):
             raise ValueError(
-                f"grid={self.grid!r} is not three positive axis lengths")
+                f"grid={self.grid!r} is not three positive axis lengths "
+                f"(or two, for runs projected to two dimensions)")
         if self.estimator == "savgol":
             for name in ("savgol_window", "savgol_poly"):
                 if getattr(self, name) is None:
@@ -377,6 +419,18 @@ class WindowSettings:
         return centre - self.half_taps, centre + self.half_taps + 1
 
 
+def _check_axes(runs: Sequence[ModeRun], grid) -> None:
+    """Refuse a run whose labels have another number of axes than ``grid``: a three-dimensional run on a
+    two-axis grid, or a projected one on a three-axis grid."""
+    for run in runs:
+        axes = int(np.asarray(run.labels).shape[-1])
+        if axes != len(grid):
+            raise ValueError(
+                f"run {run.tag!r} carries {axes}-axis labels and the grid {tuple(grid)} has "
+                f"{len(grid)} axes: a two-axis grid reads runs projected to two dimensions "
+                f"(aipf.train.projection.project_kz0), a three-axis grid the archive as read")
+
+
 class ModeWindowDataset(Dataset):
     """Windows of a set of runs (one channel count) as the tensors a drift step consumes.
 
@@ -393,6 +447,7 @@ class ModeWindowDataset(Dataset):
                 f"the runs carry {sorted(counts)} channels: one dataset is "
                 f"one channel count, because one batch of it is one model's "
                 f"input")
+        _check_axes(runs, settings.grid)
         self.runs = runs
         self.settings = settings
         if run_weights is None:
@@ -439,6 +494,9 @@ class ModeWindowDataset(Dataset):
         start, stop = settings.window_bounds(centre)
         box = run.box_mean(start, stop)
         volume = float(box.prod())
+        if run.depth is not None:
+            # a projected run: the cell's area times the depth along the axis it was averaged over
+            volume = volume * float(run.depth)
         if settings.estimator == "weak":
             target = weak_target(run.amplitudes, centre, settings.half_width,
                                  run.frame_interval)

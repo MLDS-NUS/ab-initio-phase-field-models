@@ -16,6 +16,7 @@ from aipf.train.anchors import NO_ANCHORS, AnchorTables
 from aipf.train.config import TrainConfig
 from aipf.train.lit_module import LitModule
 from aipf.train.pressure import pressure_from_model
+from aipf.train.projection import PROJECTIONS, project_kz0, projection_depth
 from aipf.train.sampling import sample_uniform
 
 __all__ = [
@@ -34,4 +35,7 @@ __all__ = [
     "IMPLICIT_WEIGHTS_A",
     "IMPLICIT_WEIGHTS_B",
     "NEW_CONFIG_SCHEMA_TAG",
+    "PROJECTIONS",
+    "project_kz0",
+    "projection_depth",
 ]
