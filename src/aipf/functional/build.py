@@ -14,7 +14,7 @@ from typing import Any, Dict
 import torch
 
 from aipf.mobility import mobility_kwargs
-from aipf.spectral import OpsCache, SpectralOps
+from aipf.spectral import OPS_CLASSES, OpsCache
 
 from .base import MODEL_REGISTRY, PROTOCOL_METHODS
 
@@ -301,9 +301,9 @@ def check_factory_model(model, system) -> None:
     """Refuse what ``system.functional.factory`` returned unless training, the checkpoint reload and the
     explicit solvers can use it: an ``nn.Module`` with the ``FreeEnergyModel`` methods, at least one
     parameter, ``_cache`` (an :class:`aipf.spectral.OpsCache`) and ``ops`` (its
-    :class:`aipf.spectral.SpectralOps`, the same object as ``_cache.ops``) on the declared ``grid``
-    and under the declared ``nyquist_mask``. The semi-implicit scheme's
-    own needs are checked when it runs."""
+    :class:`aipf.spectral.SpectralOps`, or :class:`aipf.spectral.SpectralOps2D` on a two-axis grid, the
+    same object as ``_cache.ops``) on the declared ``grid`` and under the declared ``nyquist_mask``.
+    The semi-implicit scheme's own needs are checked when it runs."""
     name = factory_name(system.functional.factory)
     if not isinstance(model, torch.nn.Module):
         raise TypeError(
@@ -323,7 +323,7 @@ def check_factory_model(model, system) -> None:
         raise TypeError(
             f"the factory {name} returned a {type(model).__name__} whose _cache is not an "
             f"aipf.spectral.OpsCache; training reads the spectral operators per grid from it")
-    if not isinstance(getattr(model, "ops", None), SpectralOps):
+    if not isinstance(getattr(model, "ops", None), OPS_CLASSES):
         raise TypeError(
             f"the factory {name} returned a {type(model).__name__} whose ops is not an "
             f"aipf.spectral.SpectralOps (the OpsCache's own, _cache.ops); the explicit solvers "

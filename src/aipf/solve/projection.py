@@ -5,11 +5,13 @@ declared admissible set with an exact ``k=0`` mass restore, and applies no band 
 ``"domain"`` (the trust trapezoid, then clamped at ``lo > 0``)."""
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
 
-from aipf.spectral import SpectralOps
+from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, DC, SpectralOps,
+                           ops_ndim)
 
 from .declare import UNDECLARED
 from .trust_domain import TrustDomain, project_trust_domain
@@ -22,16 +24,18 @@ STATE_PROJ_ITERS = 3
 
 
 def hermitianize(rho_hat: torch.Tensor, ops: SpectralOps) -> torch.Tensor:
-    """Project ``rho_hat`` onto the ``rfft`` of real fields; ``k=0`` restored bitwise with ``Im = 0``."""
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    dc = rho_hat[..., 0, 0, 0].clone()
+    """Project ``rho_hat`` onto the ``rfft`` of real fields; ``k=0`` restored bitwise with ``Im = 0``.
+    In two dimensions the Nyquist line is the half axis's last column, repaired the same way."""
+    dc_at = DC[ops_ndim(ops)]
+    N = math.prod(ops.grid)
+    dc = rho_hat[dc_at].clone()
     out = ops.rfft(ops.irfft(rho_hat * N)) / N
-    out[..., 0, 0, 0] = dc.real
+    out[dc_at] = dc.real
     return out
 
 
-def _bound(value, ref: torch.Tensor, name: str) -> torch.Tensor:
-    """A scalar or per-channel bound, broadcastable against a ``(B, n, Gx, Gy, Gz)`` field."""
+def _bound(value, ref: torch.Tensor, name: str, ndim: int = 3) -> torch.Tensor:
+    """A scalar or per-channel bound, broadcastable against a ``(B, n, *grid)`` field of ``ndim`` axes."""
     t = torch.as_tensor(value, dtype=ref.dtype, device=ref.device)
     if t.ndim == 0:
         return t
@@ -39,21 +43,23 @@ def _bound(value, ref: torch.Tensor, name: str) -> torch.Tensor:
         raise ValueError(
             f"{name} must be a scalar or one number per channel "
             f"({int(ref.shape[1])}), got shape {tuple(t.shape)}")
-    return t.view(1, -1, 1, 1, 1)
+    return t.view(1, -1, *(1,) * ndim)
 
 
 def restore_mass(rho_r: torch.Tensor, target_mean: torch.Tensor,
-                 lo) -> torch.Tensor:
+                 lo, ndim: int = 3) -> torch.Tensor:
     """Move each channel's mean to ``target_mean`` without pushing any cell below ``lo``:
-    ``rho' = rho + max(d, 0) + min(d, 0) * (rho - lo) / mean(rho - lo)``; full drain if ``target_mean < lo``."""
-    dims = (-3, -2, -1)
+    ``rho' = rho + max(d, 0) + min(d, 0) * (rho - lo) / mean(rho - lo)``; full drain if ``target_mean < lo``.
+    ``ndim`` is the field's declared number of spatial axes (the trailing ones averaged over)."""
+    dims = (-3, -2, -1) if ndim == 3 else (-2, -1)
+    cell = (Ellipsis,) + (None,) * ndim
     d = target_mean - rho_r.mean(dim=dims)                    # (B, n)
     head = (rho_r - lo).clamp(min=0.0)
     head_mean = head.mean(dim=dims)
     tiny = torch.finfo(rho_r.dtype).tiny
     frac = (d.clamp(max=0.0) / head_mean.clamp(min=tiny)).clamp(min=-1.0)
-    return (rho_r + d.clamp(min=0.0)[..., None, None, None]
-            + frac[..., None, None, None] * head)
+    return (rho_r + d.clamp(min=0.0)[cell]
+            + frac[cell] * head)
 
 
 def check_state_projection(state_proj, floor, domain, *, lo=UNDECLARED,
@@ -125,25 +131,27 @@ def project_state(rho_hat: torch.Tensor, ops: SpectralOps, floor,
     else:
         lo_value, hi_value = float(lo), None
 
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    dc = rho_hat[..., 0, 0, 0].clone()
+    ndim = ops_ndim(ops)
+    dc_at = DC[ndim]
+    N = math.prod(ops.grid)
+    dc = rho_hat[dc_at].clone()
     target = dc.real
     for _ in range(iters):
         rho_r = ops.irfft(rho_hat * N)
-        lo_t = _bound(lo_value, rho_r, "lo")
-        hi_t = None if hi_value is None else _bound(hi_value, rho_r, "hi")
+        lo_t = _bound(lo_value, rho_r, "lo", ndim)
+        hi_t = None if hi_value is None else _bound(hi_value, rho_r, "hi", ndim)
         if state_proj == "domain":
             B = rho_r.shape[0]
-            grid = rho_r.shape[-3:]
+            grid = rho_r.shape[-ndim:]
             n = rho_r.shape[1]
-            flat = rho_r.permute(0, 2, 3, 4, 1).reshape(-1, n)
+            flat = rho_r.permute(*CHANNEL_LAST[ndim]).reshape(-1, n)
             proj = project_trust_domain(flat, domain)
             # Identity, not equality: `project_trust_domain` returns its argument when all rows are inside.
             if proj is flat:
                 if bool((rho_r >= lo_t).all()):
                     break
             else:
-                rho_r = proj.reshape(B, *grid, n).permute(0, 4, 1, 2, 3)
+                rho_r = proj.reshape(B, *grid, n).permute(*CHANNEL_SECOND[ndim])
             rho_r = rho_r.clamp(min=lo_t)
         elif state_proj == "box":
             if bool((rho_r >= lo_t).all()) and bool((rho_r <= hi_t).all()):
@@ -153,9 +161,9 @@ def project_state(rho_hat: torch.Tensor, ops: SpectralOps, floor,
             if bool((rho_r >= lo_t).all()):
                 break
             rho_r = rho_r.clamp(min=lo_t)
-        rho_r = restore_mass(rho_r, target, lo_t)
+        rho_r = restore_mass(rho_r, target, lo_t, ndim)
         rho_hat = ops.rfft(rho_r) / N
-        rho_hat[..., 0, 0, 0] = dc
+        rho_hat[dc_at] = dc
     return rho_hat
 
 
@@ -181,21 +189,23 @@ def project_state_uniform_shift(rho_hat: torch.Tensor, ops: SpectralOps, *,
     floor = float(floor)
     if state_proj == "floor" and floor <= 0.0:
         return rho_hat
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    dc = rho_hat[..., 0, 0, 0].clone()
+    ndim = ops_ndim(ops)
+    dc_at = DC[ndim]
+    N = math.prod(ops.grid)
+    dc = rho_hat[dc_at].clone()
     for _ in range(iters):
         rho_r = ops.irfft(rho_hat * N)
         if state_proj == "domain":
-            B, grid, n = rho_r.shape[0], rho_r.shape[-3:], rho_r.shape[1]
-            flat = rho_r.permute(0, 2, 3, 4, 1).reshape(-1, n)
+            B, grid, n = rho_r.shape[0], rho_r.shape[-ndim:], rho_r.shape[1]
+            flat = rho_r.permute(*CHANNEL_LAST[ndim]).reshape(-1, n)
             proj = project_trust_domain(flat, domain)
             if proj is flat:
                 break
-            rho_r = proj.reshape(B, *grid, n).permute(0, 4, 1, 2, 3)
+            rho_r = proj.reshape(B, *grid, n).permute(*CHANNEL_SECOND[ndim])
         else:
             if bool((rho_r >= floor).all()):
                 break
             rho_r = rho_r.clamp(min=floor)
         rho_hat = ops.rfft(rho_r) / N
-        rho_hat[..., 0, 0, 0] = dc
+        rho_hat[dc_at] = dc
     return rho_hat

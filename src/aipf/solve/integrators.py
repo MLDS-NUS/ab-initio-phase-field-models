@@ -2,18 +2,23 @@
 Mass is exact: every step is a linear combination of k-space divergences, zero at ``k=0``.
 External drive (off by default, bit-for-bit absent when off): ``v_ext`` adds ``V_i(r)`` to ``mu_i``;
 ``T_field`` adds ``psi_i(r) = mu^loc_i(rho(r), T(r)) - mu^loc_i(rho(r), T)``, both as ``div[M grad psi]``.
-Under noise ``T_field`` also scales the amplitude per cell (local-equilibrium convention)."""
+Under noise ``T_field`` also scales the amplitude per cell (local-equilibrium convention).
+Two dimensions are declared by the model's operator set (``model.ops.ndim``), never read off a shape; the
+noise there needs the cell's extent along the averaged axis, ``depth`` (:func:`check_depth`)."""
 from __future__ import annotations
 
+import math
 from contextlib import nullcontext
 from typing import List, Optional, Tuple
 
 import torch
 
-from aipf.spectral import SpectralOps
+from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, FLUX_EINSUM,
+                           MATRIX_LAST, MATRIX_SECOND, SpectralOps,
+                           half_spectrum_grid, make_ops, model_ndim, ops_ndim)
 from .declare import UNDECLARED
 from .guards import assert_finite, clamped_inputs, kappa_roll_correction
-from .noise import build_noise_filter, check_noise_declaration
+from .noise import build_noise_filter, check_depth, check_noise_declaration
 from .projection import (check_state_projection, hermitianize,
                          project_state)
 from .trust_domain import TrustDomain
@@ -29,6 +34,9 @@ def _ops_for(rho_hat: torch.Tensor, ops: Optional[SpectralOps],
         raise ValueError(
             "no operator set was passed and the model has none (model.ops) "
             "declaring nyquist_mask; pass ops=, built with the model's declaration")
+    if model_ndim(model) == 2:
+        grid = half_spectrum_grid(rho_hat.shape[-2:], model.ops.grid)
+        return make_ops(grid, n_species, nyquist_mask=declared).to(rho_hat.device)
     Gx, Gy, Gzr = (int(s) for s in rho_hat.shape[-3:])
     grid = (Gx, Gy, 2 * (Gzr - 1))
     return SpectralOps(grid, n_species, nyquist_mask=declared).to(rho_hat.device)
@@ -38,17 +46,22 @@ def _ops_for(rho_hat: torch.Tensor, ops: Optional[SpectralOps],
 # the external drive
 # ---------------------------------------------------------------------------
 
-def _validated_T_field(T_field, rho: torch.Tensor) -> torch.Tensor:
-    """``T_field`` as a ``(B, Gx, Gy, Gz)`` tensor, finite and strictly positive."""
+def _shape_text(shape) -> str:
+    return "(" + ", ".join(str(v) for v in shape) + ")"
+
+
+def _validated_T_field(T_field, rho: torch.Tensor, ndim: int = 3) -> torch.Tensor:
+    """``T_field`` as a ``(B, *grid)`` tensor, finite and strictly positive; ``grid`` is ``rho``'s last
+    ``ndim`` (declared) axes."""
     B = rho.shape[0]
-    grid = tuple(int(g) for g in rho.shape[-3:])
+    grid = tuple(int(g) for g in rho.shape[-ndim:])
     Tf = torch.as_tensor(T_field, dtype=rho.dtype, device=rho.device)
     if tuple(Tf.shape) == grid:
         Tf = Tf.unsqueeze(0).expand(B, *grid)
     if tuple(Tf.shape) != (B, *grid):
         raise ValueError(
-            f"T_field must have shape ({B}, {grid[0]}, {grid[1]}, "
-            f"{grid[2]}) or ({grid[0]}, {grid[1]}, {grid[2]}) -- one "
+            f"T_field must have shape {_shape_text((B, *grid))} or "
+            f"{_shape_text(grid)} -- one "
             f"temperature per cell of the rollout's FULL real-space grid, "
             f"no species axis, in the same unit as the protocol's T -- got "
             f"{tuple(Tf.shape)}")
@@ -59,17 +72,17 @@ def _validated_T_field(T_field, rho: torch.Tensor) -> torch.Tensor:
     return Tf
 
 
-def _validated_v_ext(v_ext, rho: torch.Tensor) -> torch.Tensor:
-    """``v_ext`` as a ``(B, n_species, Gx, Gy, Gz)`` tensor, checked."""
+def _validated_v_ext(v_ext, rho: torch.Tensor, ndim: int = 3) -> torch.Tensor:
+    """``v_ext`` as a ``(B, n_species, *grid)`` tensor, checked; ``grid`` is ``rho``'s last ``ndim`` axes."""
     B, n = rho.shape[0], rho.shape[1]
-    grid = tuple(int(g) for g in rho.shape[-3:])
+    grid = tuple(int(g) for g in rho.shape[-ndim:])
     V = torch.as_tensor(v_ext, dtype=rho.dtype, device=rho.device)
     if tuple(V.shape) == (n, *grid):
         V = V.unsqueeze(0).expand(B, n, *grid)
     if tuple(V.shape) != (B, n, *grid):
         raise ValueError(
-            f"v_ext must have shape ({B}, {n}, {grid[0]}, {grid[1]}, "
-            f"{grid[2]}) or ({n}, {grid[0]}, {grid[1]}, {grid[2]}) -- one "
+            f"v_ext must have shape {_shape_text((B, n, *grid))} or "
+            f"{_shape_text((n, *grid))} -- one "
             f"potential per species on the rollout's FULL real-space grid, "
             f"in the same energy unit as the model's mu -- got "
             f"{tuple(V.shape)}")
@@ -79,36 +92,37 @@ def _validated_v_ext(v_ext, rho: torch.Tensor) -> torch.Tensor:
 
 
 def _local_mu_shift(model: torch.nn.Module, rho: torch.Tensor,
-                    T: torch.Tensor, T_field) -> torch.Tensor:
+                    T: torch.Tensor, T_field, ndim: int = 3) -> torch.Tensor:
     """``mu^loc(rho(r), T(r)) - mu^loc(rho(r), T)``, pointwise, from ``bulk_free_energy_density`` by autograd.
     Both temperatures in one call, so a uniform ``T_field == T`` gives exactly zero."""
     B, n = rho.shape[0], rho.shape[1]
-    grid = tuple(int(g) for g in rho.shape[-3:])
-    Tf = _validated_T_field(T_field, rho)
-    P = B * grid[0] * grid[1] * grid[2]
+    grid = tuple(int(g) for g in rho.shape[-ndim:])
+    Tf = _validated_T_field(T_field, rho, ndim)
+    P = B * math.prod(grid)
+    ones = (1,) * ndim
 
-    cells = rho.permute(0, 2, 3, 4, 1).reshape(P, n)
-    T_ref = T.to(rho.dtype).view(B, 1, 1, 1).expand(B, *grid).reshape(P)
+    cells = rho.permute(*CHANNEL_LAST[ndim]).reshape(P, n)
+    T_ref = T.to(rho.dtype).view(B, *ones).expand(B, *grid).reshape(P)
     T_two = torch.cat([Tf.reshape(P), T_ref], dim=0)
-    rho_two = torch.cat([cells, cells], dim=0).view(2 * P, n, 1, 1, 1)
+    rho_two = torch.cat([cells, cells], dim=0).view(2 * P, n, *ones)
 
     with torch.enable_grad():
         r = rho_two.detach().requires_grad_(True)
         f = model.bulk_free_energy_density(r, T_two)
         (g,) = torch.autograd.grad(f.sum(), r)
     g = g.reshape(2 * P, n)
-    return (g[:P] - g[P:]).view(B, *grid, n).permute(0, 4, 1, 2, 3)
+    return (g[:P] - g[P:]).view(B, *grid, n).permute(*CHANNEL_SECOND[ndim])
 
 
 def _external_potential(model: torch.nn.Module, rho: torch.Tensor,
-                        T: torch.Tensor, v_ext, T_field
+                        T: torch.Tensor, v_ext, T_field, ndim: int = 3
                         ) -> Optional[torch.Tensor]:
     """The additive potential ``psi_i(r)`` on ``mu_i``, or ``None`` when neither drive is on."""
     psi = None
     if v_ext is not None:
-        psi = _validated_v_ext(v_ext, rho)
+        psi = _validated_v_ext(v_ext, rho, ndim)
     if T_field is not None:
-        shift = _local_mu_shift(model, rho, T, T_field)
+        shift = _local_mu_shift(model, rho, T, T_field, ndim)
         psi = shift if psi is None else psi + shift
     return psi
 
@@ -116,15 +130,22 @@ def _external_potential(model: torch.nn.Module, rho: torch.Tensor,
 def _external_flux_hat(model: torch.nn.Module, rho: torch.Tensor,
                        T: torch.Tensor, ops: SpectralOps, kx, ky, kz,
                        psi: torch.Tensor) -> torch.Tensor:
-    """``div[M(rho) grad psi]`` in the state's spectral convention; zero at ``k=0``."""
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    gx, gy, gz = ops.grad_hat(ops.rfft(psi), kx, ky, kz)
-    grad_psi = torch.stack(
-        [ops.irfft(gx), ops.irfft(gy), ops.irfft(gz)], dim=2)
+    """``div[M(rho) grad psi]`` in the state's spectral convention; zero at ``k=0``.
+    ``kz`` is ``None`` for a two-dimensional ``ops``."""
+    ndim = ops_ndim(ops)
+    ks = (kx, ky, kz)[:ndim]
+    N = math.prod(ops.grid)
+    grads = ops.grad_hat(ops.rfft(psi), *ks)
+    grad_psi = torch.stack([ops.irfft(g) for g in grads], dim=2)
     M = model.mobility(rho, T)
-    J = [torch.einsum("bijxyz,bjxyz->bixyz", M, grad_psi[:, :, d])
-         for d in range(3)]
-    return ops.div_hat(*[ops.rfft(j) / N for j in J], kx, ky, kz)
+    J = [torch.einsum(FLUX_EINSUM[ndim], M, grad_psi[:, :, d])
+         for d in range(ndim)]
+    return ops.div_hat(*[ops.rfft(j) / N for j in J], *ks)
+
+
+def _xyz(ks) -> tuple:
+    """``ops.k_axes``'s wavevectors as ``(kx, ky, kz)``, ``kz`` ``None`` in two dimensions."""
+    return tuple(ks) + (None,) * (3 - len(ks))
 
 
 def _rhs(model: torch.nn.Module, rho_hat: torch.Tensor, boxes: torch.Tensor,
@@ -134,13 +155,13 @@ def _rhs(model: torch.nn.Module, rho_hat: torch.Tensor, boxes: torch.Tensor,
     F_hat = model.forward(rho_hat, boxes, T)
     if not kappa_roll and v_ext is None and T_field is None:
         return F_hat
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    kx, ky, kz = ops.k_axes(boxes)
+    N = math.prod(ops.grid)
+    kx, ky, kz = _xyz(ops.k_axes(boxes))
     rho = ops.irfft(rho_hat * N)
     if kappa_roll:
         F_hat = F_hat + kappa_roll_correction(
             model, rho, rho_hat, T, ops, kx, ky, kz, kappa_roll)
-    psi = _external_potential(model, rho, T, v_ext, T_field)
+    psi = _external_potential(model, rho, T, v_ext, T_field, ops_ndim(ops))
     if psi is not None:
         F_hat = F_hat + _external_flux_hat(model, rho, T, ops, kx, ky, kz,
                                            psi)
@@ -272,7 +293,12 @@ def rollout_deterministic(model: torch.nn.Module, rho_hat0: torch.Tensor,
 # SDE integrator
 # ---------------------------------------------------------------------------
 
-def _cell_volume(boxes: torch.Tensor, grid: Tuple[int, int, int]) -> torch.Tensor:
+def _cell_volume(boxes: torch.Tensor, grid: Tuple[int, int, int],
+                 depth: Optional[float] = None) -> torch.Tensor:
+    """``dV`` per sample; in two dimensions the cell's area times the declared ``depth``."""
+    if len(grid) == 2:
+        Gx, Gy = grid
+        return (boxes[:, 0] / Gx) * (boxes[:, 1] / Gy) * float(depth)
     Gx, Gy, Gz = grid
     return (boxes[:, 0] / Gx) * (boxes[:, 1] / Gy) * (boxes[:, 2] / Gz)
 
@@ -285,16 +311,21 @@ def step_sde_euler_maruyama(model: torch.nn.Module, rho_hat: torch.Tensor,
                             ops: Optional[SpectralOps] = None,
                             kappa_roll: float = 0.0,
                             v_ext=None, T_field=None,
-                            generator: Optional[torch.Generator] = None
+                            generator: Optional[torch.Generator] = None,
+                            depth: Optional[float] = None
                             ) -> torch.Tensor:
     """Euler-Maruyama for FDT-consistent conservative (Model B) noise:
         drho_i = div[M_ij grad(mu_j)] dt + div(zeta_i) dt,
         zeta_i(r) = sqrt(2 kBT_noise / (dV dt)) L_ij(rho(r)) w_j(r),  L L^T = M(rho(r), T),
     with the noise divergence multiplied by the declared filter ``G(k)``; zero at ``k=0``. Ito convention.
     Stationary: ``"none"`` gives ``S(k) = kBT H(k)^-1``, ``"gaussian"`` gives ``S(k) = G(k)^2 kBT H(k)^-1``.
-    ``kBT_noise == 0`` is bit-for-bit :func:`step_euler`; ``None`` is refused."""
+    ``kBT_noise == 0`` is bit-for-bit :func:`step_euler`; ``None`` is refused. A two-dimensional model
+    declares ``depth`` (:func:`check_depth`); a three-dimensional one leaves it unset."""
     n_species = rho_hat.shape[1]
     ops = _ops_for(rho_hat, ops, n_species, model)
+    ndim = ops_ndim(ops)
+    if ndim != 2 and depth is not None:
+        check_depth(depth, ndim, True)
     # Validate the declaration before the deterministic delegation; build the filter after it.
     check_noise_declaration(noise_mode, sigma_noise)
 
@@ -314,47 +345,47 @@ def step_sde_euler_maruyama(model: torch.nn.Module, rho_hat: torch.Tensor,
         return step_euler(model, rho_hat, boxes, T, dt, ops=ops,
                           kappa_roll=kappa_roll, v_ext=v_ext,
                           T_field=T_field)
+    depth = check_depth(depth, ndim, True)
 
     filt = build_noise_filter(ops, boxes, noise_mode, sigma_noise)
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
+    N = math.prod(ops.grid)
     grid = ops.grid
     B, n = rho_hat.shape[0], n_species
+    ones = (1,) * ndim
 
     drift_hat = _rhs(model, rho_hat, boxes, T, ops, kappa_roll, v_ext,
                      T_field)
     rho = ops.irfft(rho_hat * N)
 
-    M = model.mobility(rho, T)                                  # (B,n,n,Gx,Gy,Gz)
-    M_flat = M.permute(0, 3, 4, 5, 1, 2).reshape(-1, n, n)
+    M = model.mobility(rho, T)                                  # (B,n,n,*grid)
+    M_flat = M.permute(*MATRIX_LAST[ndim]).reshape(-1, n, n)
     eye = torch.eye(n, device=rho.device, dtype=M_flat.dtype)
     L_flat = torch.linalg.cholesky(M_flat + 1e-12 * eye)         # (P,n,n)
 
-    w = torch.randn(B, n, 3, *grid, generator=generator,
+    # One draw per species, direction and cell: (B, n, ndim, *grid).
+    w = torch.randn(B, n, ndim, *grid, generator=generator,
                     device=rho.device, dtype=rho.dtype)
     if T_field is not None:
         # Local-equilibrium FDT: amplitude times sqrt(T(r)/T), exactly 1 for a uniform field.
-        Tf = _validated_T_field(T_field, rho)
+        Tf = _validated_T_field(T_field, rho, ndim)
         w = w * torch.sqrt(
-            Tf / T.to(rho.dtype).view(B, 1, 1, 1)).unsqueeze(1).unsqueeze(1)
-    w_flat = w.permute(0, 3, 4, 5, 1, 2).reshape(-1, n, 3)       # (P,n,3)
-    zeta_flat = torch.einsum("pij,pjd->pid", L_flat, w_flat)     # (P,n,3)
+            Tf / T.to(rho.dtype).view(B, *ones)).unsqueeze(1).unsqueeze(1)
+    w_flat = w.permute(*MATRIX_LAST[ndim]).reshape(-1, n, ndim)  # (P,n,ndim)
+    zeta_flat = torch.einsum("pij,pjd->pid", L_flat, w_flat)     # (P,n,ndim)
 
-    dV = _cell_volume(boxes, grid)                               # (B,)
+    dV = _cell_volume(boxes, grid, depth)                        # (B,)
     amp = torch.sqrt(2.0 * kBT / (dV * dt))                      # (B,)
-    Gx, Gy, Gz = grid
-    amp_flat = amp.view(B, 1, 1, 1).expand(B, Gx, Gy, Gz).reshape(-1, 1, 1)
+    amp_flat = amp.view(B, *ones).expand(B, *grid).reshape(-1, 1, 1)
     zeta_flat = zeta_flat * amp_flat
-    zeta = zeta_flat.reshape(B, Gx, Gy, Gz, n, 3).permute(0, 4, 5, 1, 2, 3)
+    zeta = zeta_flat.reshape(B, *grid, n, ndim).permute(*MATRIX_SECOND[ndim])
 
-    kx, ky, kz = ops.k_axes(boxes)
-    zx_hat = ops.rfft(zeta[:, :, 0]) / N
-    zy_hat = ops.rfft(zeta[:, :, 1]) / N
-    zz_hat = ops.rfft(zeta[:, :, 2]) / N
-    noise_div_hat = ops.div_hat(zx_hat, zy_hat, zz_hat, kx, ky, kz)
+    ks = ops.k_axes(boxes)
+    z_hat = [ops.rfft(zeta[:, :, d]) / N for d in range(ndim)]
+    noise_div_hat = ops.div_hat(*z_hat, *ks)
     if filt is not None:
         noise_div_hat = noise_div_hat * filt
     # div_hat is already 0 at k=0; enforced anyway.
-    noise_div_hat[:, :, 0, 0, 0] = 0
+    noise_div_hat[(slice(None), slice(None)) + (0,) * ndim] = 0
 
     return rho_hat + dt * drift_hat + dt * noise_div_hat
 
@@ -370,13 +401,18 @@ def rollout_sde(model: torch.nn.Module, rho_hat0: torch.Tensor,
                 kappa_roll: float = 0.0, v_ext=None, T_field=None,
                 save_every: int = 1,
                 generator: Optional[torch.Generator] = None,
-                check_finite: bool = True) -> torch.Tensor:
+                check_finite: bool = True,
+                depth: Optional[float] = None) -> torch.Tensor:
     """The SDE analogue of :func:`rollout_deterministic`: noise is part of the update, then
-    hermitianise, then project. No ``rho_floor`` fallback."""
+    hermitianise, then project. No ``rho_floor`` fallback. ``depth``: a two-dimensional model's cell
+    extent along the averaged axis, required under noise (:func:`check_depth`); unset in 3D."""
     check_state_projection(state_proj, floor, domain, lo=lo, hi=hi)
     guard_floor = _validated_clamp_rho(clamp_rho)
     n_species = rho_hat0.shape[1]
     ops = _ops_for(rho_hat0, None, n_species, model)
+    if ops_ndim(ops) == 2 or depth is not None:
+        noisy = kBT_noise is not None and float(kBT_noise) != 0.0
+        check_depth(depth, ops_ndim(ops), noisy)
 
     rho_hat = rho_hat0
     traj: List[torch.Tensor] = [rho_hat.clone()]
@@ -386,7 +422,7 @@ def rollout_sde(model: torch.nn.Module, rho_hat0: torch.Tensor,
                 model, rho_hat, boxes, T, dt, kBT_noise,
                 noise_mode=noise_mode, sigma_noise=sigma_noise, ops=ops,
                 kappa_roll=kappa_roll, v_ext=v_ext, T_field=T_field,
-                generator=generator)
+                generator=generator, depth=depth)
             rho_hat = hermitianize(rho_hat, ops)
             rho_hat = project_state(rho_hat, ops, floor,
                                     state_proj=state_proj, domain=domain,

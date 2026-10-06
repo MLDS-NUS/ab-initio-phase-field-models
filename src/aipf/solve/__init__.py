@@ -9,7 +9,7 @@ from .trust_domain import TrustDomain, in_domain, project_trust_domain
 from .projection import (STATE_PROJ_MODES, check_state_projection,
                          hermitianize, project_state)
 from .guards import assert_finite, clamped_inputs
-from .noise import (M_STAB_MODES, NOISE_MODES, build_noise_filter,
+from .noise import (M_STAB_MODES, NOISE_MODES, build_noise_filter, check_depth,
                     check_m_stab, check_noise_declaration, declared_noise)
 from .integrators import (
     step_euler,
@@ -35,6 +35,7 @@ __all__ = [
     "NOISE_MODES",
     "M_STAB_MODES",
     "check_m_stab",
+    "check_depth",
     "declared_noise",
     "build_noise_filter",
     "check_noise_declaration",
