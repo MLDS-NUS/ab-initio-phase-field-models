@@ -36,7 +36,7 @@ from .checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
 from .kernel_hinge import HINGE_TERM, KernelHinge, declared_fields as _hinge_fields
 from .lit_module import LitModule, seeded_rng
 from .penalties import PENALTY_TERMS, penalties_from_system
-from .projection import PROJECTIONS, check_projection
+from .projection import PROJECTIONS, archive_cells, check_projection, common_lz
 
 __all__ = ["DEVICES", "DeviceUnavailable", "DimensionMismatch", "OptimizerLayoutMismatch",
            "ReservedRunName", "check_dimensions", "check_optimizer_resumable", "fit",
@@ -405,12 +405,45 @@ def check_dimensions(system: System, sources: Sequence[SourceSpec], *,
     _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
 
 
+def _archive_refusals(system: System, sources: Sequence[SourceSpec]) -> Tuple[list, Optional[float]]:
+    """``(refusals, Lz_ref)`` of the archives a projection would read: every run must record its
+    reference cell, and every cell one ``Lz`` (:func:`aipf.train.projection.common_lz`). Reads each
+    archive's index and its reference cell only."""
+    keys = _archive_keys(system)
+    cells, missing = [], []
+    for spec in sources:
+        for path, cell in archive_cells(spec.root, spec.pattern, file_name=keys.file_name,
+                                        key=keys.reference_box, exclude_tags=spec.exclude_tags):
+            (missing.append(f"{spec.name}: {path}") if cell is None
+             else cells.append((f"{spec.name}: {path.parent.name}", cell)))
+    lines = []
+    if missing:
+        shown = ", ".join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3 else "")
+        lines.append(
+            f"{len(missing)} archive(s) record no reference cell ({shown}), so they have no single "
+            f"Lz to project along: write them with modes_from_dump(reference_box=...), a stated cell "
+            f"(Lx, Ly, Lz) or 'first_frame'")
+    try:
+        lz = common_lz(cells)
+    except ValueError as refused:
+        lines.append(str(refused))
+        lz = None
+    return lines, lz
+
+
 def _refuse_dimensions(system: System, ndim: int, cfg: TrainConfig,
                        sources: Sequence[SourceSpec], projection: Optional[str],
-                       anchors) -> None:
+                       anchors) -> Optional[float]:
+    """Raise :class:`DimensionMismatch` with every reason at once; returns the projected archives'
+    ``Lz_ref`` (``None`` without a projection, or with no archive found)."""
     lines = _dimension_refusals(system, ndim, cfg, sources, projection, anchors)
+    lz = None
+    if projection is not None:
+        more, lz = _archive_refusals(system, sources)
+        lines += more
     if lines:
         raise DimensionMismatch("; ".join(lines))
+    return lz
 
 
 class OptimizerLayoutMismatch(ValueError):
@@ -792,9 +825,12 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     with seeded_rng(cfg.seed_for("model")):
         model = build_functional(system)
     # the number of axes is the model's declared one; refused here, before anything is loaded or written.
-    # A three-dimensional model without a projection is the run it always was, and is not checked here
-    if projection is not None or model_ndim(model) != 3:
-        _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
+    # A three-dimensional model without a projection on three-axis grids is the run it always was, and
+    # is not checked here (a source with another grid would fail when it is read, after the run directory)
+    lz_ref = None
+    if projection is not None or model_ndim(model) != 3 or any(
+            len(getattr(s, "grid", (0, 0, 0))) != 3 for s in sources):
+        lz_ref = _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
     saved = (None if init_from is None
              else _load_weights_into(model, init_from,
                                      system.paths.raw, system, path=init_path))
@@ -910,9 +946,17 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
         "written_at": datetime.now(timezone.utc).isoformat(),
         **_factory_record(system),
         # only when set: a three-dimensional run's manifest is as it always was
-        **({} if projection is None else {"projection": projection}),
+        **({} if projection is None else _projection_record(projection, lz_ref)),
     }, indent=1, sort_keys=True))
     return run_dir
+
+
+def _projection_record(projection: str, lz_ref: Optional[float]) -> Dict[str, Any]:
+    """A two-dimensional run's manifest entries: the projection, the reference cell's ``Lz`` and the
+    ``depth`` a noisy rollout of the model declares (``1.0`` areal, ``Lz_ref`` volumetric), so the
+    rollout need not read the archive."""
+    return {"projection": projection, "projection_Lz_ref": lz_ref,
+            "projection_depth": (1.0 if projection == "kz0-areal" else lz_ref)}
 
 
 def _factory_record(system: System) -> Dict[str, str]:

@@ -153,7 +153,7 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 | `--log-every-step` | also write `steps.json`, the loss per step |
 | `--device` | `auto` (cuda when torch sees a GPU), `cpu` or `cuda`; `cuda` without a GPU is refused before the run directory exists |
 | `--deterministic` | ask torch for deterministic kernels for this run |
-| `--projection` | train a two-dimensional model (a factory model on a two-axis grid) on the `k_z = 0` plane of the archives: `kz0-volumetric` divides by `V_ref`, `kz0-areal` by `Lx_ref Ly_ref` ([training.md](training.md#two-dimensions)). Every `--source` grid is then `GX,GY`, `--anchors none` is required, and the archives must record their reference cell. Off by default |
+| `--projection` | train a two-dimensional model (a factory model on a two-axis grid) on the `k_z = 0` plane of the archives: `kz0-volumetric` divides by `V_ref`, `kz0-areal` by `Lx_ref Ly_ref` ([training.md](training.md#two-dimensions)). Every `--source` grid is then `GX,GY` (accepted only with `--projection`; without it a two-length grid is the parse error it always was), `--anchors none` is required, and the archives must record one reference cell. Off by default |
 | `--pbs`, `--walltime-h`, `--dry-run` | as `aipf md run`; the job file is `job.pbs` in the run directory, and `--dry-run` needs `--pbs` |
 
 Before anything is written the command refuses a source whose glob selects no run directory (after

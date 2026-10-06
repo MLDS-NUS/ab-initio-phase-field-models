@@ -9,9 +9,10 @@ the z mean of the 3D field, a 2D factory model trained through it recovers the p
 its data, and every inconsistent combination is refused before a run directory exists. The 3D path
 is pinned bit for bit by ``tests/golden``; nothing here changes it.
 
-The toy is ``tests/toy_ndim_model.py`` with a linear local part, ``f = a rho^2 / 2``, the pair kernel
-``kappa k^2`` and a constant full mobility, so its drift is ``-k^2 M (a + kappa k^2) rho_hat`` and ``M``
-and ``kappa`` are identified by the drift alone. The 2D model is an effective model: a real 3D
+The toy is ``tests/toy_ndim_model.py`` with a fixed quartic local part, ``f = a rho^2 / 2 + c rho^4 / 4``,
+the pair kernel ``kappa k^2`` and a constant full mobility. ``M`` and ``kappa`` are identified by the drift
+alone, and the quartic term makes the drift depend on the density's scale, so a window divided by the
+wrong measure (areal against volumetric) is detected. The 2D model is an effective model: a real 3D
 trajectory's ``k_z != 0`` modes couple into ``k_z = 0`` (docs/reference/functional.md, "Two
 dimensions"); the data here are z-invariant, so that coupling is absent by construction."""
 from __future__ import annotations
@@ -93,7 +94,8 @@ def _write_dump(path, *, n_frames=8, n_atoms=24, seed=0):
 
 
 def _archive(tmp_path, *, reference_box=CELL, tag="run_a", seed=0):
-    """``<tree>/<tag>/modes.npz`` through the writer a real archive goes through; returns the tree."""
+    """``<root>/<tag>/modes.npz`` through the writer a real archive goes through; returns the archive
+    root."""
     tree = tmp_path / "fields" / "modes_demo"
     dump = _write_dump(tmp_path / f"{tag}.dump", seed=seed)
     modes_from_dump(dump, **PARAMS, entry_dir=tree / tag, reference_box=reference_box)
@@ -276,8 +278,8 @@ def test_the_datamodule_refuses_a_projection_with_no_reference_cell_key(tmp_path
 # training a 2D factory model
 # ---------------------------------------------------------------------------
 
-#: The toy's fixed local curvature ``a`` (``f = a rho^2 / 2``), and the parameters that make its data.
-CURVATURE = 1.0
+#: The toy's fixed local part ``f = a rho^2 / 2 + c rho^4 / 4``, and the parameters that make its data.
+CURVATURE, QUARTIC = 1.0, 2.0
 TRUE_KAPPA = (0.3, 0.6)
 TRUE_MOBILITY_RAW = (0.4, 0.3, -0.2)
 #: The training cell: the 2D toy's grid, and the slab its z-invariant 3D twin is written in.
@@ -289,13 +291,34 @@ TRAIN_LABELS = np.array([(nx, ny, nz) for nx in range(-3, 4) for ny in range(-2,
 FRAME_DT, SUBSTEPS, N_FRAMES = 0.005, 5, 60
 
 
+class QuarticLocal(torch.nn.Module):
+    """``f = sum_i a rho_i^2 / 2 + c rho_i^4 / 4``, fixed (not trained); ``rho`` ``(P, n)``."""
+
+    def __init__(self, a: float, c: float):
+        super().__init__()
+        self.register_buffer("a", torch.tensor(float(a)))
+        self.register_buffer("c", torch.tensor(float(c)))
+
+    def f_pointwise(self, rho, kBT):
+        return (0.5 * self.a * rho ** 2 + 0.25 * self.c * rho ** 4).sum(-1)
+
+    def mu_pointwise(self, rho, kBT):
+        return self.a * rho + self.c * rho ** 3
+
+
+def build_quartic_toy(system, **overrides):
+    """The factory: the 2D toy of ``tests/toy_ndim_model.py`` with :class:`QuarticLocal`."""
+    model = build_ndim_toy(system, linear_a=CURVATURE, **overrides)
+    model.f_local = QuarticLocal(CURVATURE, QUARTIC)
+    return model
+
+
 def _linear_system(raw_root, grid=TRAIN_GRID, **training):
-    """The demo system with the linear 2D toy on ``grid``, trained on the drift term alone."""
+    """The demo system with the quartic 2D toy on ``grid``, trained on the drift term alone."""
     base = toy.demo_system(str(raw_root))
-    defaults = {**base.defaults, "estimator": "weak_mid", "k_max": 2.0, "sigma": 0.5,
+    defaults = {**base.defaults, "estimator": "weak_mid", "k_max": 2.0, "sigma": 0.1,
                 "training": {**base.defaults["training"], "batch_size": 16, **training}}
-    functional = toy.toy_functional(functools.partial(build_ndim_toy, linear_a=CURVATURE),
-                                    grid=grid, kappa=0.5)
+    functional = toy.toy_functional(build_quartic_toy, grid=grid, kappa=0.5)
     return dataclasses.replace(base, functional=functional, variants={}, defaults=defaults)
 
 
@@ -308,11 +331,11 @@ def _truth(system):
     return model
 
 
-def _write_z_invariant_archive(tree, model, *, n_runs=4):
+def _write_z_invariant_archive(tree, model, *, n_runs=4, areal=False, cell=TRAIN_CELL):
     """2D trajectories of ``model`` (the explicit Heun integrator), written as the atom sums of the 3D
-    field that is the same at every z, in :data:`TRAIN_CELL`: ``rho_k = V_ref c(n_x, n_y)`` on the
-    ``n_z = 0`` plane, ``c`` the 2D field's Fourier coefficient, and noise on ``n_z = +-1`` that the
-    projection must drop."""
+    field that is the same at every z, in ``cell``: ``rho_k = V_ref c(n_x, n_y)`` on the ``n_z = 0``
+    plane (``A_ref c`` when the model's density is ``areal``), ``c`` the 2D field's Fourier
+    coefficient, and noise on ``n_z = +-1`` that the projection must drop."""
     rng = np.random.default_rng(7)
     g = torch.Generator().manual_seed(11)
     B, (Gx, Gy) = n_runs, TRAIN_GRID
@@ -327,7 +350,7 @@ def _write_z_invariant_archive(tree, model, *, n_runs=4):
     assert traj.shape[0] == N_FRAMES
     field = model.ops.irfft(traj * (Gx * Gy)).double()               # (frames, B, n, Gx, Gy)
     coeff = (torch.fft.fftn(field, dim=(-2, -1)) / (Gx * Gy)).numpy()
-    V = math.prod(TRAIN_CELL)
+    V = cell[0] * cell[1] * (1.0 if areal else cell[2])
     nx, ny, nz = TRAIN_LABELS.T
     plane = nz == 0
     for b in range(B):
@@ -335,11 +358,11 @@ def _write_z_invariant_archive(tree, model, *, n_runs=4):
         amps[:, plane] = np.moveaxis(V * coeff[:, b][..., nx[plane] % Gx, ny[plane] % Gy], 1, 2)
         amps[:, ~plane] = 5.0 * (rng.standard_normal((N_FRAMES, (~plane).sum(), 2))
                                  + 1j * rng.standard_normal((N_FRAMES, (~plane).sum(), 2)))
-        boxes3 = np.asarray(TRAIN_CELL) * (1.0 + 0.002 * rng.standard_normal((N_FRAMES, 3)))
+        boxes3 = np.asarray(cell) * (1.0 + 0.002 * rng.standard_normal((N_FRAMES, 3)))
         ModesRecord(amplitudes=amps.astype(np.complex64), labels=TRAIN_LABELS, boxes=boxes3,
                     T=1.0, dt_frame=FRAME_DT,
                     provenance={"composition": {"x_B": 0.5}, "cache_dir": str(tree)},
-                    reference_box=np.asarray(TRAIN_CELL)).save(tree / f"run_{b}")
+                    reference_box=np.asarray(cell)).save(tree / f"run_{b}")
 
 
 @pytest.fixture(scope="module")
@@ -349,8 +372,15 @@ def linear_data(tmp_path_factory):
     tree = tmp / "fields" / "modes_demo"
     with _single_thread():          # set up before the function-scoped fixture that does this
         _write_z_invariant_archive(tree, _truth(system))
+        _write_z_invariant_archive(tmp / "fields" / "modes_areal", _truth(system), areal=True)
     sources = (SourceSpec("demo_src", str(tree), "run_*", TRAIN_GRID, 1.0, ()),)
     return tmp, system, sources
+
+
+def _sources_of(tmp, projection):
+    """The archive whose densities are in ``projection``'s measure (``modes_demo`` volumetric)."""
+    tree = tmp / "fields" / ("modes_areal" if projection == "kz0-areal" else "modes_demo")
+    return (SourceSpec("demo_src", str(tree), "run_*", TRAIN_GRID, 1.0, ()),)
 
 
 def _trained(run_dir, system):
@@ -367,28 +397,35 @@ def _fit(tmp, system, sources, projection, run_name, steps, **kw):
                config_overrides={"lr": 0.05, "warmup_epochs": 0, "anneal_epochs": 1}, **kw)
 
 
-def test_the_true_model_leaves_no_drift_residual_on_its_own_projected_windows(linear_data):
-    """The LitModule on a two-dimensional operator set: the model that made the data fits its
-    windows to the estimator's error, a model with other parameters does not."""
+def _drift_loss(model, sources, projection):
     from aipf.train.config import TrainConfig
     from aipf.train.lit_module import LitModule
 
-    _, system, sources = linear_data
     dm = ModeDataModule(
         sources=sources, keys=KEYS, window=_window(TRAIN_GRID, "weak_mid"),
         split=SplitSettings("none", (), 0.0, 0),
         weighting=RunWeighting("uniform", None, None, None, None),
-        loader=LoaderSettings(32, 0, False, False, "shuffled"), projection="kz0-volumetric")
+        loader=LoaderSettings(32, 0, False, False, "shuffled"), projection=projection)
     dm.setup()
     dataset = dm.sources[0].train_dataset
     batch = torch.utils.data.default_collate([dataset[i] for i in range(0, len(dataset), 7)])
-    cfg = TrainConfig(sigma=0.5, k_max=2.0, alpha_loss=0.0, h_inv_eps=1e-6)
-    losses = []
-    for model in (_truth(system), build(system)):
-        lit = LitModule(model, model.ops, cfg)
-        with torch.no_grad():
-            losses.append(float(lit.compute_losses({"drift": batch})[0]))
-    assert losses[0] < 1e-4 * losses[1], losses
+    lit = LitModule(model, model.ops, TrainConfig(sigma=0.1, k_max=2.0, alpha_loss=0.0,
+                                                  h_inv_eps=1e-6))
+    with torch.no_grad():
+        return float(lit.compute_losses({"drift": batch})[0])
+
+
+def test_the_true_model_leaves_no_drift_residual_on_its_own_projected_windows(linear_data):
+    """The LitModule on a two-dimensional operator set: the model that made the data fits its
+    windows to the estimator's error; a model with other parameters does not, and neither does the
+    true one on windows divided by the other measure (the quartic term reads the density's scale)."""
+    tmp, system, sources = linear_data
+    truth = _truth(system)
+    fits = _drift_loss(truth, sources, "kz0-volumetric")
+    assert fits < 1e-2 * _drift_loss(build(system), sources, "kz0-volumetric")
+    assert fits < 1e-4 * _drift_loss(truth, sources, "kz0-areal")
+    assert _drift_loss(truth, _sources_of(tmp, "kz0-areal"), "kz0-areal") < 5e-2 * _drift_loss(
+        truth, _sources_of(tmp, "kz0-areal"), "kz0-volumetric")
 
 
 @pytest.mark.parametrize("projection", PROJECTIONS)
@@ -397,21 +434,29 @@ def test_a_2d_factory_model_trains_through_the_projection_and_records_it(linear_
     run = _fit(tmp, system, sources, projection, f"smoke_{projection}", 3)
     manifest = json.loads((run / "MANIFEST.json").read_text())
     assert manifest["projection"] == projection and manifest["global_step"] == 3
+    assert manifest["projection_Lz_ref"] == TRAIN_CELL[2]
+    assert manifest["projection_depth"] == projection_depth(Path(sources[0].root) / "run_0",
+                                                            areal=projection == "kz0-areal")
     assert manifest["terms_trained"] == ["L_dyn"]
     model = _trained(run, system)
     assert model.ops.ndim == 2 and model.ops.grid == TRAIN_GRID
 
 
-def test_a_2d_factory_model_recovers_the_mobility_and_kappa_that_made_its_data(linear_data):
-    """Areal densities, as a slab of a bulk run is trained; the drift of a linear model is the same in
-    either measure, so the parameters are the ones that made the data."""
-    tmp, system, sources = linear_data
+@pytest.mark.parametrize("projection", PROJECTIONS)
+def test_a_2d_factory_model_recovers_the_mobility_and_kappa_that_made_its_data(linear_data,
+                                                                               projection):
+    """Each measure on an archive whose densities are in it: areal as a slab of a bulk run is
+    trained, volumetric as its z mean. The quartic local part reads the density's scale, so a window
+    divided by the wrong measure would recover other parameters."""
+    tmp, system, _ = linear_data
     truth = _truth(system)
-    model = _trained(_fit(tmp, system, sources, "kz0-areal", "recover", 400), system)
+    model = _trained(_fit(tmp, system, _sources_of(tmp, projection), projection,
+                          f"recover_{projection}", 400), system)
     with torch.no_grad():
         kappa = torch.nn.functional.softplus(model.kernel.kappa_raw)
         M, M_true = model.mobility_matrix(), truth.mobility_matrix()
-    assert torch.allclose(kappa, torch.tensor(TRUE_KAPPA), rtol=0.02), kappa
+    # kappa, the k^4 coefficient, is the weaker-determined one in the band; M is held to 1 per cent
+    assert torch.allclose(kappa, torch.tensor(TRUE_KAPPA), rtol=0.05), kappa
     assert torch.allclose(M, M_true, atol=0.01 * float(M_true.abs().max())), (M, M_true)
     start = build(system)
     assert not torch.allclose(start.mobility_matrix(), M_true, atol=0.1), "it started elsewhere"
@@ -430,6 +475,47 @@ def test_fit_refuses_a_2d_model_on_an_inconsistent_run_before_writing(tmp_path, 
     with pytest.raises(DimensionMismatch, match=match):
         fit(system, run_name="r", sources=sources, steps=1, seed=0, resume_optimizer=False,
             root=tmp_path / "data", device="cpu", anchors=anchors, projection=projection)
+    assert not (tmp_path / "data").exists()
+
+
+def test_fit_refuses_an_archive_without_a_reference_cell_before_writing(tmp_path):
+    system = _linear_system(tmp_path)
+    tree = _archive(tmp_path, reference_box="time_mean")
+    sources = (SourceSpec("demo_src", str(tree), "run_*", TRAIN_GRID, 1.0, ()),)
+    for call in (lambda: check_dimensions(system, sources, projection="kz0-areal",
+                                          anchors=NO_ANCHORS),
+                 lambda: _fit(tmp_path, system, sources, "kz0-areal", "r", 1)):
+        with pytest.raises(DimensionMismatch, match="record no reference cell"):
+            call()
+    assert not (tmp_path / "data").exists()
+
+
+def test_archives_of_two_lz_ref_are_refused_under_a_projection(tmp_path):
+    """One trained 2D model has one depth: every projected run is read in one Lz_ref."""
+    system = _linear_system(tmp_path)
+    tree = tmp_path / "fields" / "modes_demo"
+    model = _truth(system)
+    _write_z_invariant_archive(tree / "a", model, n_runs=1)
+    _write_z_invariant_archive(tree / "b", model, n_runs=1, cell=(*TRAIN_CELL[:2], 3.1))
+    sources = (SourceSpec("demo_src", str(tree), "*/run_*", TRAIN_GRID, 1.0, ()),)
+    with pytest.raises(DimensionMismatch, match="2 different Lz"):
+        _fit(tmp_path, system, sources, "kz0-volumetric", "r", 1)
+    assert not (tmp_path / "data").exists()
+    dm = ModeDataModule(sources=sources, keys=KEYS, window=_window(TRAIN_GRID),
+                        split=SplitSettings("none", (), 0.0, 0),
+                        weighting=RunWeighting("uniform", None, None, None, None),
+                        loader=LoaderSettings(2, 0, False, False, "shuffled"),
+                        projection="kz0-areal")
+    with pytest.raises(ValueError, match="2 different Lz"):
+        dm.setup()
+
+
+def test_fit_refuses_a_3d_model_on_a_two_axis_grid_before_writing(tmp_path):
+    system = dataclasses.replace(toy.demo_system(str(tmp_path)), variants={})
+    sources = (SourceSpec("demo_src", str(tmp_path), "run_*", GRID2, 1.0, ()),)
+    with pytest.raises(DimensionMismatch, match="another number of axes"):
+        fit(system, run_name="r", sources=sources, steps=1, seed=0, resume_optimizer=False,
+            root=tmp_path / "data", device="cpu", anchors=NO_ANCHORS)
     assert not (tmp_path / "data").exists()
 
 
@@ -486,7 +572,6 @@ def test_aipf_train_projection_trains_a_2d_model_and_spells_its_grid_gx_gy(tmp_p
 
 
 @pytest.mark.parametrize("extra, match", [
-    (("--source", "s=modes_demo:run_*:8,6", "--anchors", "none"), "pass --projection"),
     (("--source", "s=modes_demo:run_*:8,6,4", "--anchors", "none", "--projection", "kz0-areal"),
      "spells 3 grid lengths"),
     (("--source", "s=modes_demo:run_*:8,6", "--anchors", "declared", "--projection",
@@ -501,6 +586,60 @@ def test_aipf_train_refuses_a_projection_its_flags_contradict(tmp_path, monkeypa
     assert _cli(monkeypatch, _linear_system(tmp_path), *extra) == 2
     assert match in capsys.readouterr().err
     assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("text", ["s=modes_demo:run_*:8,6", "s=modes_demo:run_*:8,6,4,2",
+                                  "s=modes_demo:run_*:8"])
+def test_without_a_projection_a_grid_of_other_than_three_lengths_is_the_parse_error_it_was(
+        tmp_path, monkeypatch, capsys, text):
+    """The same argparse error, word for word, before the system is loaded: a two-length grid is
+    admitted only when the command line names --projection."""
+    import aipf.system as system_mod
+    from aipf.cli.main import main
+
+    monkeypatch.setattr(system_mod, "load", lambda name: pytest.fail("parsed past --source"))
+    with pytest.raises(SystemExit) as exited:
+        main(["train", "--system", "demo", "--run", "r", "--seed", "0", "--steps", "1",
+              "--source", text, "--resume-optimizer", "no", "--anchors", "none"])
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        f"aipf train: error: argument --source: {text!r} is not a source. Spell it "
+        f"NAME=SUBDIR:PATTERN:GX,GY,GZ: the subdirectory, the glob and 3 grid lengths are all "
+        f"required")
+
+
+def test_a_two_length_grid_parses_with_projection_wherever_it_is_on_the_line():
+    from aipf.cli.main import build_parser
+
+    for order in (["--projection", "kz0-areal", "--source", "s=m:r*:8,6"],
+                  ["--source", "s=m:r*:8,6", "--projection=kz0-areal"]):
+        args = build_parser().parse_args(
+            ["train", "--system", "demo", "--run", "r", "--seed", "0", "--steps", "1",
+             "--resume-optimizer", "no", "--anchors", "none", *order])
+        assert args.source == [("s", "m", "r*", (8, 6))] and args.projection == "kz0-areal"
+
+
+def test_aipf_train_pbs_refuses_a_two_axis_system_without_a_projection_before_submitting(
+        tmp_path, monkeypatch, capsys):
+    from aipf.cli import train_cmd
+
+    (tmp_path / "fields" / "modes_demo" / "run_a").mkdir(parents=True)
+    monkeypatch.setattr(train_cmd, "_submit", lambda *a: pytest.fail("submitted"))
+    assert _cli(monkeypatch, _linear_system(tmp_path), "--source", "s=modes_demo:run_*:8,6,4",
+                "--anchors", "none", "--pbs", "--dry-run") == 2
+    assert "trains on its k_z = 0 plane" in capsys.readouterr().err
+
+
+def test_aipf_train_pbs_builds_no_model_for_a_three_dimensional_system(tmp_path, monkeypatch):
+    import aipf.train.fit as fit_mod
+    from aipf.cli import train_cmd
+
+    (tmp_path / "fields" / "modes_demo" / "run_a").mkdir(parents=True)
+    monkeypatch.setattr(fit_mod, "check_dimensions", lambda *a, **k: pytest.fail("checked"))
+    monkeypatch.setattr(train_cmd, "_submit", lambda *a: 0)
+    system = dataclasses.replace(toy.demo_system(str(tmp_path)), variants={})
+    assert _cli(monkeypatch, system, "--source", "s=modes_demo:run_*:4,4,4", "--anchors", "none",
+                "--pbs", "--dry-run") == 0
 
 
 def test_aipf_train_without_a_projection_is_the_command_it_was(monkeypatch):

@@ -18,7 +18,8 @@ from torch.utils.data import DataLoader, Sampler
 from aipf.train.dataset import (ArchiveKeys, ModeRun, ModeWindowDataset, band_keep,
                                 WindowSettings, read_mode_runs, scatter_modes,
                                 weak_target)
-from aipf.train.projection import PROJECTIONS, check_projection, is_areal, project_kz0
+from aipf.train.projection import (PROJECTIONS, check_projection, common_lz, is_areal,
+                                   project_kz0)
 
 TWO_PI = 2.0 * np.pi
 
@@ -352,16 +353,20 @@ class ModeDataModule:
     def setup(self) -> None:
         """Read every source, split it, weight it and build its datasets."""
         built = []
+        cells = []
         for spec in self.specs:
             runs = read_mode_runs(spec.root, spec.pattern, keys=self.keys,
                                   exclude_tags=spec.exclude_tags)
             if self.projection is not None:
                 areal = is_areal(self.projection)
                 try:
-                    runs = [project_kz0(run, areal=areal) for run in runs]
+                    projected = [project_kz0(run, areal=areal) for run in runs]
                 except ValueError as refused:
                     raise ValueError(f"source {spec.name!r} under {spec.root}: "
                                      f"{refused}") from refused
+                cells += [(f"{spec.name}/{run.tag}", run.reference_box) for run in runs]
+                common_lz(cells)
+                runs = projected
             if spec.exclude_tags:
                 logging.info("source %s: %d run(s) named for exclusion, "
                              "%d read", spec.name, len(spec.exclude_tags),

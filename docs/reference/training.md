@@ -26,7 +26,7 @@ three-dimensional run it always was.
 |---|---|
 | `final.ckpt` | the Lightning checkpoint after the last step |
 | `hparams.yaml` | every `TrainConfig` field of the run; a `warnings` entry lists declared weights that had no data |
-| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape; `model_factory` for a functional built by a factory; `projection` for a two-dimensional run |
+| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape; `model_factory` for a functional built by a factory; `projection`, `projection_Lz_ref` and `projection_depth` for a two-dimensional run |
 | `steps.json` | with `--log-every-step`: `{"loss": [...], "terms": [...]}` per step, written after the first step, every 50 steps, at the end and on failure |
 | `UNTRAINED_TERMS.txt` | only when a term carries a non-zero weight and no data fed it |
 | `job.pbs`, `job.log` | with `--pbs` |
@@ -215,17 +215,24 @@ A two-dimensional model trains the drift term alone. Refused before the run dire
   `anchors=NO_ANCHORS`, `--anchors none`;
 - `L_conv` or `L_Gamma` that the declaration would train, and a non-zero `lambda_W`.
 
-An archive without a reference cell is refused when it is read, naming the source: the projection
-needs one `Lz` for every frame, which the frames of an NPT run, each in its own box, do not share. Write the archive
-with `modes_from_dump(reference_box=...)` (a stated cell or `"first_frame"`).
+- an archive the projection would read that records no reference cell: the projection needs one
+  `Lz` for every frame, which the frames of an NPT run, each in its own box, do not share. Write the
+  archive with `modes_from_dump(reference_box=...)` (a stated cell or `"first_frame"`);
+- archives whose reference cells differ in `Lz`: a trained 2D model has one `depth`, and its areal
+  densities are per unit area of one slab thickness. State one cell for every run of every source.
+
+These are read off each archive's index and its `reference_box` alone.
 `aipf.train.fit.check_dimensions(system, sources, projection=..., anchors=...)` makes the same
-refusals without training (it builds the model); `aipf train --pbs --projection` makes them before
-it submits.
+refusals without training (it builds the model); `aipf train --pbs` makes them before it submits,
+with `--projection` or for a system whose functional declares a two-axis grid. A three-dimensional
+`fit` whose source grids are not all three-axis is refused the same way (it would fail when its
+sources are read).
 
 A noisy rollout of the trained model declares `depth` ([functional.md](functional.md#two-dimensions)),
-the same number the window was divided by: `aipf.train.projection_depth(run_dir, areal=...)` reads it
-off an archive (`1.0` areal, `Lz_ref` volumetric). With another `depth` the noise is off by that ratio
-in variance.
+the same number the window was divided by. The run's `MANIFEST.json` records it beside the projection
+(`projection`, `projection_Lz_ref`, `projection_depth`: `1.0` areal, `Lz_ref` volumetric), and
+`aipf.train.projection_depth(archive_run_dir, areal=...)` reads it off an archive's run directory.
+With another `depth` the noise is off by that ratio in variance.
 
 The trained model is an effective one. The `k_z = 0` plane of a 3D trajectory is not a closed
 dynamics: the nonlinear terms of the 3D dynamics couple the `k_z != 0` modes into it, so the drift the

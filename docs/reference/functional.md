@@ -234,7 +234,8 @@ grid of `(Lx, Ly)` cells fixes only the area `dA` of a cell; `dV = dA * depth`, 
 on every noisy solver call (`rollout_sde`, `step_sde_euler_maruyama`, `rollout_imex` with `noise`). It
 says what the densities are: `depth = 1.0` for areal densities (per unit area), the reference cell's
 `Lz` for volumetric densities averaged along z. A model trained through a projection takes the one its
-windows were divided by, `aipf.train.projection_depth(run_dir, areal=...)`
+windows were divided by: `projection_depth` in the training run's `MANIFEST.json`, or
+`aipf.train.projection_depth(archive_run_dir, areal=...)` on an archive's run directory
 ([data.md](data.md#the-k_z--0-projection)). There is no default; a noisy 2D call without `depth` is
 refused, and a 3D call with one is refused too (its `dV` comes from its box). Deterministic 2D rollouts
 read no `depth`. The stationary spectrum is then `S(k) = V <|rho_hat_k|^2> = kBT H(k)^-1` with

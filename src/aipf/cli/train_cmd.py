@@ -36,9 +36,13 @@ _PROJECTED_GRID_RANK = 2
 PROJECTIONS = ("kz0-volumetric", "kz0-areal")
 
 
-def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
+def source_row(text: str, *, projected: bool = False
+               ) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
     """One ``--source`` argument as the ``(name, subdir, pattern, grid)`` row
-    ``aipf.train.fit._specs_from`` takes, or :data:`DECLARED` or :data:`SAMPLE`."""
+    ``aipf.train.fit._specs_from`` takes, or :data:`DECLARED` or :data:`SAMPLE`.
+
+    ``projected`` (the command line names ``--projection``) also admits a two-length grid ``GX,GY``;
+    without it a source is read, and refused, exactly as before the option existed."""
     if text in _KEYWORDS:
         return text
     name, sep, rest = text.partition("=")
@@ -60,13 +64,47 @@ def source_row(text: str) -> Union[str, Tuple[str, str, str, Tuple[int, ...]]]:
             f"{text!r} names an absolute tree {subdir!r}; SUBDIR is relative "
             f"to the system's declared source root "
             f"(defaults['training']['source_root'])")
-    if len(grid) not in (_GRID_RANK, _PROJECTED_GRID_RANK) or not subdir or not pattern:
+    ranks = (_GRID_RANK, _PROJECTED_GRID_RANK) if projected else (_GRID_RANK,)
+    if len(grid) not in ranks or not subdir or not pattern:
+        also = (f" ({_PROJECTED_GRID_RANK}, GX,GY, for the two-dimensional "
+                f"model --projection trains)" if projected else "")
         raise argparse.ArgumentTypeError(
             f"{text!r} is not a source. Spell it {SOURCE_SPELLING}: the "
             f"subdirectory, the glob and {_GRID_RANK} grid lengths are all "
-            f"required ({_PROJECTED_GRID_RANK}, GX,GY, for a two-dimensional "
-            f"model trained through --projection)")
+            f"required{also}")
     return (name, subdir, pattern, grid)
+
+
+class _ScanError(Exception):
+    """A scan of the arguments that could not be read; the real parse reports it."""
+
+
+class _Scan(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ScanError(message)
+
+
+def _names_a_projection(tokens) -> bool:
+    """Whether ``tokens`` (the ``train`` arguments) pass ``--projection``, read the way the parser reads
+    them; anything unreadable is left to the parser."""
+    scan = _Scan(add_help=False)
+    scan.add_argument("--projection")
+    try:
+        found, _ = scan.parse_known_args(list(tokens))
+    except _ScanError:
+        return False
+    return found.projection is not None
+
+
+class _TrainParser(argparse.ArgumentParser):
+    """The ``train`` parser: knows, before it reads ``--source``, whether ``--projection`` was passed, so
+    a two-length grid is admitted only then and every other invocation parses as it always did."""
+
+    projected = False
+
+    def parse_known_args(self, args=None, namespace=None):
+        self.projected = _names_a_projection(sys.argv[1:] if args is None else args)
+        return super().parse_known_args(args, namespace)
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -76,6 +114,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                     "signed run directory. Nothing below has a default: a "
                     "run that did not state one of these is not a run "
                     "anyone can reproduce.")
+    p.__class__ = _TrainParser
     p.add_argument("--system", required=True,
                    help="the system to train, by name or by folder")
     variant.add_argument(p)
@@ -93,7 +132,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
                         help="how long to train, in epochs "
                              "(exactly one of --steps and --epochs)")
     p.add_argument("--source", required=True, action="append",
-                   type=source_row, metavar=SOURCE_SPELLING,
+                   type=lambda text: source_row(text, projected=p.projected),
+                   metavar=SOURCE_SPELLING,
                    help="a training source, repeatable and needed at least "
                         "once; SUBDIR is relative to the system's declared "
                         "source root. Its loss weight is the system's declared one. "
@@ -159,6 +199,14 @@ def _anchors_of(args: argparse.Namespace):
     ``"none"`` -> ``NO_ANCHORS`` (drift-only)."""
     from aipf.train.anchors import NO_ANCHORS
     return None if args.anchors == "declared" else NO_ANCHORS
+
+
+def _declares_two_axes(system) -> bool:
+    """Whether ``system``'s functional declares a two-axis grid; read off the declaration, so a
+    three-dimensional system's model is not built for it."""
+    functional = getattr(system, "functional", None)
+    kwargs = getattr(functional, "kwargs", None) or {}
+    return len(kwargs.get("grid", ())) == 2
 
 
 def _projection_refusal(args: argparse.Namespace, table) -> Optional[str]:
@@ -354,13 +402,13 @@ def run(args: argparse.Namespace) -> int:
 
     if args.pbs:
         # a batch job would only fail on it later: refused here, by name, before a job exists
-        if args.projection is not None:
+        if args.projection is not None or _declares_two_axes(system):
             from aipf.train.fit import DimensionMismatch, _specs_from, check_dimensions
             try:
                 check_dimensions(system, _specs_from(system, table, [row[0] for row in table]),
                                  projection=args.projection, anchors=_anchors_of(args))
             except DimensionMismatch as refused:
-                print(f"aipf train: --projection {args.projection}: {refused}", file=sys.stderr)
+                print(f"aipf train: {refused}", file=sys.stderr)
                 return 2
         if resume_optimizer:
             from aipf.train.fit import OptimizerLayoutMismatch, check_optimizer_resumable

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -114,3 +114,39 @@ def projection_depth(run_or_dir: Union[ModeRun, str, Path], *, areal: bool) -> f
             f"{path}: {REFERENCE_BOX_KEY} has shape {tuple(cell.shape)}, which is not one cell of "
             f"three edge lengths")
     return _depth_of(cell, areal)
+
+
+def common_lz(cells: Sequence[Tuple[str, np.ndarray]]) -> Optional[float]:
+    """The one ``Lz`` of the reference cells ``(where, cell (3,))`` a projected run trains on, or ``None``
+    for none; ``ValueError`` naming them when they differ. A trained two-dimensional model has one
+    ``depth`` (and, under areal densities, one slab thickness its densities are per unit area of), so
+    archives of several ``Lz_ref`` are refused rather than mixed: state one cell for all of them."""
+    values = {}
+    for where, cell in cells:
+        values.setdefault(float(np.asarray(cell, dtype=np.float64)[2]), []).append(str(where))
+    if len(values) > 1:
+        shown = "; ".join(f"Lz_ref={lz!r}: {', '.join(names[:3])}"
+                          + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+                          for lz, names in sorted(values.items()))
+        raise ValueError(
+            f"the projected runs are read in reference cells of {len(values)} different Lz ({shown}): "
+            f"a two-dimensional model has one depth, so write every archive in one stated cell, "
+            f"modes_from_dump(reference_box=(Lx, Ly, Lz))")
+    return next(iter(values), None)
+
+
+def archive_cells(root, pattern: str, *, file_name: str, key: str,
+                  exclude_tags: Sequence[str] = ()) -> List[Tuple[Path, Optional[np.ndarray]]]:
+    """``(archive, reference cell or None)`` for every run :func:`aipf.train.dataset.read_mode_runs`
+    would read under ``root`` (the same glob, exclusions and missing files skipped), read from the
+    archive's index and its ``key`` alone: the check a projection makes before anything is written."""
+    excluded = set(exclude_tags)
+    out = []
+    for directory in sorted(Path(root).glob(pattern)):
+        path = directory / file_name
+        if directory.name in excluded or not path.is_file():
+            continue
+        with np.load(path) as payload:
+            cell = (np.array(payload[key], dtype=np.float64) if key in payload else None)
+        out.append((path, cell))
+    return out

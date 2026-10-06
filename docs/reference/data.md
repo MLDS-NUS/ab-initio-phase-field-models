@@ -225,10 +225,11 @@ of it divides by `Lx_ref Ly_ref * depth`:
 The volumetric half spectrum is the 3D one's `k_z = 0` plane, cut to `n_y >= 0`, and the real-space
 field it makes is the z average of the 3D field (`tests/unit/test_train_projection.py`). Only an
 archive with a reference cell (`modes_from_dump(reference_box=...)`) is projected, since the frames
-of an NPT run each have their own `Lz`; one without is refused, naming the writer's option.
+of an NPT run each have their own `Lz`; one without is refused, naming the writer's option. Runs
+trained together must share `Lz_ref` (`aipf.train.projection.common_lz` refuses a mix).
 `aipf.train.projection_depth(run_or_dir, areal=...)` is the run's `depth`, from a `ModeRun` as read,
-a run directory or its `modes.npz`: what a noisy two-dimensional rollout of the model trained on it
-declares.
+an archive's run directory (`<tree>/<tag>/`) or its `modes.npz`: what a noisy two-dimensional
+rollout of the model trained on it declares.
 
 `defaults["mode_fields"]` is `"per_type"` (one channel per species, the sum over its dump type) or
 one combination per species in channel order, `{"name": species, "weights": {dump type: w},
