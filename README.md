@@ -6,10 +6,10 @@
 
 # Ab initio phase-field models
 
-**Free-energy functionals and mobilities learned from molecular dynamics, run as phase-field models.**
+**Phase-field models derived from molecular dynamics, with the free-energy functional and mobility learned from *ab initio* data.**
 
-[![arXiv](https://img.shields.io/badge/arXiv-2610.01432-b31b1b.svg)](https://arxiv.org/abs/2610.01432)
-[![Project page](https://img.shields.io/badge/Project-Page-E87A00.svg)](https://mengyi-chen.github.io/ab-initio-phase-field-models/)
+[![arXiv](https://img.shields.io/badge/arXiv-2610.01432-b31b1b.svg?style=for-the-badge)](https://arxiv.org/abs/2610.01432)
+[![Project website](https://img.shields.io/badge/Project-Website-E87A00.svg?style=for-the-badge)](https://mengyi-chen.github.io/ab-initio-phase-field-models/)
 
 <img src="figures/readme/framework.png" alt="Simulation, learning and inference: MD trajectories of a binary mixture are coarse-grained into density fields, a network learns the mobility and the free-energy functional, which then give phase diagrams and stochastic phase-field dynamics" width="100%">
 
