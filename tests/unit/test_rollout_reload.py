@@ -91,20 +91,50 @@ def test_a_fit_checkpoint_reloads_to_the_drift_it_was_saved_with(tmp_path):
         assert torch.equal(loaded(rho_hat, boxes, T), reference.eval()(rho_hat, boxes, T))
 
 
+#: What each published checkpoint does through this loader: hhe and feb load, lj (a k-modes file this
+#: loader has never read) raises.
+PUBLISHED_OUTCOME = {"hhe": "ok", "feb": "ok", "lj": "raised"}
+
+
 @pytest.mark.parametrize("name", SYSTEMS)
 def test_each_published_checkpoint_takes_the_path_it_always_took(name):
     declared_roots.published_or_skip(name)
     system = load(name)
     path = system.resolve_checkpoint()
-    _assert_same(_outcome(_load_as_before, system, path),
-                 _outcome(load_model, system, path))
+    before = _outcome(_load_as_before, system, path)
+    assert before[0] == PUBLISHED_OUTCOME[name]
+    _assert_same(before, _outcome(load_model, system, path))
+
+
+def test_a_fit_file_without_its_tag_takes_the_path_it_always_took(tmp_path):
+    system, path = _fit_checkpoint(tmp_path)
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    del saved["config_schema"]
+    untagged = tmp_path / "untagged.ckpt"
+    torch.save(saved, untagged)
+
+    before = _outcome(_load_as_before, system, untagged)
+    assert before[0] == "raised"
+    _assert_same(before, _outcome(load_model, system, untagged))
+
+
+def test_a_tagged_file_without_model_state_dict_takes_the_path_it_always_took(tmp_path):
+    system, path = _fit_checkpoint(tmp_path)
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    del saved["model_state_dict"]
+    lightning_only = tmp_path / "lightning_only.ckpt"
+    torch.save(saved, lightning_only)
+
+    before = _outcome(_load_as_before, system, lightning_only)
+    assert before[0] == "raised"
+    _assert_same(before, _outcome(load_model, system, lightning_only))
 
 
 def test_a_tag_this_package_does_not_know_takes_the_path_it_always_took(tmp_path):
     system, path = _fit_checkpoint(tmp_path)
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    saved["config_schema"] = "apfm.train.TrainConfig.v1"     # the tag before the rename
-    renamed = tmp_path / "old_tag.ckpt"
+    saved["config_schema"] = "aipf.train.TrainConfig.v0"     # a tag CONFIG_SCHEMA_TAGS does not hold
+    renamed = tmp_path / "unknown_tag.ckpt"
     torch.save(saved, renamed)
 
     before = _outcome(_load_as_before, system, renamed)
