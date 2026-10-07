@@ -16,7 +16,7 @@ and filtered by `exp(-k^2 sigma^2 / 2)` with `defaults["sigma"]`.
 
 | argument | meaning |
 |---|---|
-| `ckpt` | `"published"` (the system's checkpoint, digest-checked) or a path |
+| `ckpt` | `"published"` (the system's checkpoint, digest-checked) or a path; a file `aipf train` wrote (tagged `config_schema`) loads from its `model_state_dict` |
 | `run` | the archived run's directory under the driver's `modes_tree` |
 | `seeds` | one noisy rollout per seed; empty: one deterministic rollout |
 | `t_end`, `dt`, `save_ps` | the simulated time, the step and the saving interval, in ps |

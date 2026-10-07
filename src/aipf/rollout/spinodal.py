@@ -77,10 +77,16 @@ def load_model(system: System, path: Path) -> torch.nn.Module:
     """The declared functional with this file's weights, float32, eval mode."""
     from aipf.functional.build import build
     from aipf.train.checkpoint_formats import load_lightning_hparams_into
+    from aipf.train.ckpt_compat import CONFIG_SCHEMA_TAGS
 
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    state = saved["state_dict"] if "state_dict" in saved else \
-        saved["model_state_dict"]
+    # A file fit wrote carries this package's tag beside Lightning's prefixed state_dict; its own
+    # model_state_dict is the one build() names. Every other file keeps the order it always had.
+    if saved.get("config_schema") in CONFIG_SCHEMA_TAGS and "model_state_dict" in saved:
+        state = saved["model_state_dict"]
+    else:
+        state = saved["state_dict"] if "state_dict" in saved else \
+            saved["model_state_dict"]
     model = build(system)
     refuse_two_dimensions(model_ndim(model), "the spinodal and slab drivers")
     if set(state) <= set(model.state_dict()):
