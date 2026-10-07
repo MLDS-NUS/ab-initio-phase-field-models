@@ -9,7 +9,7 @@
 **Phase-field models derived from molecular dynamics, with the free-energy functional and mobility learned from *ab initio* data.**
 
 [![arXiv](https://img.shields.io/badge/arXiv-2610.01432-b31b1b.svg?style=for-the-badge)](https://arxiv.org/abs/2610.01432)
-[![Project website](https://img.shields.io/badge/Project-Website-E87A00.svg?style=for-the-badge)](https://mengyi-chen.github.io/ab-initio-phase-field-models/)
+[![Project website](https://img.shields.io/badge/Project-Website-E87A00.svg?style=for-the-badge)](https://mlds-nus.github.io/ab-initio-phase-field-models/)
 
 <img src="figures/readme/framework.png" alt="Simulation, learning and inference: MD trajectories of a binary mixture are coarse-grained into density fields, a network learns the mobility and the free-energy functional, which then give phase diagrams and stochastic phase-field dynamics" width="100%">
 
@@ -52,7 +52,7 @@ The published model of each system is tracked in the repository, under `data/<sy
 ## Install
 
 ```bash
-git clone https://github.com/mengyi-chen/ab-initio-phase-field-models.git
+git clone https://github.com/MLDS-NUS/ab-initio-phase-field-models.git
 cd ab-initio-phase-field-models
 pip install -e ".[dev]"     # Python 3.12; install the torch build your platform needs first
 ```

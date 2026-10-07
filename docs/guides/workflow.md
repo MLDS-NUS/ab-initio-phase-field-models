@@ -10,7 +10,7 @@ Every command and its flags are in [../reference/cli.md](../reference/cli.md).
 
 ## 0. Install and site facts
 
-    git clone https://github.com/mengyi-chen/ab-initio-phase-field-models.git
+    git clone https://github.com/MLDS-NUS/ab-initio-phase-field-models.git
     cd ab-initio-phase-field-models
     bash env/build-env.sh          # or: pip install -e . into an environment you have
     pip install -e ".[md]"         # the MD stack; LAMMPS itself is a separate compile

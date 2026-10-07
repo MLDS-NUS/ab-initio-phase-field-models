@@ -48,7 +48,7 @@ WORDS: dict[str, str] = {
                    r"|(?-i:\b[A-G]\d[a-z]\b)|\bitem ?C\d\d\b|\bspec ?sec|\bsec1\d\b",
     "a migration date": r"(?<!date-released: )\b2026-\d\d-\d\d\b",
     "a decision record": r"\brulings?\b",
-    "this machine": r"\bnscc\b|asp2a|e0945231|(?<![.@\w])nus\b(?!\.edu)|this host|11004368|\bpbs10\d|\bq2@",
+    "this machine": r"\bnscc\b|asp2a|e0945231|(?<![.@\w])(?<!mlds-)nus\b(?!\.edu)|this host|11004368|\bpbs10\d|\bq2@",
     "an environment name": r"torchenv|lammps_env|apfm",
     "a run name": r"champion|\bwave ?\d|\bwave_|pre_wave|wave\d|w35d4s4|lg1_s2|gammamlp|freeu|p30m50"
                   r"|_seed\d|epoch=\d+-step|\bprod_e\d+|\bbase_s\d",
@@ -185,6 +185,7 @@ def test_the_word_list_catches_what_it_names():
     assert "a plan item" in names("see Task 5 and Phase 3, (spec §17.2), item C2c")
     assert "this machine" in names("the cluster's nus home") and "this machine" in names("on this host")
     assert "this machine" not in names("email: someone@u.nus.edu")
+    assert "this machine" not in names("https://github.com/MLDS-NUS/ab-initio-phase-field-models")
     assert "this machine" not in names("the minus sign") and "a plan item" not in names("module_from_spec(spec)")
     assert "a plan item" not in names("(spec or {})") and "a plan item" not in names("d2f/dx2")
     assert "provenance prose" in names("ported from the old code") and "provenance prose" not in names("exported from it")

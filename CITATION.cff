@@ -7,7 +7,7 @@ authors:
     given-names: Mengyi
     email: chenmengyi@u.nus.edu
     affiliation: National University of Singapore
-repository-code: https://github.com/mengyi-chen/ab-initio-phase-field-models
+repository-code: https://github.com/MLDS-NUS/ab-initio-phase-field-models
 license: MIT
 version: 0.1.0
 date-released: 2026-10-01
