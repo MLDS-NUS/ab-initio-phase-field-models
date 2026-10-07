@@ -1,6 +1,6 @@
-> [!WARNING]
-> 🚧 **This code is still under construction.** The package, its command line and its documentation
-> are being completed and may change without notice.
+> [!NOTE]
+> 🔄 **This code is actively developed.** New features and documentation are added regularly, and the
+> command line may still evolve between releases.
 
 <div align="center">
 
@@ -8,10 +8,8 @@
 
 **Free-energy functionals and mobilities learned from molecular dynamics, run as phase-field models.**
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](docs/guides/environment.md)
-[![Status: under construction](https://img.shields.io/badge/status-under%20construction-orange.svg)](#status)
 [![arXiv](https://img.shields.io/badge/arXiv-2610.01432-b31b1b.svg)](https://arxiv.org/abs/2610.01432)
+[![Project page](https://img.shields.io/badge/Project-Page-E87A00.svg)](https://mengyi-chen.github.io/ab-initio-phase-field-models/)
 
 <img src="figures/readme/framework.png" alt="Simulation, learning and inference: MD trajectories of a binary mixture are coarse-grained into density fields, a network learns the mobility and the free-energy functional, which then give phase diagrams and stochastic phase-field dynamics" width="100%">
 
@@ -49,7 +47,7 @@ The published model of each system is tracked in the repository, under `data/<sy
 |---|---|---|---|
 | `hhe`, hydrogen-helium | two density fields, a 2 × 2 mobility, from MD with a machine-learned potential | 200 to 800 GPa, 2000 to 12 000 K | the H/He binodal and spinodal and their critical line, with $T_c$ from about 6300 K at 200 GPa to 9200 K at 800 GPa, for helium rain in Jupiter and Saturn |
 | `feb`, iron-boron | two density fields, a 2 × 2 mobility, from MD with a machine-learned potential | 0, 5 and 10 GPa, 1200 to 2600 K | the thermodynamic factor $\Gamma(x_B, T)$ and the spinodal regions of the liquid at each pressure |
-| `lj`, binary Lennard-Jones | one composition field, from overdamped Langevin MD (reduced units) | $T$ = 1.10 to 1.70 | the phase diagram ($T_c$ = 1.434) and coarsening against MD, with Flory-Huggins and Landau baselines trained on the same data |
+| `lj`, binary Lennard-Jones | one composition field, from overdamped Langevin MD (reduced units) | $T$ = 1.10 to 1.70 | the phase diagram and coarsening against MD, with Flory-Huggins and Landau baselines trained on the same data |
 
 ## Install
 
@@ -188,7 +186,7 @@ aipf.toml.example  the template of the local, untracked aipf.toml
 ## Status
 
 Working and tested today: the three published models, the quick start, every paper figure and the
-MD-to-model chain on the Lennard-Jones mixture. Still being completed:
+MD-to-model chain on the Lennard-Jones mixture. In progress:
 
 - the documentation, in places;
 - the DOI of the raw MD archive, once it exists.
