@@ -568,3 +568,16 @@ footer p { margin: 0 0 6px; }
 
 /* full-width figures: no height cap, so the Fe-B composite fills the column */
 .chart-card--wide .result-img { max-height: none; }
+
+/* key insights: four cards (2 x 2) left, helium-rain video right */
+.insight-layout { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: 20px; align-items: center; }
+.insight-layout .insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.insight-video { margin: 0; justify-self: center; width: 100%; max-width: 340px; }
+.insight-video video { display: block; width: 100%; height: auto; border-radius: 12px; background: #fff; border: 1px solid var(--line); box-shadow: 0 16px 40px -18px rgba(0,0,0,.30); }
+.insight-video figcaption { margin-top: 8px; font-size: .82rem; line-height: 1.4; color: var(--muted); text-align: center; }
+.rain-card .result-img { display: block; width: 100%; height: auto; }
+@media (max-width: 900px) {
+  .insight-layout { grid-template-columns: 1fr; }
+  .insight-video { max-width: 300px; }
+}
+@media (max-width: 560px) { .insight-layout .insight-grid { grid-template-columns: 1fr; } }

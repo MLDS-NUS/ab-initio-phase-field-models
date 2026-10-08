@@ -42,6 +42,7 @@
 <section id="insights" class="light-bg">
   <div class="container">
     <h2>Key insights</h2>
+    <div class="insight-layout">
     <div class="insight-grid">
       <div class="insight-card">
         <div class="insight-icon"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/></svg></div>
@@ -63,6 +64,13 @@
         <h3>Free-energy functional and mobility, from systematic ladders</h3>
         <p>We select the free-energy functional and mobility from ladders of systematically improvable models, with their parameters learned jointly from the same dynamics.</p>
       </div>
+    </div>
+    <figure class="insight-video">
+      <video autoplay loop muted playsinline preload="auto" poster="assets/rain_poster.png" width="770" height="1034" aria-label="Helium rain simulated with the AIPF model">
+        <source src="assets/helium_rain.mp4" type="video/mp4">
+      </video>
+      <figcaption>Helium rain in a domain corresponding to 2.2 million atoms, simulated with the AIPF model.</figcaption>
+    </figure>
     </div>
   </div>
 </section>
@@ -436,18 +444,9 @@ M1001 80h400000v40h-400000z"/></svg></span></span></span><span class="vlist-s">�
     <p class="takeaway">The model captures droplet nucleation and growth in helium-rain simulations of a domain corresponding to 2.2 million atoms, far beyond the scale of atomistic modeling at comparable accuracy.</p>
     <p class="row-label">Dynamics simulation</p>
     <figure class="chart-card rain-card" id="rain">
-      <div class="rain-pair">
-        <div>
-          <video autoplay loop muted playsinline controls preload="metadata" poster="assets/rain_poster.png" width="770" height="1034">
-            <source src="assets/helium_rain.mp4" type="video/mp4">
-          </video>
-        </div>
-        <div>
-          <img class="result-img" src="assets/fig5fg_rain_snapshots.png?v=2" width="2250" height="1097" loading="lazy"
+      <img class="result-img" src="assets/fig5fg_rain_snapshots.png?v=2" width="2250" height="1097" loading="lazy"
              alt="Five snapshots of a helium-rain simulation from 20 to 1000 ps: droplets nucleate, grow, settle under gravity and form a helium layer at the bottom of the column, shown as droplet surfaces coloured by radius and as the helium fraction on the column faces.">
-        </div>
-      </div>
-      <figcaption><strong>Nucleation, growth and settling</strong> (paper Fig. 5f,g). Helium rain in a hydrogen–helium column at 400 GPa, 3700 to 3900 K along the planetary temperature gradient, corresponding to 2.2 million atoms. Left, the simulation from 0 to 1200 ps. Right, snapshots at 20 to 1000 ps, with droplets coloured by radius and the helium fraction on the faces of the column.</figcaption>
+      <figcaption><strong>Nucleation, growth and settling</strong> (paper Fig. 5f,g). Helium rain in a hydrogen–helium column at 400 GPa, 3700 to 3900 K along the planetary temperature gradient, corresponding to 2.2 million atoms. Snapshots at 20 to 1000 ps, with droplets coloured by radius and the helium fraction on the faces of the column. The full simulation plays beside the key insights above.</figcaption>
     </figure>
   </div>
 </section>
