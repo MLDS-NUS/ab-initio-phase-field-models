@@ -18,7 +18,7 @@ from torchmetrics import MeanMetric
 
 from aipf.functional.base import FreeEnergyModel
 from aipf.losses import l_bulk, l_dyn, l_m, l_p_absolute, l_p_variance, l_s
-from aipf.spectral import OpsCache, SpectralOps
+from aipf.spectral import OpsCache, SpectralOps, SpectralOps2D, ops_ndim
 from aipf.train.config import TrainConfig
 
 #: Canonical loss names logged and totalled, in this order.
@@ -41,9 +41,15 @@ def seeded_rng(seed: int) -> Iterator[None]:
 ProbeArg = Tuple[torch.Tensor, dict]
 
 
+#: Per number of spatial axes, the view that broadcasts the ``(B, n_s)`` state weights over
+#: ``(B, n_s, n_species, *half spectrum)``.
+_STATE_WEIGHT_VIEW = {3: (1, 1, 1, 1), 2: (1, 1, 1)}
+
+
 class LitModule(L.LightningModule):
-    """Wraps a :class:`~aipf.functional.base.FreeEnergyModel`, its ops (``OpsCache`` or ``SpectralOps``)
-    and a :class:`TrainConfig`."""
+    """Wraps a :class:`~aipf.functional.base.FreeEnergyModel`, its ops (``OpsCache``, ``SpectralOps`` or
+    ``SpectralOps2D``) and a :class:`TrainConfig`. The number of spatial axes is the ops' declared one
+    (``ops.ndim``), never read off a batch's shape."""
 
     def __init__(self, model: FreeEnergyModel, ops, config: TrainConfig) -> None:
         super().__init__()
@@ -55,7 +61,7 @@ class LitModule(L.LightningModule):
         if isinstance(ops, OpsCache):
             self._ops_cache: Optional[OpsCache] = ops
             self._ops: Optional[SpectralOps] = None
-        elif isinstance(ops, SpectralOps):
+        elif isinstance(ops, (SpectralOps, SpectralOps2D)):
             self._ops_cache = None
             self._ops = ops
         else:
@@ -108,7 +114,8 @@ class LitModule(L.LightningModule):
 
         Shapes: ``rho_hat_states`` ``(B, n_s, n_species, Gx, Gy, Gzr)``, ``lam`` ``(B, n_s)``,
         ``target_hat`` ``(B, n_species, Gx, Gy, Gzr)``, ``boxes`` ``(B, 3)``,
-        ``T``/``sample_weight`` ``(B,)``."""
+        ``T``/``sample_weight`` ``(B,)``; on a two-dimensional operator set ``(..., Gx, Gyr)`` and
+        ``boxes`` ``(B, 2)``."""
         if self.config.sigma is None:
             raise ValueError("drift_loss needs config.sigma (no default)")
         B, n_s = rho_hat_states.shape[:2]
@@ -120,7 +127,7 @@ class LitModule(L.LightningModule):
         T_f = T.repeat_interleave(n_s, dim=0)
         pred_hat = self.model(flat, boxes_f, T_f)
         pred_hat = pred_hat.reshape(B, n_s, *pred_hat.shape[1:])
-        lam_b = lam.to(pred_hat.real.dtype).view(B, n_s, 1, 1, 1, 1)
+        lam_b = lam.to(pred_hat.real.dtype).view(B, n_s, *_STATE_WEIGHT_VIEW[ops_ndim(ops)])
         rhs_hat = (lam_b * pred_hat).sum(dim=1)
         residual = target_hat * filt - rhs_hat
         k2 = ops.k2(boxes)

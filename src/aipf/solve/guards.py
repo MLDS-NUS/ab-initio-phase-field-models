@@ -2,10 +2,13 @@
 part of any model's free energy (unlike rung 2's ``kappa`` and the diagnostic ``kappa_eff``)."""
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Optional
 
 import torch
+
+from aipf.spectral import k_squared, ops_ndim
 
 
 def assert_finite(x: torch.Tensor, where: str) -> None:
@@ -59,22 +62,20 @@ def clamped_inputs(model: torch.nn.Module, floor: float) -> Iterator[torch.nn.Mo
 def kappa_roll_correction(model: torch.nn.Module, rho: torch.Tensor,
                           rho_hat: torch.Tensor, T: torch.Tensor,
                           ops, kx: torch.Tensor, ky: torch.Tensor,
-                          kz: torch.Tensor, kappa_roll: float) -> torch.Tensor:
+                          kz: Optional[torch.Tensor], kappa_roll: float) -> torch.Tensor:
     """The extra flux ``div(M grad(-kappa_roll * lap(rho)))`` in k-space, through ``model.mobility`` only.
-    Zero when ``kappa_roll`` is falsy."""
+    Zero when ``kappa_roll`` is falsy. ``kz`` is ``None`` for a two-dimensional ``ops``."""
     if not kappa_roll:
         return torch.zeros_like(rho_hat)
-    N = ops.grid[0] * ops.grid[1] * ops.grid[2]
-    k2 = kx * kx + ky * ky + kz * kz
+    ks = (kx, ky, kz)[:ops_ndim(ops)]
+    N = math.prod(ops.grid)
+    k2 = k_squared(ks)
     extra_mu_hat = float(kappa_roll) * k2 * rho_hat
-    gx, gy, gz = ops.grad_hat(extra_mu_hat * N, kx, ky, kz)
+    grads = ops.grad_hat(extra_mu_hat * N, *ks)
     grad_extra_mu = torch.stack(
-        [ops.irfft(gx), ops.irfft(gy), ops.irfft(gz)], dim=2)  # (B,n,3,...)
+        [ops.irfft(g) for g in grads], dim=2)                  # (B,n,ndim,...)
     M = model.mobility(rho, T)                                 # (B,n,n,...)
-    Jx = torch.einsum("bij...,bj...->bi...", M, grad_extra_mu[:, :, 0])
-    Jy = torch.einsum("bij...,bj...->bi...", M, grad_extra_mu[:, :, 1])
-    Jz = torch.einsum("bij...,bj...->bi...", M, grad_extra_mu[:, :, 2])
-    Jx_hat = ops.rfft(Jx) / N
-    Jy_hat = ops.rfft(Jy) / N
-    Jz_hat = ops.rfft(Jz) / N
-    return ops.div_hat(Jx_hat, Jy_hat, Jz_hat, kx, ky, kz)
+    J = [torch.einsum("bij...,bj...->bi...", M, grad_extra_mu[:, :, d])
+         for d in range(len(ks))]
+    J_hat = [ops.rfft(j) / N for j in J]
+    return ops.div_hat(*J_hat, *ks)

@@ -2,17 +2,21 @@
 A translation from the checkpoint's saved ``model_kwargs`` vocabulary to the rung constructor,
 agreeing key for key with :func:`aipf.train.checkpoint_formats.lightning_hparams_rung_kwargs`. It never
 guesses, swallows a key, or renames behind the caller. ``nonlocal_kernel`` and the closed local forms of
-``square_gradient`` are translated; ``variant=`` builds a declared :class:`aipf.system.Variant`."""
+``square_gradient`` are translated; ``variant=`` builds a declared :class:`aipf.system.Variant`. A functional
+declared with a ``factory`` is built by calling it, and the model it returns is checked against the contract
+the drivers read (:func:`check_factory_model`)."""
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Any, Dict
 
 import torch
 
 from aipf.mobility import mobility_kwargs
+from aipf.spectral import OPS_CLASSES, OpsCache
 
-from .base import MODEL_REGISTRY
+from .base import MODEL_REGISTRY, PROTOCOL_METHODS
 
 #: Declared name -> constructor name, for keys whose spelling differs (pure renames).
 _RENAMES = {
@@ -234,6 +238,11 @@ def rung_kwargs(system, variant: str | None = None, **overrides: Any) -> Dict[st
             f"that system and this package ships no default for it")
     _register_rungs()
     spec = system.functional
+    if getattr(spec, "factory", None) is not None:
+        raise ValueError(
+            f"system {system.name!r} declares its functional by a factory, "
+            f"{factory_name(spec.factory)}, which is called with the system; there are no "
+            f"constructor arguments to translate. Use build()")
     if spec.form not in _TRANSLATIONS:
         raise NotImplementedError(
             f"no declaration-to-constructor translation is measured for "
@@ -263,13 +272,78 @@ def rung_kwargs(system, variant: str | None = None, **overrides: Any) -> Dict[st
 
 def build(system, variant: str | None = None, **overrides: Any) -> torch.nn.Module:
     """Construct ``system.functional`` (or variant ``variant``'s) with ``overrides`` applied last, recorded as
-    ``build_overrides``."""
+    ``build_overrides``. A declared ``factory`` is called as ``factory(system, **overrides)`` instead, and
+    what it returns is checked (:func:`check_factory_model`)."""
     if variant is not None:
         system = system.variant(variant)
+    if getattr(system.functional, "factory", None) is not None:
+        model = system.functional.factory(system, **overrides)
+        check_factory_model(model, system)
+        model.build_overrides = dict(overrides)
+        return model
     kwargs = rung_kwargs(system, **overrides)
     model = MODEL_REGISTRY[system.functional.form](**kwargs)
     model.build_overrides = dict(overrides)
     return model
+
+
+def factory_name(factory) -> str:
+    """``module:qualname`` of a factory, as a run's manifest records it; a ``functools.partial`` names the
+    function it wraps, a callable object its class."""
+    while isinstance(factory, functools.partial):
+        factory = factory.func
+    module = getattr(factory, "__module__", None) or type(factory).__module__
+    qualname = getattr(factory, "__qualname__", None) or type(factory).__qualname__
+    return f"{module}:{qualname}"
+
+
+def check_factory_model(model, system) -> None:
+    """Refuse what ``system.functional.factory`` returned unless training, the checkpoint reload and the
+    explicit solvers can use it: an ``nn.Module`` with the ``FreeEnergyModel`` methods, at least one
+    parameter, ``_cache`` (an :class:`aipf.spectral.OpsCache`) and ``ops`` (its
+    :class:`aipf.spectral.SpectralOps`, or :class:`aipf.spectral.SpectralOps2D` on a two-axis grid, the
+    same object as ``_cache.ops``) on the declared ``grid`` and under the declared ``nyquist_mask``.
+    The semi-implicit scheme's own needs are checked when it runs."""
+    name = factory_name(system.functional.factory)
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__}, not a torch.nn.Module; "
+            f"training wraps the model in a LightningModule and the checkpoint holds its "
+            f"state_dict")
+    missing = [m for m in PROTOCOL_METHODS if not callable(getattr(model, m, None))]
+    if missing:
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__}, which does not implement "
+            f"FreeEnergyModel: missing {missing}")
+    if next(model.parameters(), None) is None:
+        raise ValueError(
+            f"the factory {name} returned a {type(model).__name__} with no parameters: there "
+            f"is nothing to train and nothing for a checkpoint to hold")
+    if not isinstance(getattr(model, "_cache", None), OpsCache):
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__} whose _cache is not an "
+            f"aipf.spectral.OpsCache; training reads the spectral operators per grid from it")
+    if not isinstance(getattr(model, "ops", None), OPS_CLASSES):
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__} whose ops is not an "
+            f"aipf.spectral.SpectralOps (the OpsCache's own, _cache.ops); the explicit solvers "
+            f"read the Nyquist convention from it")
+    if model.ops is not model._cache.ops:
+        raise TypeError(
+            f"the factory {name} returned a {type(model).__name__} whose ops is not its "
+            f"_cache.ops; training reads the operators from the one and the solvers from the "
+            f"other, so they are one object (self.ops = self._cache.ops)")
+    grid = tuple(int(g) for g in system.functional.kwargs["grid"])
+    if tuple(model._cache.grid) != grid:
+        raise ValueError(
+            f"the factory {name} built its operators on grid {tuple(model._cache.grid)} and the "
+            f"declaration says {grid}; training reads the one and the model the other")
+    declared = bool(system.functional.kwargs["nyquist_mask"])
+    if bool(model.ops.nyquist_mask) != declared:
+        raise ValueError(
+            f"the factory {name} built ops with nyquist_mask={model.ops.nyquist_mask!r} and "
+            f"the declaration says {declared!r}; the drivers read one and the model the "
+            f"other")
 
 
 #: Functional form -> the module that implements it and registers it (``aipf.system.FUNCTIONAL_FORMS``).

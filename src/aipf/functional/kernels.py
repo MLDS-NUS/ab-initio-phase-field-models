@@ -1,6 +1,8 @@
 """Rung 3's pair-kernel term: radial functions ``W_ab(r)`` and the route to ``Ŵ(|k|)``.
 ``R_cut`` and the quadrature and k-table sizes are System fields, never defaulted here.
-An evaluator with ``reads_geometry = True`` is handed the real-space grid and the boxes as well as ``|k|``."""
+An evaluator with ``reads_geometry = True`` is handed the real-space grid and the boxes as well as ``|k|``.
+In two dimensions the radial route is the Hankel transform (:func:`hankel_transform`); the lattice sum,
+``Ŵ(0)`` and ``kappa_eff`` are three-dimensional only."""
 from __future__ import annotations
 
 import math
@@ -10,6 +12,7 @@ import torch
 import torch.nn as nn
 
 FOUR_PI = 4.0 * math.pi
+TWO_PI = 2.0 * math.pi
 
 _ACTIVATIONS = {
     "gelu": nn.GELU,
@@ -48,6 +51,21 @@ def radial_fourier_transform(w_vals: torch.Tensor, r: torch.Tensor,
     integrand = w_vals.unsqueeze(-2) * (r * r) * sinc           # (..., n_k, Q)
     out = FOUR_PI * torch.trapezoid(integrand, r, dim=-1)       # (..., n_k)
     return out.reshape(*w_vals.shape[:-1], *k.shape)
+
+
+def hankel_transform(w_vals: torch.Tensor, r: torch.Tensor,
+                     k: torch.Tensor) -> torch.Tensor:
+    """``Ŵ(k) = 2*pi*int r W(r) J0(kr) dr``, the two-dimensional transform of a radial ``W``, by trapezoidal
+    quadrature; shapes as :func:`radial_fourier_transform`."""
+    kr = k.reshape(-1, 1) * r                                   # (n_k, Q)
+    j0 = torch.special.bessel_j0(kr)
+    integrand = w_vals.unsqueeze(-2) * r * j0                   # (..., n_k, Q)
+    out = TWO_PI * torch.trapezoid(integrand, r, dim=-1)        # (..., n_k)
+    return out.reshape(*w_vals.shape[:-1], *k.shape)
+
+
+#: The admissible ``dim`` of :class:`AnalyticRadialTransform`: the 3D sine transform or the 2D Hankel one.
+RADIAL_TRANSFORM_DIMS = (3, 2)
 
 
 class QuinticEnvelope:
@@ -108,11 +126,17 @@ class WHatEvaluator(Protocol):
 
 class AnalyticRadialTransform(nn.Module):
     """``Ŵ(k) = 4*pi*int r^2 W(r) sinc(kr) dr`` on a fixed 1-D k table, linearly interpolated to ``|k|``.
-    Reads no grid and no box. ``R_cut`` must match the radial set's."""
+    Reads no grid and no box. ``R_cut`` must match the radial set's. ``dim=2`` takes the Hankel transform
+    ``2*pi*int r W(r) J0(kr) dr`` instead, on the same buffers (``dim`` is an attribute, not state)."""
 
     def __init__(self, R_cut: float, n_quad: int, n_k_table: int,
-                 k_table_max: float):
+                 k_table_max: float, *, dim: int = 3):
         super().__init__()
+        if dim not in RADIAL_TRANSFORM_DIMS:
+            raise ValueError(
+                f"dim={dim!r} is not one of {RADIAL_TRANSFORM_DIMS}: 3 is the sine transform "
+                f"of a radial W in three dimensions, 2 the Hankel transform in two")
+        self.dim = int(dim)
         self.k_table_max = float(k_table_max)
         self.register_buffer(
             "r_quad", torch.linspace(0.0, float(R_cut), int(n_quad)))
@@ -122,7 +146,10 @@ class AnalyticRadialTransform(nn.Module):
     def w_hat(self, radial_set: RadialKernelSet,
               k: torch.Tensor) -> torch.Tensor:
         w_vals = radial_set.w_of_r(self.r_quad)                       # (n_pairs, Q)
-        table = radial_fourier_transform(w_vals, self.r_quad, self.k_table)  # (n_pairs, K)
+        if self.dim == 2:
+            table = hankel_transform(w_vals, self.r_quad, self.k_table)
+        else:
+            table = radial_fourier_transform(w_vals, self.r_quad, self.k_table)  # (n_pairs, K)
 
         K = self.k_table.shape[0]
         x = (k.abs().clamp(max=self.k_table_max) / self.k_table_max) * (K - 1)
@@ -188,6 +215,11 @@ class LatticeSumTransform(nn.Module):
                 "sum over grid nodes has no value there, so this combination is "
                 "not supported. Pass grid= and boxes=, or use "
                 "PairKernel.w_hat_zero_radial for the radial W_hat(0)")
+        if len(grid) == 2:
+            raise NotImplementedError(
+                "kernel_evaluator='lattice_sum' is three-dimensional only: it sums W over the "
+                "nodes of a (Gx, Gy, Gz) grid. A two-dimensional model takes the Hankel transform "
+                "(AnalyticRadialTransform(dim=2))")
         p = next(radial_set.parameters())
         out = []
         for b in range(boxes.shape[0]):
@@ -222,6 +254,13 @@ class PairKernel(nn.Module):
     def n_species(self) -> int:
         return self.radial_set.n_species
 
+    def _refuse_two_dimensions(self, what: str) -> None:
+        if getattr(self.evaluator, "dim", 3) == 2:
+            raise NotImplementedError(
+                f"{what} is the three-dimensional moment of W(r); this kernel's evaluator is "
+                f"two-dimensional (the Hankel transform), whose moments are other integrals and "
+                f"are not provided")
+
     def w_hat(self, k: torch.Tensor, *, grid=None, boxes=None) -> torch.Tensor:
         """The evaluator's ``Ŵ``; the grid and boxes reach it only when it ``reads_geometry``."""
         if getattr(self.evaluator, "reads_geometry", False):
@@ -236,6 +275,7 @@ class PairKernel(nn.Module):
 
     def w_hat_zero_quadrature(self, r_max: float, n_points: int) -> torch.Tensor:
         """:meth:`w_hat_zero_radial` with its graph kept, for a loss that trains through it."""
+        self._refuse_two_dimensions("W_hat(0) = 4*pi*int r^2 W(r) dr")
         p = next(self.radial_set.parameters())
         r = torch.linspace(0.0, float(r_max), int(n_points), device=p.device, dtype=p.dtype)
         w = self.radial_set.w_of_r(r)
@@ -246,6 +286,7 @@ class PairKernel(nn.Module):
     @torch.no_grad()
     def kappa_eff(self) -> torch.Tensor:
         """``-(2*pi/3) * int r^4 W(r) dr``, so ``Ŵ(k) = Ŵ(0) + kappa_eff*k^2 + O(k^4)``."""
+        self._refuse_two_dimensions("kappa_eff = -(2*pi/3) int r^4 W(r) dr")
         r = self.kappa_r_quad
         if r is None:
             raise ValueError(

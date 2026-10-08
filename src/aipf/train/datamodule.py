@@ -18,6 +18,8 @@ from torch.utils.data import DataLoader, Sampler
 from aipf.train.dataset import (ArchiveKeys, ModeRun, ModeWindowDataset, band_keep,
                                 WindowSettings, read_mode_runs, scatter_modes,
                                 weak_target)
+from aipf.train.projection import (PROJECTIONS, check_projection, common_lz, is_areal,
+                                   project_kz0)
 
 TWO_PI = 2.0 * np.pi
 
@@ -168,8 +170,13 @@ def band_multiplicity(n_half: int, n_full: int) -> np.ndarray:
 
 
 def _band_mean_square(target_hat: np.ndarray, box: np.ndarray, n_full: int,
-                      sigma: float, k_max: float, eps: float) -> float:
-    """In-band mean of ``|target_hat * exp(-k^2 sigma^2 / 2)|^2 * mult / (k^2 + eps)`` for one target."""
+                      sigma: float, k_max: float, eps: float, ndim: int = 3) -> float:
+    """In-band mean of ``|target_hat * exp(-k^2 sigma^2 / 2)|^2 * mult / (k^2 + eps)`` for one target.
+
+    ``ndim`` is the declared number of axes (the window grid's length); ``n_full`` the half axis's full
+    length, ``Gz`` in three dimensions and ``Gy`` in two."""
+    if ndim == 2:
+        return _band_mean_square_2d(target_hat, box, n_full, sigma, k_max, eps)
     Gx, Gy, Gzr = target_hat.shape[-3:]
     nx = np.fft.fftfreq(Gx) * Gx
     ny = np.fft.fftfreq(Gy) * Gy
@@ -185,6 +192,22 @@ def _band_mean_square(target_hat: np.ndarray, box: np.ndarray, n_full: int,
     return value[..., band].sum() / band.sum()
 
 
+def _band_mean_square_2d(target_hat: np.ndarray, box: np.ndarray, n_full: int,
+                         sigma: float, k_max: float, eps: float) -> float:
+    """:func:`_band_mean_square` on a two-axis half spectrum ``(..., Gx, Gyr)``, ``box`` ``(Lx, Ly)``."""
+    Gx, Gyr = target_hat.shape[-2:]
+    nx = np.fft.fftfreq(Gx) * Gx
+    ny = np.arange(Gyr)
+    kx = TWO_PI * nx[:, None] / box[0]
+    ky = TWO_PI * ny[None, :] / box[1]
+    k2 = kx ** 2 + ky ** 2
+    band = (k2 > 0) & (k2 <= k_max ** 2)
+    mult = band_multiplicity(Gyr, n_full)[None, :]
+    filt = np.exp(-k2 * sigma ** 2 / 2.0)
+    value = np.abs(target_hat * filt) ** 2 * mult / (k2 + eps)
+    return value[..., band].sum() / band.sum()
+
+
 def run_weights(runs: Sequence[ModeRun], weighting: RunWeighting,
                 window: WindowSettings) -> np.ndarray:
     """A weight per run, in run order, averaging one over the runs that have a window; a windowless
@@ -193,9 +216,12 @@ def run_weights(runs: Sequence[ModeRun], weighting: RunWeighting,
         return np.ones(len(runs), np.float32)
     statistics = []
     for run in runs:
-        box = run.boxes if run.boxes.ndim == 1 else run.boxes.mean(axis=0)
+        box = run.cell if run.cell.ndim == 1 else run.cell.mean(axis=0)
         volume = float(box.prod())
-        keep = band_keep(run.labels, run.boxes, window.band_k_max)
+        if run.depth is not None:
+            # a projected run: the cell's area times the depth it was averaged over
+            volume = volume * float(run.depth)
+        keep = band_keep(run.labels, run.cell, window.band_k_max)
         labels = run.labels if keep is None else run.labels[keep]
         values = []
         for centre in range(window.half_width - 1,
@@ -205,9 +231,14 @@ def run_weights(runs: Sequence[ModeRun], weighting: RunWeighting,
                                  run.frame_interval)
             target = scatter_modes(target if keep is None else target[..., keep],
                                    labels, volume, window.grid)
-            values.append(_band_mean_square(
-                target, box, window.grid[2], weighting.sigma,
-                weighting.k_max, weighting.eps))
+            if len(window.grid) == 2:
+                values.append(_band_mean_square(
+                    target, box, window.grid[1], weighting.sigma,
+                    weighting.k_max, weighting.eps, ndim=2))
+            else:
+                values.append(_band_mean_square(
+                    target, box, window.grid[2], weighting.sigma,
+                    weighting.k_max, weighting.eps))
         statistics.append(np.mean(values) if values else np.nan)
     statistics = np.asarray(statistics)
     ok = np.isfinite(statistics)
@@ -272,14 +303,35 @@ class SourceState:
 class ModeDataModule:
     """Several :class:`SourceSpec` sources (distinct names), split, weighted, and served as batches.
 
-    ``window.grid`` is replaced per source; only TRAIN runs are weighted."""
+    ``window.grid`` is replaced per source; only TRAIN runs are weighted.
+    ``projection`` (optional, one of :data:`aipf.train.projection.PROJECTIONS`) reads every run through
+    :func:`aipf.train.projection.project_kz0` right after it is read, for a two-dimensional model; every
+    source grid is then ``(Gx, Gy)``. ``None`` (the default) reads the archives in three dimensions, on
+    ``(Gx, Gy, Gz)`` grids, as it always did."""
 
     def __init__(self, *, sources: Sequence[SourceSpec], keys: ArchiveKeys,
                  window: WindowSettings, split: SplitSettings,
-                 weighting: RunWeighting, loader: LoaderSettings) -> None:
+                 weighting: RunWeighting, loader: LoaderSettings,
+                 projection: Optional[str] = None) -> None:
         sources = tuple(sources)
         if not sources:
             raise ValueError("sources is empty: a run has at least one")
+        check_projection(projection)
+        axes = 3 if projection is None else 2
+        wrong = [s.name for s in sources if len(s.grid) != axes]
+        if wrong:
+            raise ValueError(
+                f"source(s) {wrong} declare a grid of another number of axes than "
+                f"projection={projection!r} reads: "
+                + ("the k_z = 0 projection scatters onto a two-axis grid (Gx, Gy)"
+                   if projection is not None else
+                   "an archive read without a projection scatters onto a three-axis grid "
+                   "(Gx, Gy, Gz); a two-axis grid needs projection= (one of "
+                   f"{PROJECTIONS})"))
+        if projection is not None and keys.reference_box is None:
+            raise ValueError(
+                f"projection={projection!r} needs the archive's reference cell and these archive "
+                f"keys read none (ArchiveKeys.reference_box is None)")
         names = [s.name for s in sources]
         if len(set(names)) != len(names):
             raise ValueError(
@@ -291,6 +343,7 @@ class ModeDataModule:
         self.split = split
         self.weighting = weighting
         self.loader = loader
+        self.projection = projection
         #: Available before :meth:`setup`: the consuming module is built first.
         self.source_loss_weights: Dict[str, float] = {
             s.name: float(s.loss_weight) for s in sources}
@@ -300,9 +353,20 @@ class ModeDataModule:
     def setup(self) -> None:
         """Read every source, split it, weight it and build its datasets."""
         built = []
+        cells = []
         for spec in self.specs:
             runs = read_mode_runs(spec.root, spec.pattern, keys=self.keys,
                                   exclude_tags=spec.exclude_tags)
+            if self.projection is not None:
+                areal = is_areal(self.projection)
+                try:
+                    projected = [project_kz0(run, areal=areal) for run in runs]
+                except ValueError as refused:
+                    raise ValueError(f"source {spec.name!r} under {spec.root}: "
+                                     f"{refused}") from refused
+                cells += [(f"{spec.name}/{run.tag}", run.reference_box) for run in runs]
+                common_lz(cells)
+                runs = projected
             if spec.exclude_tags:
                 logging.info("source %s: %d run(s) named for exclusion, "
                              "%d read", spec.name, len(spec.exclude_tags),

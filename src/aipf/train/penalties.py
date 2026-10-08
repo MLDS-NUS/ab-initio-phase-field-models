@@ -11,6 +11,7 @@ import torch
 
 from aipf.data.rows import measured_rows
 from aipf.losses.convexity import gamma_on_path, l_conv, l_gamma
+from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.system import System, TrustDomain
 
 from .anchors import EOS_COLUMNS, _columns, _curvature, _digest, _resolve, _w_hat_of
@@ -62,6 +63,7 @@ class ConvexityProbe:
                                    generator=generator)
 
     def loss(self, model, points) -> Tuple[torch.Tensor, dict]:
+        refuse_two_dimensions(model_ndim(model), "the convexity penalty")
         rho, T = points
         dtype, device = _dtype_device(model)
         H = _hessian(model, rho.to(device=device, dtype=dtype),
@@ -187,6 +189,7 @@ class GammaPaths:
 
     def loss(self, model, draw: PathDraw) -> Tuple[torch.Tensor, dict]:
         """``l_gamma`` of ``Gamma(x)`` from ``Hess f_loc + W_hat(0)`` along each drawn path."""
+        refuse_two_dimensions(model_ndim(model), "the Gamma-path penalty")
         dtype, device = _dtype_device(model)
         pts = {k: (v.to(device) if torch.is_tensor(v) else v)
                for k, v in self.points(draw, dtype).items()}

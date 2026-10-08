@@ -492,9 +492,12 @@ def test_window_settings_refuses_a_non_positive_count(field, bad):
         _window(**{field: bad})
 
 
-def test_window_settings_refuses_a_grid_that_is_not_three_axes():
-    with pytest.raises(ValueError, match="grid"):
-        _window(grid=(8, 8))
+def test_window_settings_refuses_a_grid_that_is_neither_three_axes_nor_two():
+    for grid in ((8,), (8, 8, 8, 8), (8, 0, 8)):
+        with pytest.raises(ValueError, match="grid"):
+            _window(grid=grid)
+    # two axes: the grid of runs projected to two dimensions (test_train_projection.py)
+    assert _window(grid=(8, 8)).grid == (8, 8)
 
 
 # ---------------------------------------------------------------------------

@@ -275,9 +275,27 @@ def lightning_hparams_rung_kwargs(
     return out
 
 
+def lightning_hparams_grid_ndim(state_dict: Mapping[str, torch.Tensor]) -> int:
+    """The spatial axes a Lightning-hparams checkpoint was saved on: its ``ops.NX`` buffer's rank when saved
+    (``(Gx, 1, 1)``), and 3 when not, since the layout predates two-dimensional models."""
+    for key in ("model.ops.NX", "ops.NX"):
+        if key in state_dict:
+            return int(state_dict[key].dim())
+    return 3
+
+
 def load_lightning_hparams_into(model, state_dict: Dict[str, torch.Tensor]):
     """Load a Lightning-hparams checkpoint into a built rung 3, derived buffers from the model,
-    ``strict=True``; returns the model."""
+    ``strict=True``; returns the model. The derived buffers are dropped, so the checkpoint's number of
+    spatial axes is compared with the model's first: a three-dimensional checkpoint is refused by a
+    two-dimensional model, and the other way round."""
+    saved_ndim = lightning_hparams_grid_ndim(state_dict)
+    model_ndim = int(getattr(getattr(model, "ops", None), "ndim", 3))
+    if saved_ndim != model_ndim:
+        raise ValueError(
+            f"the checkpoint was saved on a {saved_ndim}-axis grid and the model is built on a "
+            f"{model_ndim}-axis one; its weights would load (only the derived grid buffers differ, "
+            f"and those are rebuilt from the model) into a model of another dimension")
     incoming = lightning_hparams_model_state_dict(state_dict)
     current = model.state_dict()
     unexpected = sorted(set(incoming) - set(current))
@@ -340,7 +358,13 @@ def kmodes_model_state_dict(saved: Mapping[str, Any]) -> Dict[str, torch.Tensor]
 
 def load_kmodes_into(model, saved: Mapping[str, Any]):
     """Load a k-modes checkpoint into a built one-field rung (2 or 3), derived buffers from the model,
-    ``strict=True``."""
+    ``strict=True``. The layout is three-dimensional only; a two-dimensional model refuses it."""
+    model_ndim = int(getattr(getattr(model, "ops", None), "ndim", 3))
+    if model_ndim != 3:
+        raise ValueError(
+            f"a k-modes checkpoint was saved on a three-axis grid and the model is built on a "
+            f"{model_ndim}-axis one; its derived grid buffers are dropped, so the weights would "
+            f"load into a model of another dimension")
     incoming = kmodes_model_state_dict(saved)
     current = model.state_dict()
     unexpected = sorted(set(incoming) - set(current))

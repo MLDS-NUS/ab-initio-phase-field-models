@@ -300,17 +300,38 @@ FUNCTIONAL_FORMS = ("landau", "square_gradient", "nonlocal_kernel",
                     "neural_operator")
 
 
+#: What a factory functional's ``kwargs`` must carry: the drivers read them off the declaration.
+FACTORY_KWARGS = ("grid", "nyquist_mask")
+
+
 @dataclass(frozen=True)
 class Functional:
     """Which free-energy functional a system trains: ``form`` (one of ``FUNCTIONAL_FORMS``), ``local``,
-    ``kernel`` (required for ``nonlocal_kernel``, refused otherwise) and the published model's ``kwargs``."""
+    ``kernel`` (required for ``nonlocal_kernel``, refused otherwise) and the published model's ``kwargs``.
+    ``factory``: a callable ``factory(system, **overrides)`` returning the model, for a model this
+    package does not define; ``form``, ``local`` and ``kernel`` are then names only, unchecked, and
+    ``kwargs`` carries :data:`FACTORY_KWARGS`. Left out of ``repr`` and equality."""
 
     form: str
     local: str
     kernel: str | None
     kwargs: Mapping[str, Any]
+    factory: Callable[..., Any] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.factory is not None:
+            if not callable(self.factory):
+                raise TypeError(
+                    f"Functional.factory is a {type(self.factory).__name__}, not a "
+                    f"callable taking the system and returning the model")
+            missing = [k for k in FACTORY_KWARGS if k not in self.kwargs]
+            if missing:
+                raise ValueError(
+                    f"a factory functional declares {missing} in kwargs too: training "
+                    f"and the rollouts read the grid and the Nyquist convention off "
+                    f"the declaration, not off the model")
+            object.__setattr__(self, "kwargs", _frozen_mapping(self.kwargs))
+            return
         if self.form not in FUNCTIONAL_FORMS:
             raise ValueError(
                 f"unknown functional form {self.form!r}; one of "
@@ -341,15 +362,20 @@ class Mobility:
 @dataclass(frozen=True)
 class Variant:
     """A second model of one system: its own ``functional``, ``mobility`` and ``checkpoint``, and the entries of
-    the system's ``defaults`` it replaces (``defaults``, top-level keys); constants, paths and data are shared."""
+    the system's ``defaults`` it replaces (``defaults``, top-level keys); constants, paths and data are shared.
+    ``mobility`` is ``None`` only beside a functional built by a factory, whose model carries its own."""
 
     functional: Functional
-    mobility: Mobility
+    mobility: Mobility | None
     checkpoint: Checkpoint | None
     defaults: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         for name, kind in (("functional", Functional), ("mobility", Mobility)):
+            if (name == "mobility" and self.mobility is None
+                    and isinstance(self.functional, Functional)
+                    and self.functional.factory is not None):
+                continue
             if not isinstance(getattr(self, name), kind):
                 raise TypeError(f"Variant.{name} is a {type(getattr(self, name)).__name__}, "
                                 f"not a {kind.__name__}")

@@ -16,7 +16,7 @@ and filtered by `exp(-k^2 sigma^2 / 2)` with `defaults["sigma"]`.
 
 | argument | meaning |
 |---|---|
-| `ckpt` | `"published"` (the system's checkpoint, digest-checked) or a path |
+| `ckpt` | `"published"` (the system's checkpoint, digest-checked) or a path; a file `aipf train` wrote (tagged `config_schema`) loads from its `model_state_dict` |
 | `run` | the archived run's directory under the driver's `modes_tree` |
 | `seeds` | one noisy rollout per seed; empty: one deterministic rollout |
 | `t_end`, `dt`, `save_ps` | the simulated time, the step and the saving interval, in ps |
@@ -62,7 +62,12 @@ amplitude `kB T`; the density edges from `System.trust_domain`. A system that de
 
     rho^{n+1} = A^-1 (rho^n + dt F(rho^n) + dt k^2 M_s H rho^n + dt n_hat)
 
-then the Nyquist modes are made Hermitian and the state is projected. The conserved noise is
+then the Nyquist modes are made Hermitian and the state is projected. A model with a
+`stabilizer_mobility(rho, T)` method sets `M_s` itself: it is called once, on the real-space field at
+`t = 0` `(1, n, Gx, Gy, Gz)`, unclamped, and `T` `(1,)`, and its `(n, n)` return is refused unless finite,
+symmetric and positive semi-definite to a relative `1e-6`. `m_stab` is then left undeclared, and a
+declared one is refused, so the drivers that pass the system's `Noise.m_stab` refuse such a model.
+`aipf.rollout.imex` logs which of the three set `M_s`: the hook at `INFO`, `mean` and `max` at `DEBUG`. The conserved noise is
 `n_hat = G(k) i k . zeta_hat`, `zeta = noise_scale sqrt(2 kB T / (dV dt)) L w`, `L L^T = M`, `w`
 standard normal per cell, direction and channel, with
 `G(k) = exp(-k^2 sigma^2 / 2)` (`gaussian`) or 1 (`none`). It reads the model's `kernel.w_hat` and
@@ -78,6 +83,13 @@ standard normal per cell, direction and channel, with
 | `domain` | the system's trust trapezoid | a `TrustDomain` and `lo > 0` for the mass restore |
 
 The semi-implicit scheme above takes `floor` and `domain` only.
+
+Both schemes run a two-dimensional model (`model.ops.ndim == 2`): `rho_hat` `(1, n, Gx, Gy//2+1)` in a
+box `(2,)` for the semi-implicit one, `(B, 2)` boxes for the explicit ones, `kbt_field` `(Gx, Gy)`,
+`v_ext` `(n, Gx, Gy)`, the noise drawn `(B, n, 2, Gx, Gy)` and `stabilizer_mobility` handed
+`(1, n, Gx, Gy)`. Under noise the call declares `depth`, the cell's extent along the averaged axis
+(`dV = dA * depth`; 1.0 for areal densities, `Lz` for volumetric ones), and a three-dimensional call
+declares none. See [functional.md](functional.md#two-dimensions).
 
 ## Outputs
 

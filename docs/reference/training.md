@@ -9,12 +9,14 @@ block it belongs in.
     fit(system, *, run_name, sources, seed, resume_optimizer, steps=None, epochs=None,
         window=None, weighting=None, config_overrides=None, split_mode=None, loader_order=None,
         init_from=None, anchors=None, root=None, log_every_step=False, device="auto",
-        deterministic=False) -> Path
+        deterministic=False, projection=None) -> Path
 
 `sources` are `SourceSpec` rows (`aipf.train.fit._specs_from(system, table, names)` builds them from
 the command line's table). `anchors=None` loads the declared tables, `aipf.train.NO_ANCHORS` trains the
 drift term alone. `None` for `window`, `weighting`, `split_mode` and `loader_order` means the
-declaration answers. Exactly one of `steps` and `epochs`.
+declaration answers. Exactly one of `steps` and `epochs`. `projection` trains a two-dimensional model
+on the `k_z = 0` plane of the archives ([Two dimensions](#two-dimensions)); `None` is the
+three-dimensional run it always was.
 
 ## The run directory
 
@@ -24,7 +26,7 @@ declaration answers. Exactly one of `steps` and `epochs`.
 |---|---|
 | `final.ckpt` | the Lightning checkpoint after the last step |
 | `hparams.yaml` | every `TrainConfig` field of the run; a `warnings` entry lists declared weights that had no data |
-| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape |
+| `MANIFEST.json` | system, run, seed, length, `global_step`, `final_md5`, the starting checkpoint, the sources, `terms_trained`, `declared_weights_without_data`, device, determinism, the split and order walked, the anchor rows and the sha256 of every table read, the penalty provenance, the kernel hinge's shape; `model_factory` for a functional built by a factory; `projection`, `projection_Lz_ref` and `projection_depth` for a two-dimensional run |
 | `steps.json` | with `--log-every-step`: `{"loss": [...], "terms": [...]}` per step, written after the first step, every 50 steps, at the end and on failure |
 | `UNTRAINED_TERMS.txt` | only when a term carries a non-zero weight and no data fed it |
 | `job.pbs`, `job.log` | with `--pbs` |
@@ -184,6 +186,60 @@ checkpoint records none and is refused, so start from one with `no`. The publish
 local net's linear skip `g_net.w2.weight` frozen, so its one group has 15 tensors against 16 here.
 A fresh run is built
 under the model stream of `--seed`, and does not reproduce a published run's own initialisation.
+
+## Two dimensions
+
+A two-dimensional model (a factory model declared on a two-axis `grid`, [functional.md](functional.md#two-dimensions))
+trains on three-dimensional archives through a projection: `fit(..., projection=...)`,
+`aipf train --projection`. The archives stay as they are written; every run is read, then cut to its
+`k_z = 0` plane by `aipf.train.projection.project_kz0` before it is split, weighted and windowed.
+
+| `projection` | `rho_hat` of a window | `depth` |
+|---|---|---|
+| `None` | `rho_k / V` (three dimensions, as always) | none |
+| `"kz0-volumetric"` | `rho_k / V_ref`: the z mean of the 3D density, per unit volume | `Lz_ref` |
+| `"kz0-areal"` | `rho_k / (Lx_ref Ly_ref) = Lz_ref rho_k / V_ref`: the density integrated along z, per unit area | `1.0` |
+
+The window's measure is `Lx_ref Ly_ref * depth`, the reference cell's ([data.md](data.md#the-k_z--0-projection)).
+Every source grid is then `(Gx, Gy)`; the labels with `n_z == 0` are scattered onto the half spectrum
+`(Gx, Gy//2+1)` with `n_y >= 0`, the rule the 3D scatter applies to `n_z`. The window boxes, `k`, the
+band mask, the sigma filter and the run weights are read in the cell's `(Lx, Ly)`. The `LitModule`
+reads the number of axes from its operator set (`ops.ndim`), never from a batch's shape.
+
+A two-dimensional model trains the drift term alone. Refused before the run directory exists, as
+`aipf.train.fit.DimensionMismatch` (exit 2 from `aipf train`):
+
+- a projection for a model built on a three-axis grid, and a two-axis model without one;
+- a source grid of another number of axes than the model's;
+- the anchor tables (a declared `tables` entry under `anchors=None`, or an `AnchorTables`): pass
+  `anchors=NO_ANCHORS`, `--anchors none`;
+- `L_conv` or `L_Gamma` that the declaration would train, and a non-zero `lambda_W`.
+
+- an archive the projection would read that records no reference cell: the projection needs one
+  `Lz` for every frame, which the frames of an NPT run, each in its own box, do not share. Write the
+  archive with `modes_from_dump(reference_box=...)` (a stated cell or `"first_frame"`);
+- archives whose reference cells differ in `Lz`: a trained 2D model has one `depth`, and its areal
+  densities are per unit area of one slab thickness. State one cell for every run of every source.
+
+These are read off each archive's index and its `reference_box` alone.
+`aipf.train.fit.check_dimensions(system, sources, projection=..., anchors=...)` makes the same
+refusals without training (it builds the model); `aipf train --pbs` makes them before it submits,
+with `--projection` or for a system whose functional declares a two-axis grid. A three-dimensional
+`fit` whose source grids are not all three-axis is refused the same way (it would fail when its
+sources are read).
+
+A noisy rollout of the trained model declares `depth` ([functional.md](functional.md#two-dimensions)),
+the same number the window was divided by. The run's `MANIFEST.json` records it beside the projection
+(`projection`, `projection_Lz_ref`, `projection_depth`: `1.0` areal, `Lz_ref` volumetric), and
+`aipf.train.projection_depth(archive_run_dir, areal=...)` reads it off an archive's run directory.
+With another `depth` the noise is off by that ratio in variance.
+
+The trained model is an effective one. The `k_z = 0` plane of a 3D trajectory is not a closed
+dynamics: the nonlinear terms of the 3D dynamics couple the `k_z != 0` modes into it, so the drift the
+2D model fits is the measured drift of the z mean, closure error included, and its parameters (the
+2D `W(r)` among them) are not those of a 3D model. For a z-invariant 3D field the plane is closed, and
+`tests/unit/test_train_projection.py` recovers the mobility and `kappa` of a known 2D model from such
+data.
 
 ## Devices and determinism
 

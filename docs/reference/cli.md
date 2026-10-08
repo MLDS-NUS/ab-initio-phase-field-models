@@ -137,7 +137,8 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
                --source NAME=SUBDIR:PATTERN:GX,GY,GZ [--source ...] | --source declared | --source sample
                --resume-optimizer {yes,no} --anchors {declared,none}
                [--variant NAME] [--init-from-published] [--log-every-step]
-               [--device {auto,cpu,cuda}] [--deterministic] [--pbs] [--walltime-h H] [--dry-run]
+               [--device {auto,cpu,cuda}] [--deterministic] [--projection {kz0-volumetric,kz0-areal}]
+               [--pbs] [--walltime-h H] [--dry-run]
 
 | flag | meaning |
 |---|---|
@@ -152,12 +153,14 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 | `--log-every-step` | also write `steps.json`, the loss per step |
 | `--device` | `auto` (cuda when torch sees a GPU), `cpu` or `cuda`; `cuda` without a GPU is refused before the run directory exists |
 | `--deterministic` | ask torch for deterministic kernels for this run |
+| `--projection` | train a two-dimensional model (a factory model on a two-axis grid) on the `k_z = 0` plane of the archives: `kz0-volumetric` divides by `V_ref`, `kz0-areal` by `Lx_ref Ly_ref` ([training.md](training.md#two-dimensions)). Every `--source` grid is then `GX,GY` (accepted only with `--projection`; without it a two-length grid is the parse error it always was), `--anchors none` is required, and the archives must record one reference cell. Off by default |
 | `--pbs`, `--walltime-h`, `--dry-run` | as `aipf md run`; the job file is `job.pbs` in the run directory, and `--dry-run` needs `--pbs` |
 
 Before anything is written the command refuses a source whose glob selects no run directory (after
 its exclusions), `--resume-optimizer yes` without `--init-from-published` or with a saved optimizer
-whose parameter groups do not fit this model's, and a published checkpoint it cannot find or whose
-digest differs. Prints the run directory. See
+whose parameter groups do not fit this model's, a published checkpoint it cannot find or whose
+digest differs, a `GX,GY` grid without `--projection` and a three-length one with it, `--projection`
+with `--anchors declared`, and a model whose number of axes the projection or the grids contradict. Prints the run directory. See
 [training.md](training.md).
 
 ## aipf diagnose

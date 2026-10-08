@@ -3,9 +3,12 @@
 and ``Mobility``. ``kB`` is required: ``FLocal`` takes ``kB * T``, ``Mobility`` takes the literal ``T``.
 Construction order (FLocal, kernel, mobility, T-basis heads last) fixes the RNG stream.
 ``kernel_argument``: ``"density"`` convolves ``W`` with ``rho``; ``"difference"`` with ``rho - rho_ref``,
-so the pair term is ``(1/2) (rho - rho_ref)^T (W * (rho - rho_ref))`` (the drift is the same)."""
+so the pair term is ``(1/2) (rho - rho_ref)^T (W * (rho - rho_ref))`` (the drift is the same).
+A two-axis ``grid`` builds the two-dimensional functional: :class:`aipf.spectral.SpectralOps2D`, ``(B, 2)``
+boxes and the Hankel transform of the same radial ``W`` (``AnalyticRadialTransform(dim=2)``)."""
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence, Tuple, Union
 
 import torch
@@ -23,7 +26,8 @@ from .kernels import (
 )
 from .local_forms import FLocal
 from aipf.mobility import Mobility
-from aipf.spectral import OpsCache
+from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, DC, FLUX_EINSUM,
+                           MATRIX_SECOND, OpsCache, k_squared)
 
 __all__ = ["NonlocalKernel", "KERNEL_ARGUMENTS"]
 
@@ -110,8 +114,26 @@ class NonlocalKernel(nn.Module):
                 "net's number of hidden layers is part of the model, and a "
                 "checkpoint of another depth does not load into it")
 
-        Gx, Gy, Gz = grid
-        self.grid = (int(Gx), int(Gy), int(Gz))
+        if len(grid) == 2:
+            if kernel_evaluator == "lattice_sum":
+                raise NotImplementedError(
+                    "kernel_evaluator='lattice_sum' is three-dimensional only; a two-dimensional "
+                    "nonlocal_kernel takes the Hankel transform (kernel_evaluator=None)")
+            if kernel_evaluator is not None and getattr(kernel_evaluator, "dim", 3) != 2:
+                raise ValueError(
+                    f"grid {tuple(grid)} is two-dimensional and the kernel_evaluator "
+                    f"{type(kernel_evaluator).__name__} does not declare dim=2; a three-"
+                    f"dimensional transform of W would be read as a two-dimensional one")
+            Gx, Gy = grid
+            self.grid = (int(Gx), int(Gy))
+        else:
+            if kernel_evaluator is not None and getattr(kernel_evaluator, "dim", 3) != 3:
+                raise ValueError(
+                    f"grid {tuple(grid)} is three-dimensional and the kernel_evaluator "
+                    f"{type(kernel_evaluator).__name__} declares dim={kernel_evaluator.dim!r}; a "
+                    f"two-dimensional transform of W would be read as a three-dimensional one")
+            Gx, Gy, Gz = grid
+            self.grid = (int(Gx), int(Gy), int(Gz))
         self.n_species = int(n_species)
         self.kB = float(kB)
 
@@ -148,7 +170,8 @@ class NonlocalKernel(nn.Module):
             evaluator = kernel_evaluator
         else:
             evaluator = AnalyticRadialTransform(
-                R_cut, kernel_n_quad, kernel_n_k_table, kernel_k_table_max)
+                R_cut, kernel_n_quad, kernel_n_k_table, kernel_k_table_max,
+                **({"dim": 2} if len(self.grid) == 2 else {}))
         self.kernel = PairKernel(radial_set, evaluator, n_quad=kernel_n_quad)
         self.kernel_argument = kernel_argument
         # Non-persistent: what the kernel convolves is declared, never read from a state dict.
@@ -174,29 +197,29 @@ class NonlocalKernel(nn.Module):
 
     def _ops_for_real(self, rho: torch.Tensor):
         """The ops for a real-space tensor's own grid, looked up by the full grid."""
-        return self._cache.ops_for_grid(rho.shape[-3:], rho.device)
+        return self._cache.ops_for_grid(rho.shape[-self._cache.ndim:], rho.device)
 
     def _flatten_channel_last(self, x: torch.Tensor) -> torch.Tensor:
         """``(B, n_species, Gx, Gy, Gz)`` -> ``(B*Gx*Gy*Gz, n_species)``, permute before reshape."""
-        return x.permute(0, 2, 3, 4, 1).reshape(-1, self.n_species)
+        return x.permute(*CHANNEL_LAST[self._cache.ndim]).reshape(-1, self.n_species)
 
     def _unflatten_channel_second(self, flat: torch.Tensor, batch: int,
                                    grid: Tuple[int, int, int]) -> torch.Tensor:
         """Inverse of :meth:`_flatten_channel_last` on the caller's ``grid``."""
-        Gx, Gy, Gz = (int(g) for g in grid)
+        axes = tuple(int(g) for g in grid)
         n = flat.shape[-1]
-        return flat.view(batch, Gx, Gy, Gz, n).permute(0, 4, 1, 2, 3)
+        return flat.view(batch, *axes, n).permute(*CHANNEL_SECOND[self._cache.ndim])
 
     def _broadcast_scalar(self, value: torch.Tensor, batch: int,
                            grid: Tuple[int, int, int]) -> torch.Tensor:
         """``(B,)`` -> ``(B*Gx*Gy*Gz,)``, one copy per grid point."""
-        return value.view(batch, 1, 1, 1).expand(batch, *grid).reshape(-1)
+        return value.view(batch, *(1,) * len(grid)).expand(batch, *grid).reshape(-1)
 
     def bulk_free_energy_density(self, rho: torch.Tensor,
                                   T: torch.Tensor) -> torch.Tensor:
         """``f_loc(rho, kBT)``, pointwise, real space; no kernel term."""
         B = rho.shape[0]
-        grid = rho.shape[-3:]
+        grid = rho.shape[-self._cache.ndim:]
         kBT = self.kB * T
         rho_flat = self._flatten_channel_last(rho)
         kBT_flat = self._broadcast_scalar(kBT, B, grid)
@@ -206,13 +229,12 @@ class NonlocalKernel(nn.Module):
     def mobility(self, rho: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
         """``M(rho, T)``, ``(B, n_species, n_species, Gx, Gy, Gz)``, from the literal ``T``."""
         B = rho.shape[0]
-        grid = rho.shape[-3:]
+        grid = rho.shape[-self._cache.ndim:]
         rho_flat = self._flatten_channel_last(rho)
         T_flat = self._broadcast_scalar(T, B, grid)
         M_flat = self._mobility(rho_flat, T_flat)                # (-1, n, n)
-        Gx, Gy, Gz = grid
         n = self.n_species
-        M = M_flat.view(B, Gx, Gy, Gz, n, n).permute(0, 4, 5, 1, 2, 3)
+        M = M_flat.view(B, *grid, n, n).permute(*MATRIX_SECOND[self._cache.ndim])
         return M
 
     def _mu_hat(self, rho: torch.Tensor, boxes: torch.Tensor,
@@ -220,7 +242,8 @@ class NonlocalKernel(nn.Module):
                 rho_hat: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``mu_hat`` in k-space at mode scale; the kernel term uses the caller's ``rho_hat`` when given."""
         ops = self._ops_for_real(rho)
-        N = ops.grid[0] * ops.grid[1] * ops.grid[2]
+        ndim = self._cache.ndim
+        N = math.prod(ops.grid)
         B = rho.shape[0]
         grid = ops.grid
         kBT = self.kB * T
@@ -232,8 +255,7 @@ class NonlocalKernel(nn.Module):
         mu = self._unflatten_channel_second(mu_flat, B, grid)
 
         # the kernel term, in k-space: mu_hat += einsum(W_hat(|k|), rho_hat).
-        kx, ky, kz = ops.k_axes(boxes)
-        kmag = torch.sqrt(kx * kx + ky * ky + kz * kz)[:, 0]      # (B,Gx,Gy,Gzr)
+        kmag = torch.sqrt(k_squared(ops.k_axes(boxes)))[:, 0]     # (B,Gx,Gy,Gzr)
         Wm = self.kernel.w_hat(kmag, grid=grid, boxes=boxes)      # (B,Gx,Gy,Gzr,n,n)
 
         mu_hat = ops.rfft(mu) / N
@@ -241,11 +263,11 @@ class NonlocalKernel(nn.Module):
             rho_hat = ops.rfft(self.kernel_offset(rho)) / N       # same "mode" scale as mu_hat
         elif self.kernel_centre is not None:
             rho_hat = rho_hat.clone()                             # the centre sits in the k = 0 mode
-            rho_hat[..., 0, 0, 0] -= self.kernel_centre.to(rho_hat.real.dtype).view(1, -1)
-        rho_hat_last = rho_hat.permute(0, 2, 3, 4, 1)             # (B,Gx,Gy,Gzr,n)
+            rho_hat[DC[ndim]] -= self.kernel_centre.to(rho_hat.real.dtype).view(1, -1)
+        rho_hat_last = rho_hat.permute(*CHANNEL_LAST[ndim])       # (B,Gx,Gy,Gzr,n)
         kernel_term = torch.einsum("b...ij,b...j->b...i",
                                     Wm.to(rho_hat_last.dtype), rho_hat_last)
-        return mu_hat + kernel_term.permute(0, 4, 1, 2, 3)        # (B,n,Gx,Gy,Gzr)
+        return mu_hat + kernel_term.permute(*CHANNEL_SECOND[ndim])  # (B,n,Gx,Gy,Gzr)
 
     def kernel_offset(self, rho: torch.Tensor) -> torch.Tensor:
         """What the kernel convolves: ``rho`` (channel axis 1), minus ``rho_ref`` under ``"difference"``."""
@@ -273,36 +295,33 @@ class NonlocalKernel(nn.Module):
                             T: torch.Tensor) -> torch.Tensor:
         """``mu = d(f_loc)/d(rho) + W_hat(|k|) @ rho_hat``, real space in and out."""
         ops = self._ops_for_real(rho)
-        N = ops.grid[0] * ops.grid[1] * ops.grid[2]
+        N = math.prod(ops.grid)
         return ops.irfft(self._mu_hat(rho, boxes, T) * N)
 
     def forward(self, rho_hat: torch.Tensor, boxes: torch.Tensor,
                 T: torch.Tensor) -> torch.Tensor:
         """The Model B right-hand side ``+div(M grad mu)``, k-space in and out."""
         ops = self._cache.ops_for(rho_hat.shape, rho_hat.device)
-        N = ops.grid[0] * ops.grid[1] * ops.grid[2]
+        ndim = self._cache.ndim
+        N = math.prod(ops.grid)
         rho = ops.irfft(rho_hat * N)
         M = self.mobility(rho, T)                                 # (B,n,n,Gx,Gy,Gz)
 
-        kx, ky, kz = ops.k_axes(boxes)
+        ks = ops.k_axes(boxes)
         # k-space fast path unless `chemical_potential` has been overridden.
         if self._chemical_potential_is_overridden():
             mu_hat = ops.rfft(self.chemical_potential(rho, boxes, T)) / N
         else:
             mu_hat = self._mu_hat(rho, boxes, T, rho_hat=rho_hat)
-        gx, gy, gz = ops.grad_hat(mu_hat * N, kx, ky, kz)
+        grads = ops.grad_hat(mu_hat * N, *ks)
         grad_mu = torch.stack(
-            [ops.irfft(gx), ops.irfft(gy), ops.irfft(gz)], dim=2)  # (B,n,3,Gx,Gy,Gz)
+            [ops.irfft(g) for g in grads], dim=2)                 # (B,n,3,Gx,Gy,Gz)
 
         # d(rho)/dt = -div(J), J = -M grad(mu): hence +div(M grad(mu)).
-        Jx = torch.einsum("bijxyz,bjxyz->bixyz", M, grad_mu[:, :, 0])
-        Jy = torch.einsum("bijxyz,bjxyz->bixyz", M, grad_mu[:, :, 1])
-        Jz = torch.einsum("bijxyz,bjxyz->bixyz", M, grad_mu[:, :, 2])
-
-        Jx_hat = ops.rfft(Jx) / N
-        Jy_hat = ops.rfft(Jy) / N
-        Jz_hat = ops.rfft(Jz) / N
-        return ops.div_hat(Jx_hat, Jy_hat, Jz_hat, kx, ky, kz)
+        J = [torch.einsum(FLUX_EINSUM[ndim], M, grad_mu[:, :, d])
+             for d in range(ndim)]
+        J_hat = [ops.rfft(j) / N for j in J]
+        return ops.div_hat(*J_hat, *ks)
 
 
 #: The unoverridden real-space seam, captured at import.

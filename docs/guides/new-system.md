@@ -145,6 +145,10 @@ The same table is in [../reference/system.md](../reference/system.md#what-reads-
   forms).
 - A new functional is a class with the `FreeEnergyModel` methods (`base.py`), registered, plus a
   translation in `build.py` ([../reference/functional.md](../reference/functional.md#adding-a-functional)).
+- A model defined in another package is declared with `Functional(..., factory=make_model)`, and
+  `build` calls `make_model(system)`. Import the factory from that package in `system.py`; the
+  contract it meets is in
+  [../reference/functional.md](../reference/functional.md#a-model-defined-elsewhere).
 
 ## Publishing a model
 

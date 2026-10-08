@@ -21,6 +21,7 @@ import torch
 
 from aipf.losses.extras import l_w
 from aipf.losses.names import WEIGHT_MAP_A
+from aipf.spectral import model_ndim, refuse_two_dimensions
 
 from .config import TrainConfig
 
@@ -94,7 +95,9 @@ class KernelHinge:
 
     @staticmethod
     def check(model) -> None:
-        """Refuse a model the hinge cannot read: no pair kernel, or one whose ``W_hat`` needs a grid."""
+        """Refuse a model the hinge cannot read: no pair kernel, or one whose ``W_hat`` needs a grid.
+        A two-dimensional model is refused too."""
+        refuse_two_dimensions(model_ndim(model), "the kernel hinge (lambda_W)")
         kernel = getattr(model, "kernel", None)
         if kernel is None or not callable(getattr(kernel, "w_hat", None)):
             raise NotImplementedError(
@@ -107,6 +110,7 @@ class KernelHinge:
 
     def loss(self, model) -> torch.Tensor:
         """``l_w(W_hat(k) - W_hat(0), k)`` in the model's dtype and on its device, with a graph."""
+        refuse_two_dimensions(model_ndim(model), "the kernel hinge (lambda_W)")
         p = next(model.parameters())
         k = self.wavenumbers(dtype=p.dtype, device=p.device)
         W = model.kernel.w_hat(torch.cat([k.new_zeros(1), k]))      # (n_k + 1, n, n)

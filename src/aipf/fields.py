@@ -11,13 +11,23 @@ import torch
 @dataclass
 class Field:
     """``rho_hat`` ``(B, n_species, Gx, Gy, Gzr)`` complex half-spectrum (``rfft`` / mode count),
-    ``boxes`` ``(B, 3)`` per sample, ``grid`` ``(Gx, Gy, Gz)`` with ``Gzr = Gz // 2 + 1`` checked."""
+    ``boxes`` ``(B, 3)`` per sample, ``grid`` ``(Gx, Gy, Gz)`` with ``Gzr = Gz // 2 + 1`` checked.
+    A two-axis ``grid`` ``(Gx, Gy)`` declares a two-dimensional field: ``rho_hat``
+    ``(B, n_species, Gx, Gyr)``, ``Gyr = Gy // 2 + 1``, and ``boxes`` ``(B, 2)``."""
 
     rho_hat: torch.Tensor
     boxes: torch.Tensor
     grid: Tuple[int, int, int]
 
+    @property
+    def ndim(self) -> int:
+        """The spatial axes, as the grid declares them."""
+        return len(self.grid)
+
     def __post_init__(self) -> None:
+        if len(self.grid) == 2:
+            self._check_two_dimensions()
+            return
         if self.rho_hat.dim() != 5:
             raise ValueError(
                 "rho_hat must be (B, n_species, Gx, Gy, Gzr); got shape "
@@ -36,6 +46,30 @@ class Field:
         if self.boxes.dim() != 2 or self.boxes.shape[1] != 3:
             raise ValueError(
                 f"boxes must be (B, 3); got shape {tuple(self.boxes.shape)}")
+        if self.boxes.shape[0] != self.rho_hat.shape[0]:
+            raise ValueError(
+                f"boxes batch {self.boxes.shape[0]} does not match "
+                f"rho_hat's batch {self.rho_hat.shape[0]}")
+
+    def _check_two_dimensions(self) -> None:
+        if self.rho_hat.dim() != 4:
+            raise ValueError(
+                "a two-dimensional rho_hat must be (B, n_species, Gx, Gyr); got shape "
+                f"{tuple(self.rho_hat.shape)}")
+        if not self.rho_hat.is_complex():
+            raise ValueError(
+                "rho_hat must be the complex half-spectrum SpectralOps2D.rfft "
+                f"produces; got dtype {self.rho_hat.dtype}")
+        Gx, Gy = self.grid
+        want = (int(Gx), Gy // 2 + 1)
+        have = tuple(self.rho_hat.shape[-2:])
+        if have != want:
+            raise ValueError(
+                f"grid {self.grid} implies rfft trailing shape {want}, but "
+                f"rho_hat's trailing shape is {have}")
+        if self.boxes.dim() != 2 or self.boxes.shape[1] != 2:
+            raise ValueError(
+                f"two-dimensional boxes must be (B, 2); got shape {tuple(self.boxes.shape)}")
         if self.boxes.shape[0] != self.rho_hat.shape[0]:
             raise ValueError(
                 f"boxes batch {self.boxes.shape[0]} does not match "

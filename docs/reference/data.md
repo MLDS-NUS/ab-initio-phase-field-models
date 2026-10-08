@@ -103,9 +103,11 @@ tiers. `index.index_fields(system)` lists the trees under `<raw>/fields/` with t
 ## Modes
 
 A mode archive holds, for every frame, the Fourier sums of each channel's atoms over the
-wavevectors `k = 2 pi n / L` with `|k| <= k_cut`, `n` integer, on the time-mean box of the run.
+wavevectors `k = 2 pi n / L` with `|k| <= k_cut`, `n` integer, on the time-mean box of the run
+(the default reference cell; see [The reference cell](#the-reference-cell)).
 
-    aipf.pipeline.modes.modes(system, tag, *, sigma, k_cut, ordering="lexicographic", route="dense")
+    aipf.pipeline.modes.modes(system, tag, *, sigma, k_cut, ordering="lexicographic", route="dense",
+                              reference_box="time_mean")
 
 `aipf modes` calls it. `tag` is a run tag or `farm_dir` of the manifest. It writes
 `<data>/<system>/modes/<farm_dir>/modes.npz` and `provenance.json`, the layout an archive keeps,
@@ -122,14 +124,16 @@ refused), `T` and the frame interval come from the metadata.
 | `k_cut` | the mode cutoff, in the reciprocal length unit |
 | `ordering` | `lexicographic` (the enclosing cube, first axis slowest) or `shell` (ascending wavenumber) |
 | `route` | `dense` (the whole phase matrix, on a GPU when one is visible) or `separable` (per-axis factors, on the CPU) |
+| `reference_box` | the cell the labels are chosen on, as `modes_from_dump` |
 
     aipf.pipeline.modes.modes_from_dump(dump, *, sigma, k_cut, atom_types, fields, ordering, route,
                                         T, dt_frame, skip_frames, composition=None,
-                                        cache_dir=None, entry_dir=None) -> ModesRecord
+                                        cache_dir=None, entry_dir=None,
+                                        reference_box="time_mean") -> ModesRecord
 
 | parameter | meaning |
 |---|---|
-| `dump` | the trajectory, a LAMMPS text dump |
+| `dump` | the trajectory, a LAMMPS text dump; or a list of dumps, a restart chain (below) |
 | `sigma`, `k_cut`, `ordering`, `route` | as `modes` |
 | `atom_types` | the dump types summed, one per column before combination |
 | `fields` | `"per_type"`, or the combinations `check_fields` returns |
@@ -139,10 +143,93 @@ refused), `T` and the frame interval come from the metadata.
 | `composition` | label scalars stored beside the modes, or `None` |
 | `cache_dir` | keep one entry per provenance, under a key |
 | `entry_dir` | keep exactly this directory, replaced when the provenance differs |
+| `reference_box` | `"time_mean"` (default), `"first_frame"`, or a stated cell `(Lx, Ly, Lz)` of positive finite lengths |
 
 With neither `cache_dir` nor `entry_dir` nothing is written; both is refused. The provenance is
 every input, the dump's sha256 included: the same inputs read the stored file back, other inputs (a
 new `k_cut`, a rewritten dump) recompute and replace it.
+
+### The reference cell
+
+The amplitudes are sums in each frame's own scaled coordinates, `s = (r - lo) / L(t)`, so an affine
+change of the box leaves them as they are. What the reference cell decides is the label set
+(`|2 pi n / L_ref| <= k_cut`), every `k` and the volume a density is divided by.
+
+- `"time_mean"`, the default: the labels are chosen on the mean box of the kept frames, and a reader
+  divides each window by the volume of its own mean box. The identity, the archive and every reader
+  are what they were before the option existed.
+- `"first_frame"`: the labels are chosen on the first kept frame's box. It and `"time_mean"` give mode
+  sets of different size on a barostatted run.
+- `(Lx, Ly, Lz)`: a stated cell, stored exactly (float64, no rounding).
+
+Any rule but the default is recorded in the identity (the name, or the three floats exactly) and in
+`provenance.json`, and the archive gains the key `reference_box`, the cell `(3,)` float64; `box` stays
+each frame's own edges. A declared `mean` is then `mean * V_ref`. A reader that finds the key reads the
+run in the cell: the window box and volume, `k`, the band of `band_keep`, the run weight, and the
+rollouts' boxes, volumes and sigma filter (`spinodal.read_run`, which the slab shares) are the cell's.
+`modes.recorded_reference(directory)` gives `pipeline.anchors.run_mobility` the cell an archive
+records, or `"time_mean"` for one without the key. An archive without the key reads exactly as before.
+
+In the cell, the `k = 0` density `N / V_ref` is constant over a run whose box shrinks under the
+barostat; in the frames' own boxes it follows the volume, which conserved dynamics cannot reproduce.
+Seeds averaged together need identical labels, and a time-mean or first-frame box differs a little
+from seed to seed, so the labels can too: state one cell for all of them.
+
+### Restart chains
+
+A list of dumps is read as one timeline, file by file in the order given
+(`coarse_grain.read_dump_chain`). The rules:
+
+- **Order.** Every file's first complete frame is read before any other frame. A file that starts below the one
+  before it raises, naming both: the list is out of order (a sorted glob puts `chunk_10` before
+  `chunk_2`).
+- **Overlap: the last writer wins.** A file whose first complete frame is at step `S` replaces every
+  frame at or after `S` in the files before it (a file holding only a cut frame replaces nothing); those frames belong to a branch no later file continues. A restart that
+  rewrites exactly the step it restarted from therefore keeps the later file's copy.
+- **Gaps.** Across a junction the step advances by the stride of the file before it. If that file
+  kept fewer than two frames, the junction waits for the next stride any later file shows, or, if
+  none does, is checked against the last stride shown before it; a chain that shows no stride
+  anywhere (every file one frame) is accepted. Anything else raises, naming both files, both steps
+  and the stride.
+- **Inside a file** the steps rise: a step at or below the one before it raises. A stride that
+  changes inside one file is not checked, as `read_dump` never checked it.
+- **Tails.** A file may end in NUL padding or in a cut frame (a job killed while writing): its
+  complete frames are kept, the tail is skipped, and the next file is read. Anything that is not a
+  frame with a frame header after it raises: corruption inside a file is not a tail.
+
+A chain is stricter than `read_dump`, which stays as it was: every line of a frame ends in a newline,
+so a final frame missing only its trailing newline counts as cut; the header has the plain LAMMPS
+layout, so `ITEM: UNITS` or `ITEM: TIME` items and blank lines between frames raise, though
+`read_dump` steps over them. `skip_frames` counts frames of the joined timeline.
+
+The identity holds every file's path and sha256 (`source`, `source_sha256` as lists, in chain
+order); `provenance["chain"]` holds, per file, `source`, `first_step` and `last_step` (of the frames
+kept, `null` for none), `frames_kept`, `frames_superseded`, `tail_bytes` and `tail` (`null`,
+`"nul_padding"` or `"truncated_frame"`). The chain is read as a stream under `"first_frame"` or a
+stated cell, and held in memory under `"time_mean"`, as a single dump is. A single path is read by
+`read_dump` exactly as before, and a list of one file is a chain.
+
+### The k_z = 0 projection
+
+A two-dimensional model trains on the `k_z = 0` plane of a three-dimensional archive
+([training.md](training.md#two-dimensions)). `aipf.train.project_kz0(run, areal=...)` takes a `ModeRun`
+as read and returns the two-dimensional run: the labels with `n_z == 0` as `(n_x, n_y)`, their
+amplitudes unchanged, the boxes and the reference cell cut to `(Lx, Ly)`, and `depth` set. A window
+of it divides by `Lx_ref Ly_ref * depth`:
+
+| `areal` | `depth` | `rho_hat` | density |
+|---|---|---|---|
+| `False` (`"kz0-volumetric"`) | `Lz_ref` | `rho_k / V_ref` | the z mean of the 3D density, per unit volume |
+| `True` (`"kz0-areal"`) | `1.0` | `rho_k / (Lx_ref Ly_ref)` | the 3D density integrated along z, per unit area; `Lz_ref` times the volumetric one |
+
+The volumetric half spectrum is the 3D one's `k_z = 0` plane, cut to `n_y >= 0`, and the real-space
+field it makes is the z average of the 3D field (`tests/unit/test_train_projection.py`). Only an
+archive with a reference cell (`modes_from_dump(reference_box=...)`) is projected, since the frames
+of an NPT run each have their own `Lz`; one without is refused, naming the writer's option. Runs
+trained together must share `Lz_ref` (`aipf.train.projection.common_lz` refuses a mix).
+`aipf.train.projection_depth(run_or_dir, areal=...)` is the run's `depth`, from a `ModeRun` as read,
+an archive's run directory (`<tree>/<tag>/`) or its `modes.npz`: what a noisy two-dimensional
+rollout of the model trained on it declares.
 
 `defaults["mode_fields"]` is `"per_type"` (one channel per species, the sum over its dump type) or
 one combination per species in channel order, `{"name": species, "weights": {dump type: w},
@@ -159,6 +246,7 @@ What training and the rollouts read, under a tree:
 | `<tag>/modes.npz` | `rho_k` | `(n_frames, n_modes, n_channels)` complex64 | the amplitudes |
 | | `nvec` | `(n_modes, 3)` int16 | the integer labels `n` |
 | | `box` | `(n_frames, 3)` float64 | the box edges per frame |
+| | `reference_box` | `(3,)` float64 | optional: the reference cell, written only under a rule other than `time_mean` |
 | | `T_K` | float64 | the temperature |
 | | `dt_frame_ps` | float64 | the time between frames |
 | | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label |

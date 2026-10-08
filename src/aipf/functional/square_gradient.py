@@ -17,7 +17,7 @@ from .base import MODEL_REGISTRY
 from .landau import (ideal_mixing_f, ideal_mixing_mu, landau_curvature, landau_f, landau_mu,
                      regular_solution_curvature, regular_solution_f, regular_solution_mu)
 from aipf.mobility import Mobility
-from aipf.spectral import OpsCache, SpectralOps
+from aipf.spectral import OpsCache, SpectralOps, refuse_two_dimensions
 
 __all__ = ["SquareGradient", "LOCAL_FORMS"]
 
@@ -105,6 +105,7 @@ class SquareGradient(nn.Module):
                  mobility_t_ref: Optional[float] = None,
                  mobility_activation_energy_init: Optional[float] = None):
         super().__init__()
+        refuse_two_dimensions(len(grid), "the square_gradient functional")
         if n_species < 1:
             raise ValueError(f"n_species must be >= 1, got {n_species}")
         if local not in LOCAL_FORMS:

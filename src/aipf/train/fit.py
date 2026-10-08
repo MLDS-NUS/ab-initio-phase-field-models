@@ -21,7 +21,8 @@ import lightning as L
 import torch
 import yaml
 
-from aipf.functional.build import build as build_functional
+from aipf.functional.build import build as build_functional, factory_name
+from aipf.spectral import model_ndim
 from aipf.system import Checkpoint, System
 
 from .ckpt_compat import CONFIG_SCHEMA_TAGS, NEW_CONFIG_SCHEMA_TAG
@@ -35,10 +36,11 @@ from .checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
 from .kernel_hinge import HINGE_TERM, KernelHinge, declared_fields as _hinge_fields
 from .lit_module import LitModule, seeded_rng
 from .penalties import PENALTY_TERMS, penalties_from_system
+from .projection import PROJECTIONS, archive_cells, check_projection, common_lz
 
-__all__ = ["DEVICES", "DeviceUnavailable", "OptimizerLayoutMismatch", "ReservedRunName",
-           "check_optimizer_resumable", "fit", "pre_run_checks", "resolve_device",
-           "sample_system"]
+__all__ = ["DEVICES", "DeviceUnavailable", "DimensionMismatch", "OptimizerLayoutMismatch",
+           "ReservedRunName", "check_dimensions", "check_optimizer_resumable", "fit",
+           "pre_run_checks", "resolve_device", "sample_system"]
 
 #: Where a run trains: ``auto`` is ``cuda`` when torch sees one, else ``cpu``.
 DEVICES = ("auto", "cpu", "cuda")
@@ -198,7 +200,7 @@ def _anchors_from_system(system: System, anchors):
 def _archive_keys(system: System) -> ArchiveKeys:
     """How this system's mode archive spells its quantities; the names come from
     :mod:`aipf.pipeline.modes`, the writer."""
-    from aipf.pipeline.modes import ARCHIVE_KEYS, SIDE_KEYS
+    from aipf.pipeline.modes import ARCHIVE_KEYS, REFERENCE_BOX_KEY, SIDE_KEYS
 
     return ArchiveKeys(
         file_name=_MODES_FILE,
@@ -211,7 +213,8 @@ def _archive_keys(system: System) -> ArchiveKeys:
         composition=SIDE_KEYS,
         composition_fallback=system.table_keys["x"],
         quality_file=_QUALITY_FILE,
-        quality_key=_QUALITY_KEY)
+        quality_key=_QUALITY_KEY,
+        reference_box=REFERENCE_BOX_KEY)
 
 
 #: The trees a declared ``source_root`` can sit in: ``"raw"`` (``system.paths.raw()``) or
@@ -337,6 +340,110 @@ def pre_run_checks(system: System, run_name: str,
 
 class ReservedRunName(ValueError):
     """A run name that would write into the published checkpoints' directory."""
+
+
+class DimensionMismatch(ValueError):
+    """The model's number of spatial axes, the projection and the source grids disagree, or a
+    three-dimensional-only term is asked of a two-dimensional model.
+
+    Raised before the run directory exists; ``aipf train`` turns it into exit 2."""
+
+
+def _dimension_refusals(system: System, ndim: int, cfg: TrainConfig,
+                        sources: Sequence[SourceSpec], projection: Optional[str],
+                        anchors) -> list:
+    """Why a model of ``ndim`` spatial axes cannot train on ``sources`` read through ``projection``, one
+    line per reason; empty when it can. A two-dimensional model trains the drift term alone, on the
+    ``k_z = 0`` projection of three-dimensional archives (docs/reference/training.md, "Two dimensions")."""
+    lines = []
+    if ndim == 3 and projection is not None:
+        lines.append(
+            f"projection={projection!r} reads the archives as two-dimensional runs and the model is "
+            f"built on a three-axis grid: a three-dimensional model reads the archive as it is, "
+            f"projection=None")
+    if ndim == 2 and projection is None:
+        lines.append(
+            f"the model is built on a two-axis grid and a mode archive is three-dimensional: a "
+            f"two-dimensional model trains on its k_z = 0 plane, projection= one of {PROJECTIONS}")
+    wrong = [f"{s.name} {tuple(s.grid)}" for s in sources if len(s.grid) != ndim]
+    if wrong:
+        lines.append(
+            f"source grid(s) {', '.join(wrong)} have another number of axes than the model's "
+            f"{ndim}")
+    if ndim == 2:
+        block = _training(system)
+        if isinstance(anchors, AnchorTables) or (anchors is None
+                                                 and block.get(_TABLES_KEY) is not None):
+            lines.append(
+                "the anchor tables are three-dimensional only and this system declares them: "
+                "train a two-dimensional model with the drift term alone, anchors=NO_ANCHORS "
+                "(aipf train --anchors none)")
+        if (float(cfg.lambda_conv) != 0.0 and system.trust_domain is not None) or \
+                (float(cfg.lambda_gamma) != 0.0 and "gamma_paths" in block):
+            lines.append(
+                "the convexity and Gamma-path penalties are three-dimensional only and this "
+                "declaration trains one: set lambda_conv and lambda_gamma to zero")
+        if float(cfg.lambda_W) != 0.0:
+            lines.append(
+                f"the kernel hinge is three-dimensional only and lambda_W={cfg.lambda_W!r}: set "
+                f"it to zero")
+    return lines
+
+
+def check_dimensions(system: System, sources: Sequence[SourceSpec], *,
+                     projection: Optional[str], anchors=None,
+                     config_overrides: Optional[Mapping[str, Any]] = None) -> None:
+    """:class:`DimensionMismatch` when ``system``'s model, ``projection`` and ``sources`` disagree on
+    the number of spatial axes, or a two-dimensional model is asked for a three-dimensional-only term;
+    nothing otherwise. Builds the model on the CPU under its own forked stream, as
+    :func:`check_optimizer_resumable` does, so ``aipf train --pbs`` can refuse before it submits."""
+    check_projection(projection)
+    cfg = TrainConfig(**{**_config_from_system(system), "seed": 0,
+                         **dict(config_overrides or {})})
+    with seeded_rng(0):
+        model = build_functional(system)
+    _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
+
+
+def _archive_refusals(system: System, sources: Sequence[SourceSpec]) -> Tuple[list, Optional[float]]:
+    """``(refusals, Lz_ref)`` of the archives a projection would read: every run must record its
+    reference cell, and every cell one ``Lz`` (:func:`aipf.train.projection.common_lz`). Reads each
+    archive's index and its reference cell only."""
+    keys = _archive_keys(system)
+    cells, missing = [], []
+    for spec in sources:
+        for path, cell in archive_cells(spec.root, spec.pattern, file_name=keys.file_name,
+                                        key=keys.reference_box, exclude_tags=spec.exclude_tags):
+            (missing.append(f"{spec.name}: {path}") if cell is None
+             else cells.append((f"{spec.name}: {path.parent.name}", cell)))
+    lines = []
+    if missing:
+        shown = ", ".join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3 else "")
+        lines.append(
+            f"{len(missing)} archive(s) record no reference cell ({shown}), so they have no single "
+            f"Lz to project along: write them with modes_from_dump(reference_box=...), a stated cell "
+            f"(Lx, Ly, Lz) or 'first_frame'")
+    try:
+        lz = common_lz(cells)
+    except ValueError as refused:
+        lines.append(str(refused))
+        lz = None
+    return lines, lz
+
+
+def _refuse_dimensions(system: System, ndim: int, cfg: TrainConfig,
+                       sources: Sequence[SourceSpec], projection: Optional[str],
+                       anchors) -> Optional[float]:
+    """Raise :class:`DimensionMismatch` with every reason at once; returns the projected archives'
+    ``Lz_ref`` (``None`` without a projection, or with no archive found)."""
+    lines = _dimension_refusals(system, ndim, cfg, sources, projection, anchors)
+    lz = None
+    if projection is not None:
+        more, lz = _archive_refusals(system, sources)
+        lines += more
+    if lines:
+        raise DimensionMismatch("; ".join(lines))
+    return lz
 
 
 class OptimizerLayoutMismatch(ValueError):
@@ -659,7 +766,8 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
         root: Optional[Path] = None,
         log_every_step: bool = False,
         device: str = "auto",
-        deterministic: bool = False) -> Path:
+        deterministic: bool = False,
+        projection: Optional[str] = None) -> Path:
     """Train ``system``'s declared functional and return the run directory.
 
     ``seed`` is the one declared number every stream derives from; pass exactly one of ``steps``/``epochs``.
@@ -688,7 +796,12 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     ``root``: the farm root the run directory is written under; ``None`` is the system's data root.
     ``log_every_step``: write every step's loss to ``steps.json``.
     ``device``: one of :data:`DEVICES`.
-    ``deterministic``: ask torch for deterministic kernels for this run."""
+    ``deterministic``: ask torch for deterministic kernels for this run.
+    ``projection``: ``None`` (a three-dimensional model on the archives as read), or one of
+    :data:`aipf.train.projection.PROJECTIONS` for a two-dimensional model, which trains on the
+    archives' ``k_z = 0`` plane (:func:`aipf.train.projection.project_kz0`), on ``(Gx, Gy)`` source
+    grids, with the drift term alone. A disagreement is :class:`DimensionMismatch`, before the run
+    directory exists; the manifest records a projection under ``"projection"``."""
     if (steps is None) == (epochs is None):
         raise ValueError(
             f"pass exactly one of steps= or epochs=, got steps={steps!r} and "
@@ -696,6 +809,7 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
             f"and this driver has no default for it")
     if not sources:
         raise ValueError("sources is empty: a run trains on at least one")
+    check_projection(projection)
     accelerator = resolve_device(device)
 
     from aipf.data import index
@@ -710,6 +824,13 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     # the model is built under the run's own model stream, forked from the global one and restored
     with seeded_rng(cfg.seed_for("model")):
         model = build_functional(system)
+    # the number of axes is the model's declared one; refused here, before anything is loaded or written.
+    # A three-dimensional model without a projection on three-axis grids is the run it always was, and
+    # is not checked here (a source with another grid would fail when it is read, after the run directory)
+    lz_ref = None
+    if projection is not None or model_ndim(model) != 3 or any(
+            len(getattr(s, "grid", (0, 0, 0))) != 3 for s in sources):
+        lz_ref = _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
     saved = (None if init_from is None
              else _load_weights_into(model, init_from,
                                      system.paths.raw, system, path=init_path))
@@ -744,7 +865,8 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
                         window=window,
                         split=_split_from_system(system, split_mode),
                         weighting=weighting,
-                        loader=_loader_from_system(system, loader_order))
+                        loader=_loader_from_system(system, loader_order),
+                        projection=projection)
     dm.setup()
     data_rng = torch.Generator().manual_seed(cfg.seed_for("data"))
     train_loader = dm.train_dataloader(generator=data_rng)
@@ -822,8 +944,27 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
                       else _plain(penalties.provenance())),
         "kernel_hinge": None if hinge is None else hinge.provenance(),
         "written_at": datetime.now(timezone.utc).isoformat(),
+        **_factory_record(system),
+        # only when set: a three-dimensional run's manifest is as it always was
+        **({} if projection is None else _projection_record(projection, lz_ref)),
     }, indent=1, sort_keys=True))
     return run_dir
+
+
+def _projection_record(projection: str, lz_ref: Optional[float]) -> Dict[str, Any]:
+    """A two-dimensional run's manifest entries: the projection, the reference cell's ``Lz`` and the
+    ``depth`` a noisy rollout of the model declares (``1.0`` areal, ``Lz_ref`` volumetric), so the
+    rollout need not read the archive."""
+    return {"projection": projection, "projection_Lz_ref": lz_ref,
+            "projection_depth": (1.0 if projection == "kz0-areal" else lz_ref)}
+
+
+def _factory_record(system: System) -> Dict[str, str]:
+    """``{"model_factory": "module:qualname"}`` for a functional built by a factory; empty for a rung,
+    whose manifest is as it always was."""
+    if getattr(system.functional, "factory", None) is None:
+        return {}
+    return {"model_factory": factory_name(system.functional.factory)}
 
 
 def _resolve_weights(declared: Checkpoint, raw, system: System | None = None) -> Path:

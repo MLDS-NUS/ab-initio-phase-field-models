@@ -1,5 +1,6 @@
 """The noise colour filter ``G(k)``, which must be declared: white ``S(k) = kBT H(k)^-1``,
-coloured ``S(k) = G(k)^2 kBT H(k)^-1``, ``G(k) = exp(-k^2 sigma^2 / 2)``, ``sigma`` = coarse-graining length."""
+coloured ``S(k) = G(k)^2 kBT H(k)^-1``, ``G(k) = exp(-k^2 sigma^2 / 2)``, ``sigma`` = coarse-graining length.
+A two-dimensional model's noise also declares ``depth`` (:func:`check_depth`)."""
 from __future__ import annotations
 
 from typing import Optional
@@ -65,6 +66,31 @@ def build_noise_filter(ops, boxes: torch.Tensor, noise_mode,
     if noise_mode == "none":
         return None
     return ops.sigma_filter(boxes, float(sigma_noise))
+
+
+def check_depth(depth, ndim: int, noisy: bool) -> Optional[float]:
+    """``depth``, the extent along the averaged axis the noise of a two-dimensional model needs.
+    Required (finite, positive) for a noisy 2D step, refused in 3D, unread by a deterministic 2D one."""
+    if ndim != 2:
+        if depth is not None:
+            raise ValueError(
+                f"depth={depth!r} is declared for a three-dimensional model: depth is the "
+                f"extent of a two-dimensional model's cell along the axis it averages, and a "
+                f"three-dimensional cell's volume is read off its box. Leave depth unset")
+        return None
+    if depth is None:
+        if noisy:
+            raise ValueError(
+                "a two-dimensional model's noise needs depth=: the variance is "
+                "2 kBT / (dV dt) with dV = dA * depth, and which densities the model "
+                "carries decides it. depth=1.0 for areal densities (per unit area); the "
+                "reference cell's Lz for volumetric densities averaged along z. There is "
+                "no default")
+        return None
+    value = float(depth)
+    if not (value > 0.0) or value == float("inf"):
+        raise ValueError(f"depth must be finite and positive, got {depth!r}")
+    return value
 
 
 def check_m_stab(m_stab) -> str:

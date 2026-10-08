@@ -140,3 +140,123 @@ A new rung is a class with the four protocol methods, registered with
 `MODEL_REGISTRY.register(name, cls)`, its module listed in `build._FORM_MODULES`, its form added to
 `aipf.system.FUNCTIONAL_FORMS`, and a translation in `build._TRANSLATIONS` that maps the declaration
 onto the constructor. Until it has a translation, `build` refuses the form by name.
+
+## A model defined elsewhere
+
+A model this package does not define is declared with a factory:
+
+    Functional(form, local, kernel, kwargs, factory=make_model)
+
+`build(system, **overrides)` calls `make_model(system, **overrides)` and returns what it gives back,
+with the overrides recorded as `build_overrides`; `rung_kwargs` refuses such a functional, having
+nothing to translate. `form`, `local` and `kernel` are then names only and are not checked against
+the ladder. `kwargs` carries at least `grid` and `nyquist_mask`, which training and the rollouts read
+off the declaration. The factory is left out of the functional's `repr` and equality. A variant
+declares its own factory the same way, and its `mobility` may be `None`. A run's `MANIFEST.json`
+records the factory as `model_factory: "module:qualname"` (a `functools.partial` is recorded as the
+function it wraps).
+
+`system.py` is executed outside `sys.modules`, so the factory and the classes it builds are imported
+from an installed package, not defined in `system.py`. A checkpoint holds the model's `state_dict`
+and no class: a reload builds the model from the declaration again and loads the weights strictly.
+
+What the model must provide, and which part of the package reads it:
+
+| what | read by | checked |
+|---|---|---|
+| a `torch.nn.Module` with at least one parameter | training, checkpoints | by `build` |
+| `forward`, `chemical_potential`, `bulk_free_energy_density`, `mobility`, as in [the protocol](#the-protocol) | training, the solvers | by `build` |
+| `_cache`, an `aipf.spectral.OpsCache` on the declared `grid`, and `ops`, the same object as `_cache.ops`, with the declared `nyquist_mask` | training (the operators per grid), the explicit solvers | by `build` |
+| `kernel.w_hat(k)`: `(*k.shape, n, n)` from `|k|` alone, no grid or box argument | the semi-implicit scheme's frozen operator | when it runs |
+| `f_local.f_pointwise(rho, kBT)` (`rho` `(P, n)`, `kBT` `(P,)`, out `(P,)`) and `f_local.mu_pointwise(rho, kBT)` (out `(P, n)`) | the semi-implicit scheme's frozen Hessian and its guards | when it runs |
+| optionally `stabilizer_mobility(rho, T)` | the semi-implicit scheme's `M_s` ([rollout.md](rollout.md#the-scheme)) | when it runs |
+| `mobility`, `bulk_free_energy_density`, `chemical_potential`; the field-wide curvature through `kernel.w_hat(k)`, else `curvature_at_wavevector(k)`, else zero sized by `n_species`; for the `W(0)` routes `radial` and `lattice`, `kernel.w_hat_zero_quadrature` and `kernel.evaluator` | the anchor tables, with `--anchors declared` ([training.md](training.md)) | when a batch is built; a missing one is refused by name |
+
+The rollouts' guards act by replacing methods on the instance for the length of a rollout. In the
+semi-implicit scheme `clamp_rho` replaces `f_local.mu_pointwise` and `mobility`, while `v_ext` and
+`kbt_field` replace `f_local.mu_pointwise` only; in the explicit solvers `clamp_rho` replaces
+`chemical_potential` and `mobility`. A
+`forward` that reads `mu` through `self.chemical_potential`, the pointwise part of it through
+`self.f_local.mu_pointwise`, and `M` through `self.mobility` sees every guard; a `forward` that
+bypasses them does not, and must not be rolled out with those options.
+
+`stabilizer_mobility` receives the field itself, unclamped; under `clamp_rho` the clamp reaches it only
+if it reads `M` through `self.mobility`. A model with the hook takes no `m_stab`, while the
+`spinodal`, `slab` and FDT drivers always pass the system's declared `Noise.m_stab`, so such a model
+is rolled out by calling `aipf.rollout.imex.rollout_imex` directly. `aipf diagnose` reads parts of
+this package's own rungs and refuses a functional built by a factory.
+
+## Two dimensions
+
+A model is two-dimensional when its declared `grid` has two entries, `(Gx, Gy)`. The number of axes
+is read from that declaration (`model.ops.ndim`), never from a tensor's shape: a half spectrum
+`(B, n, Gx, Gyr)` read as three axes would take the species axis for `Gx`. `aipf.spectral.make_ops`
+builds `SpectralOps` for three axes and `SpectralOps2D` for two, and an `OpsCache` seeded with a
+two-axis grid holds `SpectralOps2D` and reads two trailing axes on every lookup. In two dimensions the
+half (`rfft`) axis is `y`:
+
+| | 3D | 2D |
+|---|---|---|
+| `rho_hat` | `(B, n, Gx, Gy, Gz//2+1)` | `(B, n, Gx, Gy//2+1)` |
+| `boxes` | `(B, 3)` | `(B, 2)`, `(Lx, Ly)` |
+| `M(rho, T)` | `(B, n, n, Gx, Gy, Gz)` | `(B, n, n, Gx, Gy)` |
+| persistent buffers | `NX`, `NY`, `NZ`, `MULT` `(1, 1, 1, 1, Gzr)` | `NX`, `NY`, `MULT` `(1, 1, 1, Gyr)` |
+| `ops.ndim` | 3 (a class attribute, not state) | 2 |
+
+`MULT` is the multiplicity along the half axis in both: `sum |full fft|^2 = sum MULT |rfft|^2`, with
+the `k = 0` and, for an even length, the Nyquist entry counted once. The Nyquist masks of the odd-order
+operators are the same rule on each axis.
+
+What runs in two dimensions: `nonlocal_kernel`, a model built by a factory on a two-axis `grid`, the
+explicit integrators and the semi-implicit scheme of [rollout.md](rollout.md#the-scheme), `hermitianize`
+and the state projections, `Field`, and training the drift term on the `k_z = 0` plane of
+three-dimensional archives ([training.md](training.md#two-dimensions)). The pair kernel's `Ŵ(k)` is then the Hankel transform of the
+same radial `W(r)`,
+
+    Ŵ(k) = 2 pi int_0^R_cut r W(r) J0(k r) dr,
+
+`AnalyticRadialTransform(..., dim=2)`, on the same `r_quad` and `k_table` buffers (`dim` is an
+attribute, so the state dict is the 3D one's). A two-dimensional `nonlocal_kernel` builds it itself and
+refuses an evaluator that does not declare `dim=2`.
+
+What is three-dimensional only, and raises `NotImplementedError` naming itself when a two-dimensional
+model or grid reaches it: the `landau`, `fh`, `square_gradient` and `neural_operator` rungs, the
+`lattice_sum` evaluator, `W_hat(0)` (`w_hat_zero_radial`, `w_hat_zero_quadrature`) and `kappa_eff`,
+the anchor tables, the convexity and Gamma-path penalties, the kernel hinge, `aipf diagnose` (and the
+model isobars `aipf md` draws through it), the `slab`, `spinodal` and FDT drivers and their observables,
+and the KDE deposit, whose positions are three-dimensional. A Lightning-hparams or k-modes checkpoint
+drops its grid buffers on load, so the number of axes it was saved on (its `ops.NX` rank, 3 when not
+saved) is compared with the model's first and a mismatch is refused; this package's own checkpoints
+load strictly and differ in those buffers anyway.
+
+The noise of a two-dimensional model needs one more number. Its variance is `2 kBT / (dV dt)`, and a
+grid of `(Lx, Ly)` cells fixes only the area `dA` of a cell; `dV = dA * depth`, with `depth` declared
+on every noisy solver call (`rollout_sde`, `step_sde_euler_maruyama`, `rollout_imex` with `noise`). It
+says what the densities are: `depth = 1.0` for areal densities (per unit area), the reference cell's
+`Lz` for volumetric densities averaged along z. A model trained through a projection takes the one its
+windows were divided by: `projection_depth` in the training run's `MANIFEST.json`, or
+`aipf.train.projection_depth(archive_run_dir, areal=...)` on an archive's run directory
+([data.md](data.md#the-k_z--0-projection)). There is no default; a noisy 2D call without `depth` is
+refused, and a 3D call with one is refused too (its `dV` comes from its box). Deterministic 2D rollouts
+read no `depth`. The stationary spectrum is then `S(k) = V <|rho_hat_k|^2> = kBT H(k)^-1` with
+`V = Lx Ly depth`.
+
+A two-dimensional model is an effective model, not the z average of a three-dimensional one. The
+`k_z = 0` plane of 3D Model B dynamics is not closed: the nonlinear terms couple the `k_z != 0` modes
+into it, so the z average of a 3D trajectory does not obey any functional of the z average alone. The
+z-invariance check in `tests/unit/test_solve_2d.py` (a 2D rollout equals the 3D rollout of the same
+field held constant along z, sliced in z) checks the solvers, which agree to float precision when the
+3D field has no `k_z != 0` content to begin with; it says nothing about that closure. That agreement
+holds under `nyquist_mask=True`, and under `nyquist_mask=False` when `Gx` is odd. With
+`nyquist_mask=False` and an even `Gx`, the odd-order operators multiply the x-Nyquist line by
+`i k_N`, which is not the transform of a real field there. The final inverse transform treats such a
+line differently in the two layouts. In 3D the line lies on the `k_z = 0` plane and the last
+(half-axis, z) inverse transform drops it. In 2D the half axis is y, so the line survives at every
+interior `k_y` as a real `(-1)^x` pattern in x. A mask-off 2D model on an even `Gx` therefore differs
+from its z-invariant 3D twin by such a term, of the size of the drift itself. 3D has the same
+behaviour on its `k_z != 0` planes. The 2D operators are the plain `rfft2` ones and are left as they
+are; `nyquist_mask=True` (or an odd `Gx`) is what makes the two layouts agree. The y-Nyquist
+wavenumber, `-Gy/2` on the 3D full axis and `+Gy/2` on the 2D half axis, makes no difference. For
+the same reason the
+2D `W(r)` is not the 3D one: the z-projected kernel `int W3(sqrt(rho^2 + z^2)) dz` has as its Hankel
+transform `Ŵ3(k)` at `k_z = 0`, and a 2D model learns its own `W` from 2D data.

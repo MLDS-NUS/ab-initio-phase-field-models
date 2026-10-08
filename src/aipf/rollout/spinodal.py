@@ -17,7 +17,7 @@ import torch
 from aipf.paths import PUBLISHED_DIRNAME
 from aipf.solve.noise import declared_noise
 from aipf.solve.trust_domain import TrustDomain
-from aipf.spectral import SpectralOps
+from aipf.spectral import SpectralOps, model_ndim, refuse_two_dimensions
 from aipf.system import System
 from aipf.train.dataset import scatter_modes
 
@@ -77,11 +77,18 @@ def load_model(system: System, path: Path) -> torch.nn.Module:
     """The declared functional with this file's weights, float32, eval mode."""
     from aipf.functional.build import build
     from aipf.train.checkpoint_formats import load_lightning_hparams_into
+    from aipf.train.ckpt_compat import CONFIG_SCHEMA_TAGS
 
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    state = saved["state_dict"] if "state_dict" in saved else \
-        saved["model_state_dict"]
+    # A file fit wrote carries this package's tag beside Lightning's prefixed state_dict; its own
+    # model_state_dict is the one build() names. Every other file keeps the order it always had.
+    if saved.get("config_schema") in CONFIG_SCHEMA_TAGS and "model_state_dict" in saved:
+        state = saved["model_state_dict"]
+    else:
+        state = saved["state_dict"] if "state_dict" in saved else \
+            saved["model_state_dict"]
     model = build(system)
+    refuse_two_dimensions(model_ndim(model), "the spinodal and slab drivers")
     if set(state) <= set(model.state_dict()):
         merged = dict(model.state_dict())
         merged.update(state)
@@ -114,7 +121,12 @@ class Measured:
 
 
 def read_run(system: System, decl: dict, driver: str, run: str) -> Measured:
-    """Scatter one archived run onto ``decl[driver]["grid"]`` and apply the sigma filter to every frame."""
+    """Scatter one archived run onto ``decl[driver]["grid"]`` and apply the sigma filter to every frame.
+
+    A run whose archive records a reference cell (:data:`aipf.pipeline.modes.REFERENCE_BOX_KEY`) is read
+    in it: every frame's ``V``, ``k`` and returned box is the cell's."""
+    from aipf.pipeline.modes import REFERENCE_BOX_KEY
+
     arch = decl["archive"]
     grid = tuple(int(g) for g in decl[driver]["grid"])
     run_dir = system.paths.raw() / decl[driver]["modes_tree"] / run
@@ -125,6 +137,9 @@ def read_run(system: System, decl: dict, driver: str, run: str) -> Measured:
         if qc is not None and qc.is_file():
             hi = int(json.loads(qc.read_text())[arch["quality_key"]])
         boxes = np.asarray(z[arch["box"]][:hi])
+        if REFERENCE_BOX_KEY in z:
+            cell = np.asarray(z[REFERENCE_BOX_KEY], dtype=np.float64)
+            boxes = np.repeat(cell[None, :], len(boxes), axis=0)
         amps = np.asarray(z[arch["amplitudes"]][:hi])
         if int(arch["amplitudes_channel_axis"]) == 2:
             amps = np.moveaxis(amps, -1, -2)

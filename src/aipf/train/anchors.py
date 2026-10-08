@@ -16,6 +16,7 @@ import torch
 
 from aipf.data.rows import measured_rows
 from aipf.paths import tracked_tables
+from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.train.pressure import pressure_from_model
 
 _LOG = logging.getLogger(__name__)
@@ -602,6 +603,7 @@ class AnchorTables:
     def batch(self, model, kB: float) -> Dict[str, Dict[str, Any]]:
         """The entries ``compute_losses`` reads, model side rebuilt with a graph (a per-step object);
         an anchor with no rows is left out."""
+        refuse_two_dimensions(model_ndim(model), "the anchor losses")
         w_hat = _w_hat_of(model)
         out: Dict[str, Dict[str, Any]] = {}
         if self.mobility_rho.shape[0]:
@@ -720,6 +722,11 @@ def _w_hat_of(model):
             f"model protocol and implement it on this rung -- returning "
             f"zero here instead would drop a real term from the static "
             f"anchors' target comparison and say so nowhere")
+    if not hasattr(model, "n_species"):
+        raise ValueError(
+            f"{type(model).__name__} has no kernel.w_hat, no curvature_at_wavevector and no "
+            f"n_species, so the anchors can neither read its field-wide curvature nor size a zero "
+            f"one; give the model one of them, or train it with --anchors none")
     n = int(getattr(model, "n_species"))
 
     def zero(k: torch.Tensor) -> torch.Tensor:
@@ -753,8 +760,17 @@ def _w_hat_zero(model, w_hat, rho: torch.Tensor, geometry,
     if route == "evaluator":
         return w_hat(k_zero)[:, 0]
     if route == "radial":
+        if not hasattr(kernel, "w_hat_zero_quadrature"):
+            raise ValueError(
+                f"w0 route 'radial' integrates the radial kernel through "
+                f"kernel.w_hat_zero_quadrature, and {type(kernel).__name__} has none; declare "
+                f"'evaluator', or train with --anchors none")
         zero = kernel.w_hat_zero_quadrature(w0["r_max"], w0["n_points"])
         return zero.to(rho.dtype).expand(rho.shape[0], *zero.shape)
+    if not hasattr(kernel, "evaluator"):
+        raise ValueError(
+            f"w0 route 'lattice' reads the lattice sum through kernel.evaluator, and "
+            f"{type(kernel).__name__} has none; declare 'evaluator', or train with --anchors none")
     if not getattr(kernel.evaluator, "reads_geometry", False):
         raise ValueError(
             f"w0 route 'lattice' needs a kernel evaluated as a lattice sum, and "
