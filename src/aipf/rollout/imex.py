@@ -5,12 +5,15 @@ Reads the model's ``kernel.w_hat`` and ``f_local`` (a pair-kernel functional); o
 A model with a ``stabilizer_mobility(rho, T)`` method sets ``M_s`` itself, and ``m_stab`` is then left
 undeclared (:func:`stabilizer_mobility`). A two-dimensional model (``model.ops.ndim == 2``) runs the same
 scheme on ``(1, n, Gx, Gyr)`` in a ``(2,)`` box; its noise needs ``depth``
-(:func:`aipf.solve.noise.check_depth`)."""
+(:func:`aipf.solve.noise.check_depth`). Precision is the state's and the model's
+(:func:`aipf.solve.precision.working_dtypes`): a ``complex128`` state with a float64 model builds every
+operator, field and noise draw in float64 / complex128; a ``complex64`` state with a float32 model is the
+float32 scheme the published rollouts ran; a mixed pair is refused."""
 from __future__ import annotations
 
 import logging
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Iterator, List, Optional
 
 import torch
@@ -18,10 +21,12 @@ import torch
 from aipf.solve import hermitianize, project_state
 from aipf.solve.declare import UNDECLARED
 from aipf.solve.noise import build_noise_filter, check_depth, check_m_stab
+from aipf.solve.precision import working_dtypes
 from aipf.solve.projection import project_state_uniform_shift
 from aipf.solve.trust_domain import TrustDomain
 from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, SpectralOps,
-                           half_spectrum_grid, k_squared, make_ops, model_ndim)
+                           exact_mode_indices, half_spectrum_grid, k_squared,
+                           make_ops, model_ndim)
 
 from .noise import (NOISE_EVAL_FRAC, check_noise_eval, draw_w,
                     max_norm_mobility, noise_div_hat, zeta_from_w)
@@ -135,17 +140,19 @@ def _full_grid(rho_hat0: torch.Tensor, what: str, ndim: int = 3, declared=None) 
 
 @contextmanager
 def pointwise_fields(model, rho_hat0: torch.Tensor, kbt_field=None,
-                     v_ext=None) -> Iterator[Optional[torch.Tensor]]:
+                     v_ext=None, dtype: torch.dtype = torch.float32
+                     ) -> Iterator[Optional[torch.Tensor]]:
     """Per-cell ``kBT`` (``(Gx, Gy, Gz)``, energy) replaces the pointwise ``mu``'s scalar one, then a static
     ``v_ext`` (``(n, Gx, Gy, Gz)``, energy) is added to it; full-grid calls only. Yields the ``kBT`` field.
-    Two-dimensional model: ``(Gx, Gy)`` and ``(n, Gx, Gy)``."""
+    Two-dimensional model: ``(Gx, Gy)`` and ``(n, Gx, Gy)``. Both are built in ``dtype``, the run's real
+    dtype."""
     device, n = rho_hat0.device, int(rho_hat0.shape[1])
     ndim = model_ndim(model)
     declared = getattr(getattr(model, "ops", None), "grid", None)
     kbt_t = V = None
     if kbt_field is not None:
         grid = _full_grid(rho_hat0, "kbt_field", ndim, declared)
-        kbt_t = torch.as_tensor(kbt_field, dtype=torch.float32, device=device)
+        kbt_t = torch.as_tensor(kbt_field, dtype=dtype, device=device)
         if tuple(kbt_t.shape) != grid:
             raise ValueError(f"kbt_field must have shape {grid} (one kBT per cell, no "
                              f"species axis), got {tuple(kbt_t.shape)}")
@@ -154,7 +161,7 @@ def pointwise_fields(model, rho_hat0: torch.Tensor, kbt_field=None,
                              f"min {float(kbt_t.min())}, max {float(kbt_t.max())}")
     if v_ext is not None:
         grid = _full_grid(rho_hat0, "v_ext", ndim, declared)
-        V = torch.as_tensor(v_ext, dtype=torch.float32, device=device)
+        V = torch.as_tensor(v_ext, dtype=dtype, device=device)
         if tuple(V.shape) != (n, *grid):
             raise ValueError(f"v_ext must have shape {(n, *grid)} (species on the full "
                              f"grid), got {tuple(V.shape)}")
@@ -196,6 +203,13 @@ def local_hessian(model, rho_bar: torch.Tensor, kBT: float) -> torch.Tensor:
         H = torch.stack([torch.autograd.grad(g[a], rho, retain_graph=True)[0]
                          .squeeze(0) for a in range(rho.shape[-1])])
     return H.detach()
+
+
+def _identity(n: int, device, real: torch.dtype) -> torch.Tensor:
+    """``I`` ``(n, n)``: the float32 path's ``torch.eye`` exactly as it always was, else in ``real``."""
+    if real == torch.float32:
+        return torch.eye(n, device=device)
+    return torch.eye(n, device=device, dtype=real)
 
 
 def _inverse(A: torch.Tensor) -> torch.Tensor:
@@ -254,7 +268,12 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
     ``predictor_floor``. ``v_ext``/``kbt_field``: a static external potential and a per-cell ``kBT``
     (:func:`pointwise_fields`). Every other knob is declared, except ``m_stab`` for a model with a
     ``stabilizer_mobility``, which must leave it undeclared. A two-dimensional model takes
-    ``(1, n, Gx, Gyr)`` in a ``(2,)`` box, and its noise needs ``depth``: ``dV = dA * depth``."""
+    ``(1, n, Gx, Gyr)`` in a ``(2,)`` box, and its noise needs ``depth``: ``dV = dA * depth``.
+    Precision follows the state and the model (module docstring); a float64 run casts ``box``, ``v_ext`` and
+    ``kbt_field`` to float64 (give ``box`` in float64 when its lengths are not float32 numbers), reads the
+    model's operator sets with exact integer mode indices for the call (:func:`aipf.spectral.exact_mode_indices`,
+    restored after), and its noise draws are float64, a different random stream from a float32 run of the
+    same seed."""
     _require_pair_kernel(model)
     hook = _stabilizer_hook(model, m_stab)
     _check_projection(state_proj, state_clamp, domain, mass_restore)
@@ -270,9 +289,14 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
     ndim = model_ndim(model)
     if ndim == 2 or depth is not None:
         depth = check_depth(depth, ndim, noise is not None)
+    real, cplx = working_dtypes(model, rho_hat0, "rollout_imex")
+    fp64 = real == torch.float64
     model.eval()
     device = rho_hat0.device
-    boxes = box.unsqueeze(0).to(device)
+    if fp64:
+        boxes = box.to(device=device, dtype=real).unsqueeze(0)
+    else:
+        boxes = box.unsqueeze(0).to(device)
     rho_hat = rho_hat0.clone()
     n = rho_hat.shape[1]
     if ndim == 2:
@@ -280,34 +304,39 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
     else:
         rho_bar = rho_hat0[0, :, 0, 0, 0].real.clone()
     kBT = kB * float(T)
-    T_t = torch.tensor([float(T)], device=device)
-    with pointwise_guard(model, clamp_rho), \
-            pointwise_fields(model, rho_hat0, kbt_field, v_ext) as kbt_t:
+    t_kw = {"dtype": real} if fp64 else {}
+    T_t = torch.tensor([float(T)], device=device, **t_kw)
+    exact = exact_mode_indices(model) if fp64 else nullcontext()
+    with exact, pointwise_guard(model, clamp_rho), \
+            pointwise_fields(model, rho_hat0, kbt_field, v_ext, real) as kbt_t:
         w_scale = None
         if kbt_t is not None:
             if noise is not None:
                 w_scale = torch.sqrt(kbt_t / kBT)
             kBT = float(kbt_t.mean(dtype=torch.float64))
-            T_t = torch.tensor([kBT / kB], device=device)
+            T_t = torch.tensor([kBT / kB], device=device, **t_kw)
         return _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps,
                     save_every, m_stab, state_proj, state_clamp, domain,
                     mass_restore, noise, generator, w_scale, hook,
-                    ndim=ndim, depth=depth)
+                    ndim=ndim, depth=depth, real=real, cplx=cplx)
 
 
 def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
          m_stab, state_proj, state_clamp, domain, mass_restore, noise,
          generator, w_scale=None, hook=None, *, ndim: int = 3,
-         depth: Optional[float] = None) -> torch.Tensor:
+         depth: Optional[float] = None, real: torch.dtype = torch.float32,
+         cplx: torch.dtype = torch.complex64) -> torch.Tensor:
     device = rho_hat.device
     Hb = local_hessian(model, rho_bar, kBT)
+    # float64: every buffer float64, the mode indices exact integers; float32: the set it always was.
+    ops_kw = {} if real == torch.float32 else {"dtype": real}
     if ndim == 2:
         ops = make_ops(half_spectrum_grid(rho_hat.shape[-2:], model.ops.grid), n,
-                       nyquist_mask=model.ops.nyquist_mask).to(device)
+                       nyquist_mask=model.ops.nyquist_mask, **ops_kw).to(device)
     else:
         Gx, Gy, Gzr = (int(s) for s in rho_hat.shape[-3:])
         ops = SpectralOps((Gx, Gy, 2 * (Gzr - 1)), n,
-                          nyquist_mask=model.ops.nyquist_mask).to(device)
+                          nyquist_mask=model.ops.nyquist_mask, **ops_kw).to(device)
     N = math.prod(ops.grid)
     ks = ops.k_axes(boxes)
     kx, ky, kz = tuple(ks) + (None,) * (3 - ndim)
@@ -327,8 +356,8 @@ def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
         M_s = max_norm_mobility(model, ops.irfft(rho_hat * N), T_t, ndim)
         _LOG.debug("M_s from m_stab='max'")
     dtL = dt * k2 * torch.einsum("ij,...jk->...ik", M_s, H_k)
-    A_inv = _inverse(torch.eye(n, device=device) + dtL).to(torch.complex64)
-    MH = dtL.to(torch.complex64)
+    A_inv = _inverse(_identity(n, device, real) + dtL).to(cplx)
+    MH = dtL.to(cplx)
 
     frac = filt = amp = None
     if noise is not None:
@@ -341,9 +370,9 @@ def _run(model, rho_hat, boxes, T_t, kBT, rho_bar, n, dt, n_steps, save_every,
             2.0 * float(noise["kBT_noise"]) / (dV * dt))
         frac = NOISE_EVAL_FRAC.get(noise["noise_eval"])
         if frac is not None:
-            A_pred_inv = _inverse(torch.eye(n, device=device)
-                                  + frac * dtL).to(torch.complex64)
-            MH_pred = (frac * dtL).to(torch.complex64)
+            A_pred_inv = _inverse(_identity(n, device, real)
+                                  + frac * dtL).to(cplx)
+            MH_pred = (frac * dtL).to(cplx)
             amp_floor = float(noise["predictor_floor"])
 
     to_last, to_second = CHANNEL_LAST[ndim], CHANNEL_SECOND[ndim]
