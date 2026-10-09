@@ -7,7 +7,8 @@ tensor's shape: :class:`SpectralOps` is three-dimensional, :class:`SpectralOps2D
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from contextlib import contextmanager
+from typing import Dict, Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,30 @@ TWO_PI = 2.0 * math.pi
 
 #: Admissible ``nyquist_mask`` values: zero the Nyquist wavenumber in grad and div, or keep it.
 NYQUIST_MASKS = (True, False)
+
+
+#: The dtype an operator set takes as ``dtype=`` beside the default (``None``, the float32 set it always
+#: was); its mode indices are exact integers, and :func:`exact_mode_indices` gives a model's float64 sets
+#: the same for the duration of a float64 rollout.
+EXACT_INDEX_DTYPE = torch.float64
+
+
+def _check_ops_dtype(dtype) -> dict:
+    """The factory keywords of an operator set's buffers: none for ``dtype=None``, else ``dtype``'s."""
+    if dtype is None:
+        return {}
+    if dtype != EXACT_INDEX_DTYPE:
+        raise ValueError(
+            f"dtype={dtype!r}: an operator set is built in float32 (dtype=None, the default) or in "
+            f"{EXACT_INDEX_DTYPE} (exact integer mode indices)")
+    return {"dtype": dtype}
+
+
+def _full_axis_indices(G: int, dtype) -> torch.Tensor:
+    """``fftfreq(G) * G``: float32 as it always was for ``dtype=None``, else rounded to exact integers."""
+    if dtype is None:
+        return torch.fft.fftfreq(G) * G
+    return torch.round(torch.fft.fftfreq(G, dtype=dtype) * G)
 
 
 def check_nyquist_mask(value) -> bool:
@@ -31,41 +56,44 @@ def check_nyquist_mask(value) -> bool:
 
 class SpectralOps(nn.Module):
     """k-space operators for one real-space ``grid`` ``(Gx, Gy, Gz)``; ``n_species`` is recorded only.
-    ``nyquist_mask`` (required, :data:`NYQUIST_MASKS`): ``False`` makes ``grad_hat``/``div_hat`` plain ``i k``."""
+    ``nyquist_mask`` (required, :data:`NYQUIST_MASKS`): ``False`` makes ``grad_hat``/``div_hat`` plain ``i k``.
+    ``dtype``: ``None`` (float32 buffers, the default) or ``torch.float64`` (every buffer float64, the mode
+    indices exact integers); the state dict's keys and shapes are the same either way."""
 
     #: Spatial axes; a class attribute, so the state dict is the one this class always had.
     ndim = 3
 
     def __init__(self, grid: Tuple[int, int, int], n_species: int, *,
-                 nyquist_mask: bool):
+                 nyquist_mask: bool, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.nyquist_mask = check_nyquist_mask(nyquist_mask)
+        kw = _check_ops_dtype(dtype)
         if n_species < 1:
             raise ValueError(f"n_species must be >= 1, got {n_species}")
         Gx, Gy, Gz = grid
         self.grid = (int(Gx), int(Gy), int(Gz))
         self.n_species = int(n_species)
         self.Gzr = Gz // 2 + 1
-        nx = torch.fft.fftfreq(Gx) * Gx                     # 0..7,-8..-1
-        ny = torch.fft.fftfreq(Gy) * Gy
-        nz = torch.arange(self.Gzr, dtype=torch.float32)    # rfft half axis
+        nx = _full_axis_indices(Gx, dtype)                  # 0..7,-8..-1
+        ny = _full_axis_indices(Gy, dtype)
+        nz = torch.arange(self.Gzr, dtype=dtype or torch.float32)    # rfft half axis
         self.register_buffer("NX", nx.view(Gx, 1, 1))
         self.register_buffer("NY", ny.view(1, Gy, 1))
         self.register_buffer("NZ", nz.view(1, 1, self.Gzr))
         # Real-FFT multiplicity: sum(|full fft|^2) == sum(MULT * |rfft|^2).
-        mult = torch.full((1, 1, 1, 1, self.Gzr), 2.0)
+        mult = torch.full((1, 1, 1, 1, self.Gzr), 2.0, **kw)
         mult[..., 0] = 1.0
         if Gz % 2 == 0:
             mult[..., -1] = 1.0
         self.register_buffer("MULT", mult)
         # Odd-order operators zero the Nyquist wavenumber (i*k of a real coefficient); even-order keep it.
-        mx = torch.ones(Gx)
+        mx = torch.ones(Gx, **kw)
         if Gx % 2 == 0 and nyquist_mask:
             mx[Gx // 2] = 0.0          # fftfreq puts Nyquist (-Gx/2) at index Gx/2
-        my = torch.ones(Gy)
+        my = torch.ones(Gy, **kw)
         if Gy % 2 == 0 and nyquist_mask:
             my[Gy // 2] = 0.0
-        mz = torch.ones(self.Gzr)
+        mz = torch.ones(self.Gzr, **kw)
         if Gz % 2 == 0 and nyquist_mask:
             mz[-1] = 0.0               # rfft half axis: Nyquist is the last index
         # Non-persistent: saved checkpoints must load strictly (NX/NY/NZ/MULT stay persistent for the same
@@ -126,35 +154,36 @@ class SpectralOps2D(nn.Module):
     The half (``rfft``) axis is ``y``, so a state is ``(B, n, Gx, Gyr)``, ``Gyr = Gy // 2 + 1``, and the
     boxes are ``(B, 2)`` ``(Lx, Ly)``. The buffers mean what the three-dimensional ones do: ``NX``
     ``(Gx, 1)``, ``NY`` ``(1, Gyr)`` and ``MULT`` ``(1, 1, 1, Gyr)`` are persistent, the odd-order masks are
-    not. ``nyquist_mask`` (required, :data:`NYQUIST_MASKS`) as there."""
+    not. ``nyquist_mask`` (required, :data:`NYQUIST_MASKS`) and ``dtype`` as there."""
 
     #: Spatial axes; a class attribute, not a buffer.
     ndim = 2
 
     def __init__(self, grid: Tuple[int, int], n_species: int, *,
-                 nyquist_mask: bool):
+                 nyquist_mask: bool, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.nyquist_mask = check_nyquist_mask(nyquist_mask)
+        kw = _check_ops_dtype(dtype)
         if n_species < 1:
             raise ValueError(f"n_species must be >= 1, got {n_species}")
         Gx, Gy = grid
         self.grid = (int(Gx), int(Gy))
         self.n_species = int(n_species)
         self.Gyr = Gy // 2 + 1
-        nx = torch.fft.fftfreq(Gx) * Gx
-        ny = torch.arange(self.Gyr, dtype=torch.float32)    # rfft half axis
+        nx = _full_axis_indices(Gx, dtype)
+        ny = torch.arange(self.Gyr, dtype=dtype or torch.float32)    # rfft half axis
         self.register_buffer("NX", nx.view(Gx, 1))
         self.register_buffer("NY", ny.view(1, self.Gyr))
         # Real-FFT multiplicity along the half axis: sum(|full fft|^2) == sum(MULT * |rfft|^2).
-        mult = torch.full((1, 1, 1, self.Gyr), 2.0)
+        mult = torch.full((1, 1, 1, self.Gyr), 2.0, **kw)
         mult[..., 0] = 1.0
         if Gy % 2 == 0:
             mult[..., -1] = 1.0
         self.register_buffer("MULT", mult)
-        mx = torch.ones(Gx)
+        mx = torch.ones(Gx, **kw)
         if Gx % 2 == 0 and nyquist_mask:
             mx[Gx // 2] = 0.0
-        my = torch.ones(self.Gyr)
+        my = torch.ones(self.Gyr, **kw)
         if Gy % 2 == 0 and nyquist_mask:
             my[-1] = 0.0               # rfft half axis: Nyquist is the last index
         self.register_buffer("MX_ODD", mx.view(Gx, 1), persistent=False)
@@ -205,12 +234,15 @@ class SpectralOps2D(nn.Module):
         return -k2 * f_hat
 
 
-def make_ops(grid, n_species: int, *, nyquist_mask: bool):
-    """The operator set for ``grid``: :class:`SpectralOps` for three axes, :class:`SpectralOps2D` for two."""
+def make_ops(grid, n_species: int, *, nyquist_mask: bool,
+             dtype: Optional[torch.dtype] = None):
+    """The operator set for ``grid``: :class:`SpectralOps` for three axes, :class:`SpectralOps2D` for two.
+    ``dtype``: ``None`` (float32, the default) or ``torch.float64``; passed on only when given."""
+    kw = {} if dtype is None else {"dtype": dtype}
     if len(grid) == 3:
-        return SpectralOps(grid, n_species, nyquist_mask=nyquist_mask)
+        return SpectralOps(grid, n_species, nyquist_mask=nyquist_mask, **kw)
     if len(grid) == 2:
-        return SpectralOps2D(grid, n_species, nyquist_mask=nyquist_mask)
+        return SpectralOps2D(grid, n_species, nyquist_mask=nyquist_mask, **kw)
     raise ValueError(
         f"grid {tuple(grid)!r} has {len(grid)} axes; an operator set has three "
         f"(Gx, Gy, Gz) or two (Gx, Gy)")
@@ -260,6 +292,8 @@ def ops_ndim(ops) -> int:
 
 #: The operator classes, one per number of spatial axes.
 OPS_CLASSES = (SpectralOps, SpectralOps2D)
+#: Their integer mode buffers, per number of spatial axes.
+_MODE_INDICES = {3: ("NX", "NY", "NZ"), 2: ("NX", "NY")}
 
 
 def model_ndim(model) -> int:
@@ -278,10 +312,14 @@ def refuse_two_dimensions(ndim: int, what: str) -> None:
 
 class OpsCache:
     """A per-grid-shape cache of :class:`SpectralOps`, seeded with the owner's grid and grown lazily.
-    Only the seed (:attr:`ops`) is a registered submodule; later entries are moved device on lookup.
+    Only the seed (:attr:`ops`) is a registered submodule; later entries are moved device on lookup. Inside
+    :func:`exact_mode_indices` a float64 cache builds its later entries in float64 (exact integer indices).
     ``nyquist_mask`` (required, :data:`NYQUIST_MASKS`) applies to every entry. A two-axis seed ``grid``
     makes a cache of :class:`SpectralOps2D`; :attr:`ndim` is the seed's, and every lookup reads that many
     trailing axes."""
+
+    #: Set only inside :func:`exact_mode_indices`; a class attribute, so a cache pickled before it has it.
+    _exact = False
 
     def __init__(self, grid: Tuple[int, int, int], n_species: int, *,
                  nyquist_mask: bool):
@@ -321,11 +359,61 @@ class OpsCache:
             device = self.ops.NX.device
         want = torch.device(device)
         ops = self._cache.get(grid)
+        if self._exact and grid != self.grid:
+            if ops is None or ops.NX.device != want:
+                ops = self._new(grid, EXACT_INDEX_DTYPE).to(want)
+                self._cache[grid] = ops
+            return ops
         if ops is None or ops.NX.device != want:
             ops = (self.ops if grid == self.grid
                    else self._new(grid)).to(want)
             self._cache[grid] = ops
         return ops
 
-    def _new(self, grid) -> SpectralOps:
-        return make_ops(grid, self.n_species, nyquist_mask=self.nyquist_mask)
+    def _new(self, grid, dtype: Optional[torch.dtype] = None) -> SpectralOps:
+        return make_ops(grid, self.n_species, nyquist_mask=self.nyquist_mask, dtype=dtype)
+
+
+@contextmanager
+def exact_mode_indices(model) -> Iterator[None]:
+    """For the duration of a float64 rollout, ``model``'s float64 operator sets read exact integer modes.
+    Every :data:`OPS_CLASSES` submodule (and every :class:`OpsCache` seed) with float64 buffers has its
+    ``NX``/``NY``/``NZ`` replaced by their rounded values, and every float64 :class:`OpsCache` the model
+    holds builds its other grids in float64 (``dtype=torch.float64``) on a fresh entry table. On exit every
+    buffer and table is put back, so the model, its state dict and its cache are the ones it had:
+    ``model.double()`` stays a plain cast, whose ``NX`` carries the float32 ``fftfreq(G) * G`` error (about
+    ``4e-8 G``), and only the rollout reads it rounded. Float32 sets are never touched."""
+    caches, sets, seen = [], [], set()
+    modules = list(model.modules()) if callable(getattr(model, "modules", None)) else [model]
+    for m in modules:
+        if isinstance(m, OPS_CLASSES):
+            sets.append(m)
+        for value in list(vars(m).values()):
+            if (isinstance(value, OpsCache) and not value._exact
+                    and value.ops.NX.dtype == EXACT_INDEX_DTYPE and id(value) not in seen):
+                seen.add(id(value))
+                caches.append((value, value._cache))
+                sets.append(value.ops)
+    swapped, done = [], set()
+    for ops in sets:
+        if id(ops) in done:
+            continue
+        done.add(id(ops))
+        for name in _MODE_INDICES[ops_ndim(ops)]:
+            t = ops._buffers.get(name)
+            if t is not None and t.dtype == EXACT_INDEX_DTYPE:
+                exact = torch.round(t)
+                if not torch.equal(exact, t):
+                    swapped.append((ops, name, t))
+                    ops._buffers[name] = exact
+    for cache, table in caches:
+        cache._cache = {cache.grid: cache.ops}
+        cache._exact = True
+    try:
+        yield
+    finally:
+        for cache, table in reversed(caches):
+            cache._cache = table
+            cache._exact = False
+        for ops, name, t in reversed(swapped):
+            ops._buffers[name] = t
