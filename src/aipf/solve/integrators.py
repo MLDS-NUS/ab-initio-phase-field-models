@@ -4,7 +4,11 @@ External drive (off by default, bit-for-bit absent when off): ``v_ext`` adds ``V
 ``T_field`` adds ``psi_i(r) = mu^loc_i(rho(r), T(r)) - mu^loc_i(rho(r), T)``, both as ``div[M grad psi]``.
 Under noise ``T_field`` also scales the amplitude per cell (local-equilibrium convention).
 Two dimensions are declared by the model's operator set (``model.ops.ndim``), never read off a shape; the
-noise there needs the cell's extent along the averaged axis, ``depth`` (:func:`check_depth`)."""
+noise there needs the cell's extent along the averaged axis, ``depth`` (:func:`check_depth`).
+Precision: an operator set built here takes the dtype of the model's own (``model.ops``), so a float64 model
+gets float64 wavenumbers with exact integer mode indices; a float64 state on float64 operators also reads
+``boxes`` and ``T`` in float64, and the two rollouts read the model's own operator sets with exact indices
+(:func:`aipf.spectral.exact_mode_indices`). A float32 model and state run exactly as they always did."""
 from __future__ import annotations
 
 import math
@@ -13,9 +17,10 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, FLUX_EINSUM,
-                           MATRIX_LAST, MATRIX_SECOND, SpectralOps,
-                           half_spectrum_grid, make_ops, model_ndim, ops_ndim)
+from aipf.spectral import (CHANNEL_LAST, CHANNEL_SECOND, EXACT_INDEX_DTYPE,
+                           FLUX_EINSUM, MATRIX_LAST, MATRIX_SECOND, SpectralOps,
+                           exact_mode_indices, half_spectrum_grid, make_ops,
+                           model_ndim, ops_ndim)
 from .declare import UNDECLARED
 from .guards import assert_finite, clamped_inputs, kappa_roll_correction
 from .noise import build_noise_filter, check_depth, check_noise_declaration
@@ -34,12 +39,36 @@ def _ops_for(rho_hat: torch.Tensor, ops: Optional[SpectralOps],
         raise ValueError(
             "no operator set was passed and the model has none (model.ops) "
             "declaring nyquist_mask; pass ops=, built with the model's declaration")
+    # The model's own operator dtype: float64 after model.double(), else the float32 set it always was.
+    f64 = getattr(getattr(model.ops, "NX", None), "dtype", None) == EXACT_INDEX_DTYPE
+    kw = {"dtype": EXACT_INDEX_DTYPE} if f64 else {}
     if model_ndim(model) == 2:
         grid = half_spectrum_grid(rho_hat.shape[-2:], model.ops.grid)
-        return make_ops(grid, n_species, nyquist_mask=declared).to(rho_hat.device)
+        return make_ops(grid, n_species, nyquist_mask=declared, **kw).to(rho_hat.device)
     Gx, Gy, Gzr = (int(s) for s in rho_hat.shape[-3:])
     grid = (Gx, Gy, 2 * (Gzr - 1))
-    return SpectralOps(grid, n_species, nyquist_mask=declared).to(rho_hat.device)
+    return SpectralOps(grid, n_species, nyquist_mask=declared, **kw).to(rho_hat.device)
+
+
+def _exact_if_float64(model, rho_hat: torch.Tensor, ops):
+    """:func:`exact_mode_indices` for a float64 state on float64 operators; ``nullcontext`` otherwise."""
+    nx = getattr(ops, "NX", None)
+    if rho_hat.real.dtype == torch.float64 and nx is not None and nx.dtype == torch.float64:
+        return exact_mode_indices(model)
+    return nullcontext()
+
+
+def _in_float64(rho_hat: torch.Tensor, ops, boxes: torch.Tensor, T: torch.Tensor):
+    """``(boxes, T)`` cast to float64 when the state and ``ops`` are float64; otherwise as given."""
+    nx = getattr(ops, "NX", None)
+    if (rho_hat.real.dtype != torch.float64 or nx is None
+            or nx.dtype != torch.float64):
+        return boxes, T
+    if boxes.is_floating_point() and boxes.dtype != torch.float64:
+        boxes = boxes.to(torch.float64)
+    if isinstance(T, torch.Tensor) and T.is_floating_point() and T.dtype != torch.float64:
+        T = T.to(torch.float64)
+    return boxes, T
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +209,7 @@ def step_euler(model: torch.nn.Module, rho_hat: torch.Tensor,
     """Forward Euler: ``rho_hat + dt * rhs(rho_hat)``."""
     n_species = rho_hat.shape[1]
     ops = _ops_for(rho_hat, ops, n_species, model)
+    boxes, T = _in_float64(rho_hat, ops, boxes, T)
     rhs = _rhs(model, rho_hat, boxes, T, ops, kappa_roll, v_ext, T_field)
     return rho_hat + dt * rhs
 
@@ -192,6 +222,7 @@ def step_heun(model: torch.nn.Module, rho_hat: torch.Tensor,
     """Explicit trapezoidal (Heun / SSPRK2) predictor-corrector."""
     n_species = rho_hat.shape[1]
     ops = _ops_for(rho_hat, ops, n_species, model)
+    boxes, T = _in_float64(rho_hat, ops, boxes, T)
     k1 = _rhs(model, rho_hat, boxes, T, ops, kappa_roll, v_ext, T_field)
     predictor = rho_hat + dt * k1
     k2 = _rhs(model, predictor, boxes, T, ops, kappa_roll, v_ext, T_field)
@@ -273,7 +304,7 @@ def rollout_deterministic(model: torch.nn.Module, rho_hat0: torch.Tensor,
 
     rho_hat = rho_hat0
     traj: List[torch.Tensor] = [rho_hat.clone()]
-    with _input_guard(model, guard_floor):
+    with _input_guard(model, guard_floor), _exact_if_float64(model, rho_hat0, ops):
         for step in range(1, n_steps + 1):
             rho_hat = step_fn(model, rho_hat, boxes, T, dt, ops=ops,
                               kappa_roll=kappa_roll, v_ext=v_ext,
@@ -323,6 +354,7 @@ def step_sde_euler_maruyama(model: torch.nn.Module, rho_hat: torch.Tensor,
     declares ``depth`` (:func:`check_depth`); a three-dimensional one leaves it unset."""
     n_species = rho_hat.shape[1]
     ops = _ops_for(rho_hat, ops, n_species, model)
+    boxes, T = _in_float64(rho_hat, ops, boxes, T)
     ndim = ops_ndim(ops)
     if ndim != 2 and depth is not None:
         check_depth(depth, ndim, True)
@@ -416,7 +448,7 @@ def rollout_sde(model: torch.nn.Module, rho_hat0: torch.Tensor,
 
     rho_hat = rho_hat0
     traj: List[torch.Tensor] = [rho_hat.clone()]
-    with _input_guard(model, guard_floor):
+    with _input_guard(model, guard_floor), _exact_if_float64(model, rho_hat0, ops):
         for step in range(1, n_steps + 1):
             rho_hat = step_sde_euler_maruyama(
                 model, rho_hat, boxes, T, dt, kBT_noise,
