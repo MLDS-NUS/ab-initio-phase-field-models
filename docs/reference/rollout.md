@@ -11,8 +11,10 @@ two. Two drivers, `aipf.rollout.spinodal.spinodal` and `aipf.rollout.slab.slab`:
 Both sides go through one reconstruction: the archived modes are scattered onto the declared grid
 and filtered by `exp(-k^2 sigma^2 / 2)` with `defaults["sigma"]`.
 
-    spinodal(system, ckpt, *, run, seeds, t_end, dt, save_ps, device, out=None, declaration=None) -> Path
-    slab(system, ckpt, *, run, seeds, t_end, dt, save_ps, device, out=None, declaration=None) -> Path
+    spinodal(system, ckpt, *, run, seeds, t_end, dt, save_ps, device, out=None, declaration=None,
+             precision="fp32") -> Path
+    slab(system, ckpt, *, run, seeds, t_end, dt, save_ps, device, out=None, declaration=None,
+         precision="fp32") -> Path
 
 | argument | meaning |
 |---|---|
@@ -23,9 +25,11 @@ and filtered by `exp(-k^2 sigma^2 / 2)` with `defaults["sigma"]`.
 | `device` | a torch device |
 | `out` | the output root; `None` is `<data>/<system>/rollout/` |
 | `declaration` | a block of the shape of `defaults["rollout"]` that replaces it |
+| `precision` | `"fp32"` (the default, the published rollouts) or `"fp64"` ([Precision](#precision)) |
 
 The output directory is `<out>/<md5[:12]>/`, the digest of the driver, the checkpoint's md5 and the
-whole request, so a repeated request lands in the same place.
+whole request, so a repeated request lands in the same place. `precision` enters the request only when
+it is not `fp32`: an fp32 run keeps the directory and manifest it always had, an fp64 run gets its own.
 
 ## The declaration
 
@@ -91,6 +95,50 @@ box `(2,)` for the semi-implicit one, `(B, 2)` boxes for the explicit ones, `kbt
 (`dV = dA * depth`; 1.0 for areal densities, `Lz` for volumetric ones), and a three-dimensional call
 declares none. See [functional.md](functional.md#two-dimensions).
 
+## Precision
+
+Both precisions run the same scheme; which one is chosen by the dtype of the state and the model
+(`aipf.solve.precision.working_dtypes`), never by a separate argument of `rollout_imex`:
+
+| state | model | runs |
+|---|---|---|
+| `complex64` | float32 | the float32 scheme the published rollouts ran, bit for bit (`tests/golden`) |
+| `complex128` | float64 (`model.double()`) | float64 / complex128 end to end |
+| `complex128` | float32 | refused: cast the model with `model.double()`, or the state with `rho_hat.to(torch.complex64)` |
+| `complex64` | float64 | refused: cast the state with `rho_hat.to(torch.complex128)`, or the model with `model.float()` |
+
+A model's precision is that of its parameters and of its operator set's mode buffer `ops.NX` (other
+buffers are not read; a float32 model may carry a float64 constant). On the float64 path every tensor
+the scheme makes is float64 or complex128: the operator set and its wavenumbers, `k^2`, `A^-1`, `M_s H`
+and the predictor's pair, the local Hessian, `M_s` (hook, `mean` or `max`), `T`, the box, `kbt_field`
+and `v_ext` (cast from whatever they are given in; give the box in float64 when its lengths are not
+float32 numbers), the noise filter, draws and divergence, the Hermitian repair and the projections.
+`tests/unit/test_rollout_float64.py` checks it against an independent float64 numpy step to `1e-12`
+and audits every tensor a torch function returns during the rollout.
+
+The wavenumbers come from exact integer mode indices. The float32 buffer `NX = fftfreq(G) * G` is an
+integer only to about `4e-8 G` (`3.8e-6` at `G = 100`, `3e-5` at `G = 1000`), and `model.double()` is a
+plain cast that keeps that error. `SpectralOps(..., dtype=torch.float64)` (and `SpectralOps2D`,
+`make_ops`) builds every buffer in float64 with `NX` rounded to integers; the scheme builds its own
+operator set that way, and for the duration of the call `aipf.spectral.exact_mode_indices(model)` has
+the model's float64 operator sets read their `NX`, `NY`, `NZ` rounded and its `OpsCache` build other grids
+in float64. Everything is put back on exit: the model, its state dict and its cache are the ones it had.
+A float32 set is never touched, and a float64 set has the float32 one's state-dict keys and shapes.
+
+A float64 noisy run draws float64 normals: the same seed is not the float32 run's random stream, and the
+two noisy trajectories are not comparable draw for draw.
+
+The explicit integrators (`aipf.solve`) follow the model the same way: an operator set they build takes
+the dtype of `model.ops` (float64 with exact indices for a float64 model), a float64 state on float64
+operators reads `boxes` and `T` in float64, and `rollout_deterministic` / `rollout_sde` run inside
+`exact_mode_indices`.
+
+The drivers take `precision="fp64"` (and `aipf rollout --precision fp64`): the loaded model is cast in
+place (`model.double()`), and the initial state and box are cast to float64 before the solver. The
+initial state is the archive's modes as read (scattered `complex64`, then filtered), cast; only the
+rollout itself is float64.
+`aipf.rollout.fdt.run_one` takes it too, and builds its homogeneous state and `H(k)` in float64.
+
 ## Outputs
 
 `spinodal_<run>_<det|s<seed>>.npz`: `t_model`, `Phi_model`, `L_model`, `Sk_model`, `t_md`, `Phi_md`,
@@ -102,7 +150,8 @@ declares none. See [functional.md](functional.md#two-dimensions).
 `T_K`, `t_fields`, `c_model`, `c_md`, `rho_hat_final`.
 
 `MANIFEST.json`: system, driver, checkpoint and md5, the noise declaration, the request (with the
-declaration used) and the files written.
+declaration used, and `precision` for an fp64 run) and the files written. An fp64 run's
+`rho_hat_final` is `complex128`.
 
 ## Example
 

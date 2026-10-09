@@ -179,10 +179,14 @@ and the command prints it. See [diagnose.md](diagnose.md).
 
     aipf rollout {spinodal,slab} --system S --ckpt {FILE|published} --run RUN --seeds [N ...]
                  --t-end T --dt DT --save-ps DT_SAVE --device DEV --out {DIR|data} [--variant NAME]
+                 [--precision {fp32,fp64}]
 
-Every flag is required. `--seeds` with no value is one deterministic rollout; each seed is one noisy
-rollout. Times are in ps. `--device` is a torch device (`cpu`, `cuda`, `cuda:1`). `--out data` writes
-under `<data>/<system>/rollout/`. Prints the output directory. See [rollout.md](rollout.md).
+Every flag is required but `--variant` and `--precision`. `--seeds` with no value is one deterministic
+rollout; each seed is one noisy rollout. Times are in ps. `--device` is a torch device (`cpu`, `cuda`,
+`cuda:1`). `--out data` writes under `<data>/<system>/rollout/`. `--precision` is `fp32` by default (the
+published rollouts, the same output directory and manifest as without the flag); `fp64` casts the model
+and the initial state to float64 and runs the solver in float64, is recorded in the manifest's request
+and so writes to its own directory. Prints the output directory. See [rollout.md](rollout.md#precision).
 
 ## --variant
 

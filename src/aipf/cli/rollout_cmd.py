@@ -1,7 +1,9 @@
 """``aipf rollout {spinodal,slab}`` -- the two basic checks on a trained functional.
 
-Every flag is required; the solver, archive and grid come off ``system.defaults["rollout"]`` and the noise
-off ``system.noise``."""
+Every flag is required but ``--precision`` (default ``fp32``, the published rollouts' precision; ``fp64``
+casts the model and the initial state to float64 before the solver and is recorded in the output's
+declaration, so it gets its own directory); the solver, archive and grid come off
+``system.defaults["rollout"]`` and the noise off ``system.noise``."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +19,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "rollout", help="roll a trained functional from a measured run",
         description="Integrate the declared functional from frame 0 of an "
                     "archived run and compare with that run. Nothing below "
-                    "has a default.")
+                    "has a default but --precision.")
     p.add_argument("driver", choices=("spinodal", "slab"))
     p.add_argument("--system", required=True)
     variant.add_argument(p)
@@ -35,6 +37,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--device", required=True)
     p.add_argument("--out", required=True,
                    help="output root; 'data' is data/<system>/rollout")
+    p.add_argument("--precision", choices=("fp32", "fp64"), default="fp32",
+                   help="fp32 (default, as published) or fp64: the model and the initial "
+                        "state cast to float64, recorded in the output declaration")
     p.set_defaults(func=run)
 
 
@@ -69,5 +74,6 @@ def run(args: argparse.Namespace) -> int:
     out = None if args.out == "data" else Path(args.out)
     print(driver(system, args.ckpt, run=args.run,
                  seeds=tuple(args.seeds), t_end=args.t_end, dt=args.dt,
-                 save_ps=args.save_ps, device=args.device, out=out))
+                 save_ps=args.save_ps, device=args.device, out=out,
+                 precision=args.precision))
     return 0

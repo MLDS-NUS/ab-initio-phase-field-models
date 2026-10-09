@@ -16,6 +16,7 @@ import torch
 
 from aipf.paths import PUBLISHED_DIRNAME
 from aipf.solve.noise import declared_noise
+from aipf.solve.precision import PRECISIONS, cast_pair, check_precision
 from aipf.solve.trust_domain import TrustDomain
 from aipf.spectral import SpectralOps, model_ndim, refuse_two_dimensions
 from aipf.system import System
@@ -172,8 +173,12 @@ def run_rollout(system: System, model, decl: dict, h0: torch.Tensor,
                 box0: np.ndarray, T: float, *, t_end: float, dt: float,
                 save_ps: float, seed: Optional[int], device: str,
                 eps: float = 1.0, state_proj: Optional[str] = None,
-                state_clamp=None) -> torch.Tensor:
-    """One rollout under the declaration; ``seed=None`` is deterministic. Returns CPU states."""
+                state_clamp=None, precision: str = "fp32") -> torch.Tensor:
+    """One rollout under the declaration; ``seed=None`` is deterministic. Returns CPU states.
+    ``precision="fp64"`` casts the model (in place, ``model.double()``), ``h0`` and the box to float64
+    before the solver (:mod:`aipf.solve.precision`); ``"fp32"`` hands them over as they are."""
+    model, h0 = cast_pair(model, h0, precision)
+    box_dtype = PRECISIONS[precision][0]
     s = decl["solver"]
     n_steps = int(round(t_end / dt))
     save_every = max(1, int(round(save_ps / dt)))
@@ -184,7 +189,7 @@ def run_rollout(system: System, model, decl: dict, h0: torch.Tensor,
         generator.manual_seed(int(seed))
         noise = noise_for(system, decl, T, eps)
     return rollout_imex(
-        model, h0.to(device), torch.tensor(box0, dtype=torch.float32), T, dt,
+        model, h0.to(device), torch.tensor(box0, dtype=box_dtype), T, dt,
         n_steps, kB=float(system.constants["kB"]),
         m_stab=declared_noise(system)["m_stab"],
         state_proj=state_proj or s["state_proj"],
@@ -192,6 +197,17 @@ def run_rollout(system: System, model, decl: dict, h0: torch.Tensor,
         domain=trust_domain(system), mass_restore=s["mass_restore"],
         clamp_rho=s["clamp_rho"], noise=noise, save_every=save_every,
         generator=generator)
+
+
+def run_record(run: str, seeds: Sequence[int], t_end: float, dt: float,
+               save_ps: float, decl: dict, precision: str = "fp32") -> dict:
+    """What a driver's output directory is hashed from and its manifest records. ``precision`` enters only
+    when it is not ``"fp32"``, so every float32 run keeps the directory and manifest it always had."""
+    record = {"run": run, "seeds": list(seeds), "t_end": t_end, "dt": dt,
+              "save_ps": save_ps, "declaration": decl}
+    if check_precision(precision) != "fp32":
+        record["precision"] = precision
+    return record
 
 
 def output_dir(system: System, driver: str, ckpt_md5: str,
@@ -224,14 +240,15 @@ def _file_md5(path: Path) -> str:
 def spinodal(system: System, ckpt, *, run: str, seeds: Sequence[int],
              t_end: float, dt: float, save_ps: float, device: str,
              out: Optional[Path] = None,
-             declaration: Optional[Mapping[str, Any]] = None) -> Path:
+             declaration: Optional[Mapping[str, Any]] = None,
+             precision: str = "fp32") -> Path:
     """Roll the cube ``run`` once per seed (``seeds`` empty: one deterministic rollout) and write
-    ``spinodal_<run>_<tag>.npz`` plus ``MANIFEST.json``; returns the output directory."""
+    ``spinodal_<run>_<tag>.npz`` plus ``MANIFEST.json``; returns the output directory. ``precision``:
+    ``"fp32"`` (the published rollouts) or ``"fp64"`` (:func:`run_rollout`), recorded when not fp32."""
     decl = declared(system, "spinodal", declaration)
     path = resolve_checkpoint(system, ckpt)
     md5 = _file_md5(path)
-    record = {"run": run, "seeds": list(seeds), "t_end": t_end, "dt": dt,
-              "save_ps": save_ps, "declaration": decl}
+    record = run_record(run, seeds, t_end, dt, save_ps, decl, precision)
     out_dir = output_dir(system, "spinodal", md5, record, out)
     model = load_model(system, path).to(device)
     md = read_run(system, decl, "spinodal", run)
@@ -245,7 +262,7 @@ def spinodal(system: System, ckpt, *, run: str, seeds: Sequence[int],
     for seed in (list(seeds) or [None]):
         traj = run_rollout(system, model, decl, md.rho_hat[0:1], md.boxes[0],
                            md.T, t_end=t_end, dt=dt, save_ps=save_ps,
-                           seed=seed, device=device)
+                           seed=seed, device=device, precision=precision)
         rho_m = ops.irfft(traj * N).numpy()
         t_m = np.arange(len(rho_m)) * save_ps
         Phi_m, L_m, Sk_m = decomp_metrics(

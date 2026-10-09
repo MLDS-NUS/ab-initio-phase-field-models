@@ -14,20 +14,22 @@ from aipf.system import System
 from .observables import (conc_profile, extract_plateaus, field_frames,
                           interface_width, weighted_var_c)
 from .spinodal import (_file_md5, declared, load_model, output_dir, read_run,
-                       resolve_checkpoint, run_rollout, write_manifest)
+                       resolve_checkpoint, run_record, run_rollout,
+                       write_manifest)
 
 
 def slab(system: System, ckpt, *, run: str, seeds: Sequence[int],
          t_end: float, dt: float, save_ps: float, device: str,
          out: Optional[Path] = None,
-         declaration: Optional[Mapping[str, Any]] = None) -> Path:
+         declaration: Optional[Mapping[str, Any]] = None,
+         precision: str = "fp32") -> Path:
     """Roll the slab ``run`` (once per seed, or once deterministically) and write ``<run>_<tag>.npz`` plus
-    ``MANIFEST.json``; returns the output directory."""
+    ``MANIFEST.json``; returns the output directory. ``precision`` as
+    :func:`aipf.rollout.spinodal.spinodal`."""
     decl = declared(system, "slab", declaration)
     path = resolve_checkpoint(system, ckpt)
     md5 = _file_md5(path)
-    record = {"run": run, "seeds": list(seeds), "t_end": t_end, "dt": dt,
-              "save_ps": save_ps, "declaration": decl}
+    record = run_record(run, seeds, t_end, dt, save_ps, decl, precision)
     out_dir = output_dir(system, "slab", md5, record, out)
     model = load_model(system, path).to(device)
     md = read_run(system, decl, "slab", run)
@@ -45,7 +47,7 @@ def slab(system: System, ckpt, *, run: str, seeds: Sequence[int],
     for seed in (list(seeds) or [None]):
         traj = run_rollout(system, model, decl, md.rho_hat[0:1], md.boxes[0],
                            md.T, t_end=t_end, dt=dt, save_ps=save_ps,
-                           seed=seed, device=device)
+                           seed=seed, device=device, precision=precision)
         rho_m = ops.irfft(traj * N).numpy()
         t_m = np.arange(len(rho_m)) * save_ps
         sel_m, idx_md = field_frames(t_m, t_md, decl["slab"]["field_stride"])
