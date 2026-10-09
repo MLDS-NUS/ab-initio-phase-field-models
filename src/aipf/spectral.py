@@ -394,26 +394,29 @@ def exact_mode_indices(model) -> Iterator[None]:
                 seen.add(id(value))
                 caches.append((value, value._cache))
                 sets.append(value.ops)
-    swapped, done = [], set()
-    for ops in sets:
-        if id(ops) in done:
-            continue
-        done.add(id(ops))
-        for name in _MODE_INDICES[ops_ndim(ops)]:
-            t = ops._buffers.get(name)
-            if t is not None and t.dtype == EXACT_INDEX_DTYPE:
-                exact = torch.round(t)
-                if not torch.equal(exact, t):
-                    swapped.append((ops, name, t))
-                    ops._buffers[name] = exact
-    for cache, table in caches:
-        cache._cache = {cache.grid: cache.ops}
-        cache._exact = True
+    swapped, replaced, done = [], [], set()
     try:
+        for ops in sets:
+            if id(ops) in done:
+                continue
+            done.add(id(ops))
+            for name in _MODE_INDICES[ops_ndim(ops)]:
+                t = ops._buffers.get(name)
+                if t is not None and t.dtype == EXACT_INDEX_DTYPE:
+                    exact = torch.round(t)
+                    if not torch.equal(exact, t):
+                        swapped.append((ops, name, t))      # recorded before the swap it undoes
+                        ops._buffers[name] = exact
+        for cache, table in caches:
+            replaced.append((cache, table))
+            cache._cache = {cache.grid: cache.ops}
+            cache._exact = True
         yield
     finally:
-        for cache, table in reversed(caches):
+        for cache, table in reversed(replaced):
             cache._cache = table
             cache._exact = False
         for ops, name, t in reversed(swapped):
-            ops._buffers[name] = t
+            current = ops._buffers.get(name)
+            # the set may have been moved inside the call (ops_for_grid's .to(device)): stay where it is
+            ops._buffers[name] = t if current is None else t.to(current.device)

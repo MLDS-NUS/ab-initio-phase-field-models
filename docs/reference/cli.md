@@ -184,8 +184,8 @@ and the command prints it. See [diagnose.md](diagnose.md).
 Every flag is required but `--variant` and `--precision`. `--seeds` with no value is one deterministic
 rollout; each seed is one noisy rollout. Times are in ps. `--device` is a torch device (`cpu`, `cuda`,
 `cuda:1`). `--out data` writes under `<data>/<system>/rollout/`. `--precision` is `fp32` by default (the
-published rollouts, the same output directory and manifest as without the flag); `fp64` casts the model
-and the initial state to float64 and runs the solver in float64, is recorded in the manifest's request
+published rollouts, the same output directory and manifest as without the flag); `fp64` runs the solver
+in float64 on a float64 copy of the model and the cast initial state, is recorded in the manifest's request
 and so writes to its own directory. Prints the output directory. See [rollout.md](rollout.md#precision).
 
 ## --variant

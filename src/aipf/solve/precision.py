@@ -2,9 +2,10 @@
 A ``complex64`` state with a float32 model runs the float32 path the published rollouts ran; a ``complex128``
 state with a float64 model runs float64 / complex128 throughout. A mixed pair is refused, naming both dtypes
 and the cast that makes them agree. :data:`PRECISIONS` names the two for the drivers and the CLI
-(``--precision``), which cast the model and the initial state before the solver (:func:`cast_pair`)."""
+(``--precision``), which run a float64 copy of the model on the cast initial state (:func:`cast_pair`)."""
 from __future__ import annotations
 
+import copy
 from typing import Set, Tuple
 
 import torch
@@ -67,9 +68,10 @@ def working_dtypes(model, rho_hat: torch.Tensor, what: str) -> Tuple[torch.dtype
 
 
 def cast_pair(model, rho_hat: torch.Tensor, precision: str):
-    """``(model, rho_hat)`` in ``precision``; ``"fp32"`` returns both untouched (no copy, no cast)."""
+    """``(model, rho_hat)`` in ``precision``. ``"fp32"`` returns both untouched (no copy, no cast); ``"fp64"``
+    returns a float64 COPY of the model (``copy.deepcopy`` then cast), so the caller's model keeps its dtype."""
     check_precision(precision)
     if precision == "fp32":
         return model, rho_hat
     real, cplx = PRECISIONS[precision]
-    return model.to(real), rho_hat.to(cplx)
+    return copy.deepcopy(model).to(real), rho_hat.to(cplx)

@@ -124,7 +124,9 @@ def test_cast_pair_leaves_fp32_untouched_and_casts_fp64():
     m, s = cast_pair(model, h, "fp32")
     assert m is model and s is h and model.weight.dtype == torch.float32
     m, s = cast_pair(model, h, "fp64")
-    assert m is model and model.weight.dtype == torch.float64 and s.dtype == torch.complex128
+    assert m is not model and m.weight.dtype == torch.float64 and s.dtype == torch.complex128
+    assert model.weight.dtype == torch.float32                   # the caller's model is a float32 one still
+    assert torch.equal(m.weight, model.weight.double())
     assert torch.equal(s, h.to(torch.complex128))
     assert PRECISIONS[check_precision("fp64")] == (torch.float64, torch.complex128)
 
@@ -158,6 +160,18 @@ def test_run_rollout_in_fp64_hands_the_solver_a_float64_pair(demo, monkeypatch, 
     assert traj.dtype == torch.complex128 and traj.shape == (4, 2, 4, 4, 3)
     assert torch.equal(traj[:, :, 0, 0, 0].real,
                        h0[0, :, 0, 0, 0].real.double().expand(4, 2))
+
+
+def test_an_fp64_run_leaves_the_callers_model_for_a_later_fp32_one(demo):
+    model = _model(demo)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    h0, box = _field(), np.array([8.0, 8.0, 8.0])
+    kw = dict(t_end=0.05, dt=0.01, save_ps=0.02, seed=None, device="cpu")
+    fresh = run_rollout(demo, _model(demo), DECL, h0, box, 1.0, **kw)
+    run_rollout(demo, model, DECL, h0, box, 1.0, precision="fp64", **kw)
+    after = model.state_dict()
+    assert all(after[k].dtype == before[k].dtype and torch.equal(after[k], before[k]) for k in before)
+    assert torch.equal(run_rollout(demo, model, DECL, h0, box, 1.0, **kw), fresh)
 
 
 def test_run_rollout_by_default_hands_the_solver_what_it_always_did(demo, monkeypatch):
@@ -222,5 +236,5 @@ def test_the_fdt_gate_in_fp64_builds_its_state_and_hessian_in_float64(demo, monk
                           save_dt=0.01, burn_in=0.2, k_band=2.0, seed=0, device="cpu",
                           precision="fp64")
     assert seen == [(torch.complex128, torch.float64)]
-    assert next(model.parameters()).dtype == torch.float64
+    assert next(model.parameters()).dtype == torch.float32      # run on a copy
     assert np.isfinite(res["r_tr_mode"]).all()

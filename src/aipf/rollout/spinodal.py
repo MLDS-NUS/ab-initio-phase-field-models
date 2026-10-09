@@ -175,8 +175,8 @@ def run_rollout(system: System, model, decl: dict, h0: torch.Tensor,
                 eps: float = 1.0, state_proj: Optional[str] = None,
                 state_clamp=None, precision: str = "fp32") -> torch.Tensor:
     """One rollout under the declaration; ``seed=None`` is deterministic. Returns CPU states.
-    ``precision="fp64"`` casts the model (in place, ``model.double()``), ``h0`` and the box to float64
-    before the solver (:mod:`aipf.solve.precision`); ``"fp32"`` hands them over as they are."""
+    ``precision="fp64"`` hands the solver a float64 copy of the model (the caller's is untouched) and ``h0``
+    and the box in float64 (:mod:`aipf.solve.precision`); ``"fp32"`` hands them over as they are."""
     model, h0 = cast_pair(model, h0, precision)
     box_dtype = PRECISIONS[precision][0]
     s = decl["solver"]

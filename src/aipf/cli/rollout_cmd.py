@@ -1,8 +1,8 @@
 """``aipf rollout {spinodal,slab}`` -- the two basic checks on a trained functional.
 
 Every flag is required but ``--precision`` (default ``fp32``, the published rollouts' precision; ``fp64``
-casts the model and the initial state to float64 before the solver and is recorded in the output's
-declaration, so it gets its own directory); the solver, archive and grid come off
+runs the solver on a float64 copy of the model and the cast initial state, and is recorded in the
+output's declaration, so it gets its own directory); the solver, archive and grid come off
 ``system.defaults["rollout"]`` and the noise off ``system.noise``."""
 from __future__ import annotations
 

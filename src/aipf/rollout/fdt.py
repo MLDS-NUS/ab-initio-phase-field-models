@@ -9,8 +9,7 @@ import numpy as np
 import torch
 
 from aipf.solve.noise import declared_noise
-from aipf.solve.precision import (PRECISIONS, cast_pair, check_precision,
-                                  model_float_dtypes)
+from aipf.solve.precision import PRECISIONS, cast_pair, check_precision
 from aipf.solve.trust_domain import in_domain
 from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.system import System
@@ -33,12 +32,11 @@ def homogeneous_state(rho_bar, grid, device,
     return h
 
 
-def hessian_of_k(model, rho_bar, kBT: float, kmag) -> np.ndarray:
-    """``H(k) = Hess f_loc(rho_bar) + W_hat(k)`` per mode, float64 ``(M, n, n)``; evaluated in float32, or
-    in float64 for a float64 model."""
+def hessian_of_k(model, rho_bar, kBT: float, kmag,
+                 real: torch.dtype = torch.float32) -> np.ndarray:
+    """``H(k) = Hess f_loc(rho_bar) + W_hat(k)`` per mode, float64 ``(M, n, n)``; evaluated in ``real``
+    (float32, or float64 on :func:`run_one`'s fp64 path)."""
     device = next(model.parameters()).device
-    real = (torch.float64 if torch.float64 in model_float_dtypes(model)
-            else torch.float32)
     rb = torch.as_tensor(np.asarray(rho_bar), dtype=real,
                          device=device)
     Hb = local_hessian(model, rb, kBT)
@@ -55,8 +53,8 @@ def run_one(system: System, model, decl: dict, *, box, rho_bar, grid, T: float,
             precision: str = "fp32") -> dict:
     """One noisy rollout with the projection off (``"floor"`` at 0) and its per-mode ratios to ``S_pred``.
     ``v_ext``/``kbt_field`` pass through to the scheme; ``S_pred`` assumes them uniform (``kbt_field = kB T``).
-    ``precision="fp64"`` casts the model in place (``model.double()``) and builds the state and box in
-    float64."""
+    ``precision="fp64"`` runs a float64 copy of the model (the caller's is untouched) and builds the state,
+    the box and ``H(k)`` in float64."""
     refuse_two_dimensions(model_ndim(model), "the FDT gate")
     refuse_two_dimensions(len(grid), "the FDT gate")
     real, cplx = PRECISIONS[check_precision(precision)]
@@ -85,7 +83,8 @@ def run_one(system: System, model, decl: dict, *, box, rho_bar, grid, T: float,
     kb, wb = kf[band], wf[band]
     n = S.shape[-1]
     S_meas = S.reshape(-1, n, n)[band]
-    H = hessian_of_k(model, rho_bar, kB * T, kb)
+    H = (hessian_of_k(model, rho_bar, kB * T, kb) if precision == "fp32"
+         else hessian_of_k(model, rho_bar, kB * T, kb, real))
     S_pred = s_pred_from_H(H, kB * T * eps, kb, noise["sigma_noise"])
     tr_m, cc_m = trace_and_cc(S_meas)
     tr_p, cc_p = trace_and_cc(S_pred)

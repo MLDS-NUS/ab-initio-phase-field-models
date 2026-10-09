@@ -24,7 +24,6 @@ import toy_factory_model as toy
 from aipf.functional.build import build
 from aipf.rollout import imex as imex_mod
 from aipf.rollout.imex import rollout_imex
-from aipf.solve import rollout_deterministic, rollout_sde
 from aipf.spectral import (OpsCache, SpectralOps, SpectralOps2D, exact_mode_indices,
                            make_ops)
 from aipf.system import TrustDomain
@@ -481,26 +480,60 @@ def test_float64_noise_is_drawn_in_float64_a_stream_of_its_own(twins, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# the explicit solvers: a float64 model and state stay float64 there too
+# the exact-index context puts everything back
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("which", ["deterministic", "sde"])
-def test_the_explicit_solvers_make_no_single_precision_tensor_for_a_float64_pair(twins, which):
-    m2, _ = twins
-    h0 = _hat2(_rho2())
-    boxes = BOX2.float().view(1, 2)                            # float32 boxes and T are read in float64
-    T_t = torch.tensor([T])
-    v_ext = 0.01 * torch.randn(2, *GRID2, generator=torch.Generator().manual_seed(5),
-                               dtype=torch.float64)
-    common = dict(state_proj="floor", floor=0.0, clamp_rho=None, kappa_roll=0.05, v_ext=v_ext,
-                  T_field=torch.full(GRID2, T, dtype=torch.float64))
-    audit = _Audit()
-    with audit:
-        if which == "deterministic":
-            traj = rollout_deterministic(m2, h0, boxes, T_t, 1e-3, 3, method="heun", **common)
-        else:
-            traj = rollout_sde(m2, h0, boxes, T_t, 1e-3, 3, 0.02, noise_mode="gaussian",
-                               sigma_noise=1.0, generator=torch.Generator().manual_seed(1),
-                               depth=3.0, **common)
-    assert traj.dtype == torch.complex128
-    assert audit.single == []
+def _two_float64_sets():
+    a = NdimToyModel((100, 6), 2, nyquist_mask=True, kappa=0.5, kB=1.0).double()
+    b = NdimToyModel((100, 6, 4), 2, nyquist_mask=True, kappa=0.5, kB=1.0).double()
+    holder = torch.nn.Module()
+    holder.a, holder.b = a, b
+    return holder, a, b
+
+
+def test_an_exception_partway_through_the_swap_restores_every_buffer_and_table(monkeypatch):
+    holder, a, b = _two_float64_sets()
+    before = [(m, name, m.ops._buffers[name]) for m in (a, b) for name in ("NX", "NY")]
+    tables = [(m._cache, m._cache._cache) for m in (a, b)]
+    real_round, calls = torch.round, []
+
+    def flaky(t, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 4:                    # after a's NX and NY and b's NX: fails on b's NY
+            raise RuntimeError("injected")
+        return real_round(t, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "round", flaky)
+    with pytest.raises(RuntimeError, match="injected"):
+        with exact_mode_indices(holder):
+            pass
+    monkeypatch.setattr(torch, "round", real_round)
+    assert len(calls) == 4
+    for m, name, t in before:
+        assert m.ops._buffers[name] is t
+    for cache, table in tables:
+        assert cache._cache is table and cache._exact is False
+
+
+def test_an_exception_inside_the_call_restores_every_buffer_and_table():
+    holder, a, b = _two_float64_sets()
+    before = [(m, name, m.ops._buffers[name]) for m in (a, b) for name in ("NX", "NY", "NZ")
+              if name in m.ops._buffers]
+    with pytest.raises(KeyError):
+        with exact_mode_indices(holder):
+            assert torch.equal(a.ops.NX, a.ops.NX.round())
+            raise KeyError("inside")
+    for m, name, t in before:
+        assert m.ops._buffers[name] is t
+    assert not a._cache._exact and not torch.equal(a.ops.NX, a.ops.NX.round())
+
+
+def test_a_set_moved_inside_the_context_gets_its_buffers_back_where_it_now_is():
+    """``ops_for_grid`` may move the seed (``.to(device)``) inside the call; on exit the original buffers
+    are put back on the device the set is on then. On a CPU-only machine the move is the meta device."""
+    m = NdimToyModel((100, 6), 2, nyquist_mask=True, kappa=0.5, kB=1.0).double()
+    nx = m.ops.NX
+    with exact_mode_indices(m):
+        m.ops._buffers["NX"] = m.ops._buffers["NX"].to("meta")
+    assert m.ops.NX.device.type == "meta" and m.ops.NX.dtype == torch.float64
+    assert tuple(m.ops.NX.shape) == tuple(nx.shape)

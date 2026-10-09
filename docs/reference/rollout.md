@@ -128,16 +128,16 @@ A float32 set is never touched, and a float64 set has the float32 one's state-di
 A float64 noisy run draws float64 normals: the same seed is not the float32 run's random stream, and the
 two noisy trajectories are not comparable draw for draw.
 
-The explicit integrators (`aipf.solve`) follow the model the same way: an operator set they build takes
-the dtype of `model.ops` (float64 with exact indices for a float64 model), a float64 state on float64
-operators reads `boxes` and `T` in float64, and `rollout_deterministic` / `rollout_sde` run inside
-`exact_mode_indices`.
+The explicit integrators (`aipf.solve`) are unchanged by this option: they take no precision and run
+exactly as before for every dtype, with their own float32 operator sets.
 
-The drivers take `precision="fp64"` (and `aipf rollout --precision fp64`): the loaded model is cast in
-place (`model.double()`), and the initial state and box are cast to float64 before the solver. The
+The drivers take `precision="fp64"` (and `aipf rollout --precision fp64`): the solver is handed a float64
+copy of the model (`copy.deepcopy`, then cast; the caller's model keeps its dtype, so a later fp32 call
+with it runs as before), and the initial state and box are cast to float64. The
 initial state is the archive's modes as read (scattered `complex64`, then filtered), cast; only the
 rollout itself is float64.
-`aipf.rollout.fdt.run_one` takes it too, and builds its homogeneous state and `H(k)` in float64.
+`aipf.rollout.fdt.run_one` takes it too, on a float64 copy of the model, and builds its homogeneous
+state and `H(k)` in float64; `hessian_of_k` on its own evaluates in float32 unless told otherwise.
 
 ## Outputs
 
