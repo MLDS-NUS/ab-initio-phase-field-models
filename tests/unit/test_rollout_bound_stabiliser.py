@@ -196,7 +196,7 @@ def test_a_field_whose_cells_are_all_below_m_bar_makes_bound_the_mean_run_bit_fo
 
 
 def test_a_singular_m_bar_gives_a_finite_r_and_an_m_s_that_bounds_every_cell_in_its_null_direction(
-        monkeypatch):
+        monkeypatch, caplog):
     """``M(rho_bar) = v v^T`` is singular; the cells have mobility along its null direction ``u``. The floored
     ``M(rho_bar)`` builds ``M_s``, so ``M(rho(x)) <= M_s / margin`` holds along ``u`` too, which no multiple of
     the singular ``M(rho_bar)`` could."""
@@ -209,8 +209,9 @@ def test_a_singular_m_bar_gives_a_finite_r_and_an_m_s_that_bounds_every_cell_in_
     margin = 1.5
     seen = _spy_operators(monkeypatch)
     log = []
-    traj = rollout_imex(m, h, BOX, T, 0.1, 2, m_stab="bound", bound_margin=margin,
-                        stabiliser_log=log, **DET)
+    with caplog.at_level("WARNING", logger="aipf.rollout.imex"):
+        traj = rollout_imex(m, h, BOX, T, 0.1, 2, m_stab="bound", bound_margin=margin,
+                            stabiliser_log=log, **DET)
     assert torch.isfinite(traj).all()
     (M_s,) = seen
     assert log[0]["floored"] is True and log[0]["r_raw"] == got["r_raw"]
@@ -224,6 +225,23 @@ def test_a_singular_m_bar_gives_a_finite_r_and_an_m_s_that_bounds_every_cell_in_
     assert float(along.min()) >= -1e-12 * float(cells.max()) and float(cells[:, 0, 0].max()) > 0.0
     plain = got["r_used"] * got["M_bar"]                                  # without the floor: fails along u
     assert float(torch.linalg.eigvalsh(plain - cells).min()) < 0.0
+    (warned,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    text = warned.getMessage()
+    assert "condition number" in text and "eigenvalues floored" in text and repr(got["r_raw"]) in text
+
+
+def test_a_large_r_warns_without_a_log_and_an_ordinary_bound_run_does_not(caplog):
+    m = _model(fp64=True)
+    h = _hat(_field(), True)
+    with caplog.at_level("WARNING", logger="aipf.rollout.imex"):
+        rollout_imex(m, h, BOX, T, 0.1, 3, m_stab="bound", refresh_every=1, **DET)
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    mobility = m.mobility
+    m.mobility = lambda r, T_t: mobility(r, T_t) * (1.0 + 1e7 * (r[:, :1, None] > 0.8))   # one hot spot
+    with caplog.at_level("WARNING", logger="aipf.rollout.imex"):
+        rollout_imex(m, h, BOX, T, 0.1, 1, m_stab="bound", **DET)
+    (warned,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "condition number" in warned.getMessage() and "floored" not in warned.getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -396,16 +414,30 @@ def test_a_bound_margin_beside_another_m_stab_is_refused(m_stab):
                      bound_margin=1.5, **DET)
 
 
-@pytest.mark.parametrize("margin", [0.99, 0.0, -1.0, float("nan"), float("inf"), True, "2"])
-def test_a_bound_margin_below_one_or_not_finite_is_refused(margin):
+@pytest.mark.parametrize("margin", [0.99, 0.0, -1.0, float("nan"), float("inf")])
+def test_a_bound_margin_below_one_or_not_finite_is_a_value_error(margin):
     with pytest.raises(ValueError, match="bound_margin must be a finite number >= 1"):
         rollout_imex(_model(), _hat(_field()), BOX.float(), T, 0.1, 1, m_stab="bound",
                      bound_margin=margin, **DET)
 
 
-@pytest.mark.parametrize("every", [0, -2, 1.5, 2.0, True, "3"])
-def test_a_refresh_every_that_is_not_a_positive_int_is_refused(every):
-    with pytest.raises(ValueError, match="refresh_every must be None"):
+@pytest.mark.parametrize("margin", [True, "2", torch.tensor(1.5)], ids=["bool", "str", "tensor"])
+def test_a_bound_margin_that_is_not_a_real_number_is_a_type_error(margin):
+    with pytest.raises(TypeError, match="bound_margin must be None or a real number"):
+        rollout_imex(_model(), _hat(_field()), BOX.float(), T, 0.1, 1, m_stab="bound",
+                     bound_margin=margin, **DET)
+
+
+@pytest.mark.parametrize("every", [0, -2])
+def test_a_refresh_every_below_one_is_a_value_error(every):
+    with pytest.raises(ValueError, match="refresh_every must be >= 1"):
+        rollout_imex(_model(), _hat(_field()), BOX.float(), T, 0.1, 1, m_stab="mean",
+                     refresh_every=every, **DET)
+
+
+@pytest.mark.parametrize("every", [1.5, 2.0, True, "3"])
+def test_a_refresh_every_that_is_not_an_int_is_a_type_error(every):
+    with pytest.raises(TypeError, match="refresh_every must be None"):
         rollout_imex(_model(), _hat(_field()), BOX.float(), T, 0.1, 1, m_stab="mean",
                      refresh_every=every, **DET)
 
@@ -445,6 +477,17 @@ def test_a_non_finite_state_or_mobility_is_refused_naming_which():
     m.mobility = lambda r, T_t: 0.0 * mobility(r, T_t)
     with pytest.raises(ValueError, match="no positive eigenvalue"):
         rollout_imex(m, _hat(_field()), BOX.float(), T, 0.1, 1, m_stab="bound", **DET)
+
+
+def test_an_indefinite_m_bar_is_refused_not_floored():
+    m = _model(fp64=True)
+    mobility = m.mobility
+    eye = torch.eye(2, dtype=torch.float64).view(1, 2, 2, 1, 1)
+    m.mobility = lambda r, T_t: mobility(r, T_t) - 0.5 * eye                # M_bar's eigenvalues straddle 0
+    with pytest.raises(ValueError, match="M\\(rho_bar\\) is indefinite"):
+        rollout_imex(m, _hat(_field(), True), BOX, T, 0.1, 1, m_stab="bound", **DET)
+    with pytest.raises(ValueError, match="M\\(rho_bar\\) is indefinite"):
+        bound_ratio(m, _hat(_field(), True), T)
 
 
 def test_bound_is_a_rollout_option_and_not_a_noise_declaration():

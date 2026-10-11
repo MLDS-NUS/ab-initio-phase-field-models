@@ -51,6 +51,9 @@ BOUND = "bound"
 #: (:func:`bound_ratio`).
 BOUND_RIDGE = 1e-12
 
+#: ``m_stab="bound"`` logs a warning when ``r`` (as used) exceeds this, or when the floor acts.
+_BOUND_WARN_R = 1e6
+
 
 def _require_pair_kernel(model) -> None:
     if not (hasattr(model, "kernel") and hasattr(model.kernel, "w_hat")
@@ -155,7 +158,8 @@ def _check_bound_margin(m_stab, bound_margin, hook) -> Optional[float]:
     if bound_margin is None:
         return 1.0
     if isinstance(bound_margin, bool) or not isinstance(bound_margin, numbers.Real):
-        raise ValueError(f"bound_margin must be a finite number >= 1, got {bound_margin!r}")
+        raise TypeError(f"bound_margin must be None or a real number (finite, >= 1), got "
+                        f"{type(bound_margin).__name__} {bound_margin!r}")
     margin = float(bound_margin)
     if not (math.isfinite(margin) and margin >= 1.0):
         raise ValueError(
@@ -168,11 +172,13 @@ def _check_refresh_every(refresh_every) -> Optional[int]:
     """``refresh_every`` as an int ``>= 1``, or ``None`` (``M_s`` frozen once, at ``t = 0``)."""
     if refresh_every is None:
         return None
-    if (isinstance(refresh_every, bool) or not isinstance(refresh_every, numbers.Integral)
-            or int(refresh_every) < 1):
-        raise ValueError(
-            f"refresh_every must be None (M_s frozen once, at t = 0) or an int >= 1 (M_s re-frozen "
-            f"from the state every refresh_every steps), got {refresh_every!r}")
+    if isinstance(refresh_every, bool) or not isinstance(refresh_every, numbers.Integral):
+        raise TypeError(
+            f"refresh_every must be None (M_s frozen once, at t = 0) or an int (M_s re-frozen from "
+            f"the state every refresh_every steps), got {type(refresh_every).__name__} "
+            f"{refresh_every!r}")
+    if int(refresh_every) < 1:
+        raise ValueError(f"refresh_every must be >= 1, got {refresh_every!r}")
     return int(refresh_every)
 
 
@@ -216,7 +222,8 @@ def _bound_stabiliser(model, rho: torch.Tensor, rho_bar: torch.Tensor, T_t: torc
     ``r_raw`` their maximum and ``r_used = max(r_raw, 1)``. ``M_s = margin * r_used * M_bar`` in ``M_bar``'s
     dtype (the product taken in float64), or, when the eigenvalue floor raises any eigenvalue of ``M_bar``
     (``floored``), ``margin * r_used * V diag(lam_floored) V^T``, so the bound holds along ``M_bar``'s null
-    directions too. A non-finite ``M_bar``, cell, ``r`` or ``M_s`` is refused, naming which."""
+    directions too. A non-finite ``M_bar``, cell, ``r`` or ``M_s`` is refused, naming which, and so is an
+    ``M_bar`` with no positive eigenvalue or with a negative one beyond ``_STABILIZER_RTOL`` of the largest."""
     M_bar = _mean_mobility(model, rho_bar, T_t, n, ndim)
     if not bool(torch.isfinite(M_bar).all()):
         raise ValueError(
@@ -234,6 +241,11 @@ def _bound_stabiliser(model, rho: torch.Tensor, rho_bar: torch.Tensor, T_t: torc
         raise ValueError(
             f"m_stab='bound': M(rho_bar) has no positive eigenvalue (largest {float(lam[-1])!r}): "
             f"{M_bar.tolist()}; no multiple of it bounds the cells' mobility")
+    if float(lam[0]) < -_STABILIZER_RTOL * float(lam[-1]):
+        raise ValueError(
+            f"m_stab='bound': M(rho_bar) is indefinite, eigenvalue {float(lam[0])!r} < 0 beside "
+            f"{float(lam[-1])!r} (relative tolerance {_STABILIZER_RTOL}): {M_bar.tolist()}. A mobility "
+            f"is positive semi-definite, and flooring a negative eigenvalue would hide that it is not")
     ratios = _whitened_ratios(lam_floored, V, cells)
     if not bool(torch.isfinite(ratios).all()):
         raise ValueError(
@@ -479,10 +491,11 @@ def rollout_imex(model, rho_hat0: torch.Tensor, box: torch.Tensor, T: float,
     else finite ``>= 1``) is declared with ``"bound"`` only, and a model with a ``stabilizer_mobility``
     refuses ``"bound"`` as it refuses any declared ``m_stab``. ``refresh_every=N`` re-freezes ``M_s`` from the
     current state, from the same source, before steps ``N + 1, 2N + 1, ...``, and rebuilds every operator from
-    it as a new call would: the run equals ``ceil(n_steps / N)`` calls of ``N`` steps chained on the last
-    state, bit for bit. ``stabiliser_log``, a list, receives one dict per freeze (``step``, ``source``, and for
-    ``"bound"`` ``r_raw``, ``r_used``, ``margin``, ``cell``, ``ratio_min`` / ``_mean`` / ``_max`` against
-    ``M(rho_bar)``, ``cond``, ``floored`` and ``ratio_after`` against ``M_s``)."""
+    it as a new call would: the state at every step equals, bit for bit, that of ``ceil(n_steps / N)`` calls
+    of ``N`` steps chained on the last state, and the saved frames are the steps this call's ``save_every``
+    picks on the global step count. ``stabiliser_log``, a list, receives one dict per freeze (``step``,
+    ``source``, and for ``"bound"`` ``r_raw``, ``r_used``, ``margin``, ``cell``, ``ratio_min`` / ``_mean`` /
+    ``_max`` against ``M(rho_bar)``, ``cond``, ``floored`` and ``ratio_after`` against ``M_s``)."""
     _require_pair_kernel(model)
     hook = _stabilizer_hook(model, m_stab)
     bound_margin = _check_bound_margin(m_stab, bound_margin, hook)
@@ -553,6 +566,12 @@ def _frozen_mobility(model, rho_hat, ops, T_t, rho_bar, n, ndim, m_stab, hook,
         M_s, cells, info = _bound_stabiliser(model, ops.irfft(rho_hat * N), rho_bar, T_t, n, ndim,
                                              bound_margin)
         source = "bound"
+        if info["floored"] or info["r_used"] > _BOUND_WARN_R:
+            _LOG.warning(
+                "m_stab='bound' after step %d: M(rho_bar) has condition number %r%s and r = %r; M_s is "
+                "%r times it, so the frozen operator damps strongly along its weak directions",
+                step, info["cond"], " (eigenvalues floored)" if info["floored"] else "",
+                info["r_raw"], bound_margin * info["r_used"])
         if stabiliser_log is not None:
             ratios = info["ratios"]
             record = {"r_raw": info["r_raw"], "r_used": info["r_used"], "margin": bound_margin,

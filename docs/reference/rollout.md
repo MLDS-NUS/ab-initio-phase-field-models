@@ -98,8 +98,9 @@ declares none. See [functional.md](functional.md#two-dimensions).
 ### The stabiliser: `m_stab="bound"`, refreshes and the log
 
 Three keyword arguments of `rollout_imex` extend how `M_s` is frozen. Each is off by default, and a call
-that leaves them off is the scheme above, bit for bit. They are rollout options: `Noise.m_stab` still
-declares `mean` or `max` only, and the drivers and the CLI pass neither these arguments nor `"bound"`.
+that leaves them off is the scheme above, bit for bit. They are rollout options: `"bound"` is accepted by
+`rollout_imex` only. `Noise.m_stab` still declares `mean` or `max` (and its refusal names those two), and the
+drivers and the CLI pass neither these arguments nor `"bound"`.
 
 | `M_s` source | frozen at |
 |---|---|
@@ -110,8 +111,10 @@ declares `mean` or `max` only, and the drivers and the CLI pass neither these ar
 
 **Why a bound.** In the stiff limit (`dt k^2 M H` much larger than 1 at the grid scale), a mode of a cell where
 the mobility is `M_loc` and the Hessian `H_loc` is advanced by the frozen-coefficient amplification
-`G -> I - (M_s H_bar)^-1 M_loc H_loc`. A mode the PDE damps is over-corrected (`G < -1`, a grid-scale blow-up
-the explicit scheme does not show) wherever the largest generalised eigenvalue of `M_s^-1 M_loc` exceeds 2.
+`G -> I - (M_s H_bar)^-1 M_loc H_loc`. At the grid scale the kernel dominates the Hessian, so `H_loc ~ H_bar`
+and `G ~ I - M_s^-1 M_loc`: a mode the PDE damps is over-corrected (an eigenvalue of `G` below -1, a grid-scale
+blow-up the explicit scheme does not show) wherever the largest generalised eigenvalue of `M_s^-1 M_loc`
+exceeds 2.
 With a composition-dependent mobility, `M(rho_bar)` can sit below a cell's mobility by more than that, and
 `"max"` picks the cell with the largest mobility in norm, not the one whose ratio against `M_s` is largest.
 
@@ -128,7 +131,9 @@ along `M_bar`'s null directions as well; otherwise `M_s` is `bound_margin * max(
 `M(rho(x)) <= M_s / bound_margin` in the Loewner order, so the stiff-limit ratio is at most `1 / bound_margin`
 (to the rounding of `M_s` in a float32 run). `bound_margin` is `None` (1.0) or a finite number `>= 1`, and is
 refused with any other source. A non-finite `M_bar`, cell mobility, `r` or `M_s` is refused, naming which, and
-so is an `M_bar` with no positive eigenvalue. A model with a `stabilizer_mobility` hook refuses `"bound"`, as it
+so is an `M_bar` with no positive eigenvalue or an indefinite one (an eigenvalue below `-1e-6` times the
+largest, the hook's positive semi-definiteness tolerance). When the floor acts, or `r` exceeds `1e6`, the
+module logger warns, naming the condition number and `r`, with or without a `stabiliser_log`. A model with a `stabilizer_mobility` hook refuses `"bound"`, as it
 refuses any declared `m_stab`.
 
 The bound is only as good as `model.mobility`: it holds when `model.mobility(rho)` bounds, in the Loewner order,
@@ -142,10 +147,12 @@ Hessian at `rho_bar` stays frozen, as `rho_bar` is conserved; it is rebuilt only
 moved in its last bit. The operator set, the box, the noise filter and amplitude, `kbt_field`, `v_ext` and the
 random stream carry on. A run with `refresh_every=N` is, bit for bit, `ceil(n_steps / N)` calls of `N` steps,
 each from the previous call's last state with the same generator, keeping the steps the single call's
-`save_every` saves. A `"mean"` refresh rebuilds the same operators. The cost of a refresh is dominated by the
-operator setup (`A^-1` over the spectrum), not by the eigenproblem; when `r` grows slowly, refreshing every few
-steps with a margin somewhat above 1 (for example `refresh_every=5`, `bound_margin=1.25`) is a reasonable
-economy.
+`save_every` saves. A `"mean"` refresh rebuilds the same operators. On a two-dimensional grid the cost of a
+refresh is dominated by the operator setup (`A^-1` over the spectrum); at three-dimensional sizes the per-cell
+eigenproblem is comparable to it, and it runs twice when a `stabiliser_log` is passed (once more for
+`ratio_after`). It holds a few float64 `(N, n, n)` arrays at once, about 1 GB at `100^3` cells and 7 species.
+When `r` grows slowly, refreshing every few steps with a margin somewhat above 1 (for example
+`refresh_every=5`, `bound_margin=1.25`) is a reasonable economy.
 
 **`stabiliser_log`.** A list passed here receives one dict per freeze: `step` (the steps taken when it froze) and
 `source` (`"hook"`, `"mean"`, `"max"` or `"bound"`); for `"bound"` also `r_raw`, `r_used` (`max(r_raw, 1)`),
