@@ -71,7 +71,7 @@ then the Nyquist modes are made Hermitian and the state is projected. A model wi
 `t = 0` `(1, n, Gx, Gy, Gz)`, unclamped, and `T` `(1,)`, and its `(n, n)` return is refused unless finite,
 symmetric and positive semi-definite to a relative `1e-6`. `m_stab` is then left undeclared, and a
 declared one is refused, so the drivers that pass the system's `Noise.m_stab` refuse such a model.
-`aipf.rollout.imex` logs which of the three set `M_s`: the hook at `INFO`, `mean` and `max` at `DEBUG`. The conserved noise is
+`aipf.rollout.imex` logs which source set `M_s`: the hook at `INFO`, `mean`, `max` and `bound` at `DEBUG`. The conserved noise is
 `n_hat = G(k) i k . zeta_hat`, `zeta = noise_scale sqrt(2 kB T / (dV dt)) L w`, `L L^T = M`, `w`
 standard normal per cell, direction and channel, with
 `G(k) = exp(-k^2 sigma^2 / 2)` (`gaussian`) or 1 (`none`). It reads the model's `kernel.w_hat` and
@@ -95,6 +95,72 @@ box `(2,)` for the semi-implicit one, `(B, 2)` boxes for the explicit ones, `kbt
 (`dV = dA * depth`; 1.0 for areal densities, `Lz` for volumetric ones), and a three-dimensional call
 declares none. See [functional.md](functional.md#two-dimensions).
 
+### The stabiliser: `m_stab="bound"`, refreshes and the log
+
+Three keyword arguments of `rollout_imex` extend how `M_s` is frozen. Each is off by default, and a call
+that leaves them off is the scheme above, bit for bit. They are rollout options: `Noise.m_stab` still
+declares `mean` or `max` only, and the drivers and the CLI pass neither these arguments nor `"bound"`.
+
+| `M_s` source | frozen at |
+|---|---|
+| `m_stab="mean"` | `M(rho_bar)`, the mobility at the state's `k = 0` mode |
+| `m_stab="max"` | the cell whose mobility has the largest eigenvalue |
+| `m_stab="bound"` | `bound_margin * max(r, 1) * M(rho_bar)`, an upper bound of every cell's mobility |
+| `stabilizer_mobility` hook | whatever the model returns (`m_stab` undeclared) |
+
+**Why a bound.** In the stiff limit (`dt k^2 M H` much larger than 1 at the grid scale), a mode of a cell where
+the mobility is `M_loc` and the Hessian `H_loc` is advanced by the frozen-coefficient amplification
+`G -> I - (M_s H_bar)^-1 M_loc H_loc`. A mode the PDE damps is over-corrected (`G < -1`, a grid-scale blow-up
+the explicit scheme does not show) wherever the largest generalised eigenvalue of `M_s^-1 M_loc` exceeds 2.
+With a composition-dependent mobility, `M(rho_bar)` can sit below a cell's mobility by more than that, and
+`"max"` picks the cell with the largest mobility in norm, not the one whose ratio against `M_s` is largest.
+
+**`"bound"`.** `r` is the largest, over the grid cells, of `lambda_max(M_bar^-1/2 M(rho(x)) M_bar^-1/2)`, with
+`M_bar = M(rho_bar)` built exactly as `"mean"` builds it and `M(rho(x))` the model's `mobility` on the real field
+(the field the hook and `"max"` read; under `clamp_rho`, clamped as they are). It is computed in float64 whatever
+the run's precision: `eigh` of the symmetrised `M_bar`, its eigenvalues floored at `1e-12` times the largest,
+`W = V diag(lambda^-1/2) V^T`, and `eigvalsh` of the symmetrised `W M(rho(x)) W` per cell. `r` is clamped at 1
+from below, so `"bound"` is never less damped than `"mean"` in any direction, and when every cell is below
+`M_bar` the run is the `"mean"` run. When the floor raises an eigenvalue of `M_bar` (a singular or very
+ill-conditioned `M_bar`), `M_s` is built from the floored matrix `V diag(lambda_floored) V^T`, so the bound holds
+along `M_bar`'s null directions as well; otherwise `M_s` is `bound_margin * max(r, 1)` times the very `M_bar`
+`"mean"` uses, the product taken in float64 and cast back to the run's dtype. Every cell then satisfies
+`M(rho(x)) <= M_s / bound_margin` in the Loewner order, so the stiff-limit ratio is at most `1 / bound_margin`
+(to the rounding of `M_s` in a float32 run). `bound_margin` is `None` (1.0) or a finite number `>= 1`, and is
+refused with any other source. A non-finite `M_bar`, cell mobility, `r` or `M_s` is refused, naming which, and
+so is an `M_bar` with no positive eigenvalue. A model with a `stabilizer_mobility` hook refuses `"bound"`, as it
+refuses any declared `m_stab`.
+
+The bound is only as good as `model.mobility`: it holds when `model.mobility(rho)` bounds, in the Loewner order,
+the mobility the model's forward pass applies. A model whose drift uses a different mobility (for example a
+gradient-dependent one) must make `mobility(rho)` an upper bound of it for `"bound"` to mean what it says.
+
+**`refresh_every`.** `None` freezes `M_s` once, at `t = 0`. An int `N >= 1` re-freezes it from the current state
+after steps `N, 2N, ...` (before the next step is taken), from the same source (hook, `mean`, `max` or `bound`),
+and rebuilds `A^-1`, `M_s H` and, under noise, the predictor's pair exactly as a new call would. The local
+Hessian at `rho_bar` stays frozen, as `rho_bar` is conserved; it is rebuilt only if the state's `k = 0` mode has
+moved in its last bit. The operator set, the box, the noise filter and amplitude, `kbt_field`, `v_ext` and the
+random stream carry on. A run with `refresh_every=N` is, bit for bit, `ceil(n_steps / N)` calls of `N` steps,
+each from the previous call's last state with the same generator, keeping the steps the single call's
+`save_every` saves. A `"mean"` refresh rebuilds the same operators. The cost of a refresh is dominated by the
+operator setup (`A^-1` over the spectrum), not by the eigenproblem; when `r` grows slowly, refreshing every few
+steps with a margin somewhat above 1 (for example `refresh_every=5`, `bound_margin=1.25`) is a reasonable
+economy.
+
+**`stabiliser_log`.** A list passed here receives one dict per freeze: `step` (the steps taken when it froze) and
+`source` (`"hook"`, `"mean"`, `"max"` or `"bound"`); for `"bound"` also `r_raw`, `r_used` (`max(r_raw, 1)`),
+`margin`, `cell` (the grid index of the largest ratio), `ratio_min`, `ratio_mean`, `ratio_max` (the cells'
+ratios against `M_bar`), `cond` (`M_bar`'s condition number, `inf` if it is not positive definite), `floored`
+and `ratio_after` (the cells' largest ratio against `M_s`, `r_raw / (bound_margin * r_used)` up to rounding).
+With `None` nothing extra is computed.
+
+`aipf.rollout.bound_ratio(model, rho_hat, T, *, clamp_rho=None)` computes the same quantities from one state
+without rolling out: `r_raw`, `r_used`, `cell`, `ratios` (float64 on the grid), `M_bar`, `cond`, `floored` and
+`M_s` at `bound_margin = 1`. A caller can check the states of a `"mean"` run with it: where `r_raw > 2` at a stiff
+`dt`, `"mean"` over-corrects. `aipf.rollout.imex.generalised_ratios(M_bar, cells)` is the per-cell ratio.
+`tests/unit/test_rollout_bound_stabiliser.py` checks `r` against `scipy.linalg.eigh(M_cell, M_bar)`, a singular
+`M_bar`, the refresh against the chained calls and a stiff case where `"mean"` blows up and `"bound"` does not.
+
 ## Precision
 
 Both precisions run the same scheme; which one is chosen by the dtype of the state and the model
@@ -110,8 +176,8 @@ Both precisions run the same scheme; which one is chosen by the dtype of the sta
 A model's precision is that of its parameters and of its operator set's mode buffer `ops.NX` (other
 buffers are not read; a float32 model may carry a float64 constant). On the float64 path every tensor
 the scheme makes is float64 or complex128: the operator set and its wavenumbers, `k^2`, `A^-1`, `M_s H`
-and the predictor's pair, the local Hessian, `M_s` (hook, `mean` or `max`), `T`, the box, `kbt_field`
-and `v_ext` (cast from whatever they are given in; give the box in float64 when its lengths are not
+and the predictor's pair, the local Hessian, `M_s` (hook, `mean`, `max` or `bound`, refreshed or not), `T`,
+the box, `kbt_field` and `v_ext` (cast from whatever they are given in; give the box in float64 when its lengths are not
 float32 numbers), the noise filter, draws and divergence, the Hermitian repair and the projections.
 `tests/unit/test_rollout_float64.py` checks it against an independent float64 numpy step to `1e-12`
 and audits every tensor a torch function returns during the rollout.
