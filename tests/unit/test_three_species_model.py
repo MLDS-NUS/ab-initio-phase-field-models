@@ -19,6 +19,7 @@ import torch
 from aipf.functional.build import build
 from aipf.losses.extras import eigmin_sym2, l_w
 from aipf.mobility import build as build_mobility
+from aipf.mobility import cholesky_raw_to_matrix
 from aipf.paths import Paths
 from aipf.system import AnchorRules, Functional, Mobility, System
 from aipf.train.kernel_hinge import KernelHinge
@@ -170,7 +171,8 @@ def test_the_pair_kernel_is_symmetric_with_the_six_pair_nets_in_their_slots():
         w = kernel.radial_set.w_of_r(evaluator.r_quad).double().numpy()     # (6, Q)
     kk = k.double().numpy()
     sinc = np.sinc(np.outer(kk, r) / np.pi)                                 # sin(kr)/(kr)
-    expected = 4.0 * np.pi * np.trapezoid(r ** 2 * w[:, None, :] * sinc[None], r, axis=-1)  # (6, 5)
+    f = r ** 2 * w[:, None, :] * sinc[None]                                # (6, 5, Q)
+    expected = 4.0 * np.pi * 0.5 * np.sum((f[..., 1:] + f[..., :-1]) * np.diff(r), axis=-1)
     scale = np.abs(expected).max()
     for i in range(3):
         for j in range(3):
@@ -225,6 +227,20 @@ def test_an_absent_channel_has_a_zero_mobility_row_and_column(absent):
             assert torch.isfinite(p.grad).all()
 
 
+def test_the_mobility_is_the_square_root_sandwich_of_its_shape():
+    """``M_ab = M_tilde_ab sqrt(rho_a rho_b) sqrt(c_a c_b)`` at three channels, recomputed from the
+    shape network's Cholesky factor."""
+    mobility = _mobility()
+    rho, T = _uniform_rows(n=16)
+    with torch.no_grad():
+        M = mobility(rho, T).double()
+        M_tilde = cholesky_raw_to_matrix(mobility._m_tilde_raw(rho, T), 3).double()
+        E = torch.nn.functional.softplus(mobility._activation_energy_raw).double()
+    c = torch.exp(-E * (1.0 / (_K_B * T.double()[:, None]) - 1.0 / (_K_B * 1800.0)))
+    s = torch.sqrt(rho.double() * c)
+    assert torch.allclose(M, M_tilde * s[:, :, None] * s[:, None, :], rtol=1e-5, atol=0.0)
+
+
 def test_the_arrhenius_factor_has_one_barrier_per_channel():
     """``M_ab(T) = M_ab(T_ref) sqrt(c_a c_b)``, ``c_a = exp(-E_a (1/kT - 1/kT_ref))``, with the three
     declared barriers."""
@@ -268,25 +284,30 @@ def _scaled_pair_kernel(model, scale):
             net[-1].bias.mul_(scale)
 
 
-def test_the_hinge_is_zero_when_satisfied_and_positive_with_a_finite_gradient_when_violated():
+def test_a_violated_hinge_is_positive_with_a_finite_gradient():
+    """``W = 0`` (every pair net's output layer zeroed) violates the hinge whatever the seed:
+    ``lambda_min = 0 < kappa k^2``. The output layers still get a gradient, the hidden activations."""
     model = _model()
     hinge = KernelHinge(kappa=0.5, k_max=3.0, n_k=12, margin=0.0)
     _scaled_pair_kernel(model, 0.0)
-    assert float(hinge.loss(model)) > 0.0       # W = 0: lambda_min = 0 < kappa k^2
-    # a kernel whose W_hat(k) - W_hat(0) is kappa' k^2 I with kappa' > kappa satisfies the hinge
-    D = 2.0 * hinge.kappa * (torch.linspace(0.25, 3.0, 12) ** 2)[:, None, None] * torch.eye(3)
-    assert float(l_w(D, torch.linspace(0.25, 3.0, 12), kappa=hinge.kappa)) == 0.0
-
-    model = _model()
     loss = hinge.loss(model)
-    lam = np.linalg.eigvalsh((lambda W: (W[1:] - W[0]).detach().double().numpy())(
-        model.kernel.w_hat(torch.cat([torch.zeros(1), hinge.wavenumbers(dtype=torch.float32)]))))
-    if float(loss) == 0.0:
-        pytest.skip("the seeded kernel satisfies the hinge; the violated case is the W = 0 one")
-    assert np.any(lam[:, 0] < hinge.kappa * hinge.wavenumbers(dtype=torch.float64).numpy() ** 2)
+    assert float(loss) > 0.0
     loss.backward()
     grads = _finite_grads(model)
     assert any(float(g.abs().max()) > 0.0 for g in grads)
+
+
+def test_the_seeded_kernel_violates_the_hinge_where_numpy_says_it_does():
+    model = _model()
+    hinge = KernelHinge(kappa=0.5, k_max=3.0, n_k=12, margin=0.0)
+    loss = hinge.loss(model)
+    k = hinge.wavenumbers(dtype=torch.float32)
+    W = model.kernel.w_hat(torch.cat([torch.zeros(1), k])).detach()
+    lam = np.linalg.eigvalsh((W[1:] - W[0]).double().numpy())
+    assert np.any(lam[:, 0] < hinge.kappa * k.double().numpy() ** 2)
+    assert float(loss) > 0.0
+    loss.backward()
+    _finite_grads(model)
 
 
 def test_the_hinge_is_zero_on_a_three_channel_kernel_that_satisfies_it():
