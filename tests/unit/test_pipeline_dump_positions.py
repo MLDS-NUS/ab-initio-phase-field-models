@@ -139,8 +139,9 @@ def test_unwrapped_columns_win_over_scaled_ones(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_atoms_moved_by_box_vectors_give_the_wrapped_amplitudes_to_rounding(tmp_path):
-    """Mode amplitudes are complex128; the phase of an atom five boxes out is formed from an ``s``
-    about six times larger, so agreement is to rounding (1e-12 relative to the largest amplitude)."""
+    """``mode_amplitudes`` is complex128; the phase of an atom five boxes out is formed from an ``s``
+    about six times larger, so agreement is to rounding (1e-12 relative to the largest amplitude).
+    ``modes_from_dump`` stores complex64, so there the tolerance is one complex64 rounding."""
     plain = _write(tmp_path / "x.dump", STEPS)
     unwrapped = _write(tmp_path / "xu.dump", STEPS, names=("xu", "yu", "zu"), values=_shifted)
     moved = list(read_dump(unwrapped))
@@ -156,7 +157,7 @@ def test_atoms_moved_by_box_vectors_give_the_wrapped_amplitudes_to_rounding(tmp_
     one = modes_from_dump(plain, **PARAMS)
     other = modes_from_dump(unwrapped, **PARAMS)
     assert np.max(np.abs(one.amplitudes - other.amplitudes)) \
-        <= 1e-12 * np.max(np.abs(one.amplitudes))
+        <= 2.0 ** -23 * np.max(np.abs(one.amplitudes))
 
 
 @pytest.mark.parametrize("method", ["mesh", "direct"])
@@ -173,10 +174,11 @@ def test_atoms_moved_by_box_vectors_give_the_wrapped_fields_in_float64(tmp_path,
         assert float((fields[0] - fields[1]).abs().max()) <= 1e-12 * scale
 
 
-def test_the_float32_mesh_error_grows_with_the_unwrap_distance_within_its_stated_bound(tmp_path):
-    """Documented, not acceptance: in float32 the mesh KDE's error on an atom ``|r - lo|`` from the
-    origin is a few ``2^-24 |r - lo|`` in position, so the field error stays within a small multiple
-    of the float32 error of the wrapped frame times ``m + 1`` for ``m`` boxes of unwrapping."""
+def test_the_float32_mesh_error_of_an_unwrapped_run_stays_within_its_stated_bound(tmp_path):
+    """Documented, not acceptance: in float32 the mesh KDE deposits an atom with an error of a few
+    ``2^-24 max(|r|, |lo|)``, so for this box near the origin the field error stays within a small
+    multiple of the wrapped frame's float32 error times ``m + 1`` for ``m = 5`` boxes of unwrapping.
+    It checks the bound, not the rate of growth."""
     wrapped = next(read_dump(_write(tmp_path / "x.dump", [0])))
     far = next(read_dump(_write(tmp_path / "xu.dump", [0], names=("xu", "yu", "zu"),
                                 values=_shifted)))
@@ -250,6 +252,21 @@ def test_a_dump_without_positions_lists_the_accepted_triples(tmp_path):
         list(read_dump(path))
     for triple in POSITION_COLUMNS:
         assert " ".join(triple) in str(caught.value)
+
+
+def test_a_stray_name_beside_a_complete_unwrapped_triple_is_refused():
+    """Only a complete ``x y z`` makes the other names irrelevant, as before; beside ``xu yu zu`` a
+    stray position name is an incomplete triple."""
+    for stray in ("xs", "x"):
+        with pytest.raises(ValueError, match="incomplete position triple"):
+            coarse_grain._position_triple(["id", "type", "xu", "yu", "zu", stray])
+
+
+@pytest.mark.parametrize("names", [("x", "yu", "z"), ("vx", "vy", "vz")], ids=["mixed", "none"])
+def test_the_chain_reader_refuses_mixed_and_missing_triples_alike(tmp_path, names):
+    path = _write(tmp_path / "bad.dump", [0], names=names)
+    with pytest.raises(ValueError, match="position triple"):
+        list(read_dump_chain([path], report=[]))
 
 
 def test_the_preference_order_is_the_documented_one():

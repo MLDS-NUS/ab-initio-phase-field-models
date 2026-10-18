@@ -168,10 +168,11 @@ archive are the same whichever triple was read.
 Unwrapped positions need no wrapping: the mode amplitudes use integer mode numbers on `(r - lo) / L`,
 the mesh KDE wraps into the grid before depositing, and the direct KDE and the QC displacement take
 the minimum image. In float64 an unwrapped frame gives the wrapped frame's amplitudes and fields to
-rounding. The mesh KDE forms `(r - lo) / h` in the field dtype before it wraps, so in float32 (the
-`density_series` default) an atom `|r - lo|` from the origin is deposited with an error of a few
-`2^-24 |r - lo|`: a run unwrapped by `m` box lengths carries about `m + 1` times the wrapped error.
-Pass `dtype=torch.float64` when atoms travel many boxes.
+rounding. The mesh KDE casts the positions and `lo` to the field dtype and forms `(r - lo) / h` before
+it wraps, so in float32 (the `density_series` default) an atom is deposited with an error of a few
+`2^-24 max(|r|, |lo|)`. For a box near the origin (`|lo|` up to about `L`) a run unwrapped by `m` box
+lengths therefore carries up to about `m + 1` times the wrapped error. Pass `dtype=torch.float64` when
+atoms travel many boxes.
 
 ### The reference cell
 

@@ -25,6 +25,7 @@ from .extract_modes import (  # noqa: F401
 from .coarse_grain import (  # noqa: F401
     COMPOSITION_FORMS,
     EDGE_MODES,
+    POSITION_COLUMNS,
     SPACINGS,
     TAIL_REASONS,
     Frame,

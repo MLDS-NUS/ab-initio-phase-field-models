@@ -301,8 +301,9 @@ def _parse_frame(timestep, bound_lines, columns, body) -> Frame | None:
     if scaled and any(len(line.split()) > 2 for line in bound_lines):
         raise ValueError(
             f"dump columns {columns} hold scaled positions {' '.join(triple)} "
-            f"in a triclinic box (a tilt factor on a bounds line); only an "
-            f"orthogonal box converts them by its bounds")
+            f"and a bounds line carries a third value, as a triclinic box's "
+            f"tilt factor does; only an orthogonal box converts them by its "
+            f"bounds")
     try:
         wanted = [columns.index(name) for name in ("id", "type") + triple]
     except ValueError as exc:
