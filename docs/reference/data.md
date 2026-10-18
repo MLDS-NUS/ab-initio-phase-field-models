@@ -149,6 +149,30 @@ With neither `cache_dir` nor `entry_dir` nothing is written; both is refused. Th
 every input, the dump's sha256 included: the same inputs read the stored file back, other inputs (a
 new `k_cut`, a rewritten dump) recompute and replace it.
 
+### Position columns
+
+A dump's columns are found by name: `id`, `type` and one position triple
+(`coarse_grain.POSITION_COLUMNS`), the first complete one of
+
+| triple | read as |
+|---|---|
+| `x y z` | Cartesian, as written; taken whenever all three are present, whatever else the dump holds |
+| `xu yu zu` | unwrapped Cartesian, as written |
+| `xs ys zs`, `xsu ysu zsu` | scaled, converted per axis with the frame's bounds as `lo + s (hi - lo)` |
+
+Without `x y z`, a triple with only some of its names (`x yu z`) is refused naming it, and a dump
+with no complete triple is refused listing the four. Scaled columns in a triclinic box (a tilt factor
+on a bounds line) are refused rather than converted. `Frame`, the chain report, the identity and the
+archive are the same whichever triple was read.
+
+Unwrapped positions need no wrapping: the mode amplitudes use integer mode numbers on `(r - lo) / L`,
+the mesh KDE wraps into the grid before depositing, and the direct KDE and the QC displacement take
+the minimum image. In float64 an unwrapped frame gives the wrapped frame's amplitudes and fields to
+rounding. The mesh KDE forms `(r - lo) / h` in the field dtype before it wraps, so in float32 (the
+`density_series` default) an atom `|r - lo|` from the origin is deposited with an error of a few
+`2^-24 |r - lo|`: a run unwrapped by `m` box lengths carries about `m + 1` times the wrapped error.
+Pass `dtype=torch.float64` when atoms travel many boxes.
+
 ### The reference cell
 
 The amplitudes are sums in each frame's own scaled coordinates, `s = (r - lo) / L(t)`, so an affine

@@ -28,6 +28,12 @@ EDGE_MODES = ("interp", "nearest")
 #: ``"filled"`` ``num / total`` where ``total > reg`` and ``fill`` elsewhere. No default form or constant.
 COMPOSITION_FORMS = ("offset", "floored", "filled")
 
+#: Position column triples a dump is read from, in order of preference: wrapped ``x y z``, unwrapped
+#: ``xu yu zu`` (used as is: every consumer of :attr:`Frame.positions` is periodic in the box), and
+#: scaled ``xs ys zs`` / ``xsu ysu zsu``, converted per axis as ``lo + s (hi - lo)`` with the frame's
+#: bounds (orthogonal boxes only).
+POSITION_COLUMNS = (("x", "y", "z"), ("xu", "yu", "zu"), ("xs", "ys", "zs"), ("xsu", "ysu", "zsu"))
+
 #: Header lines of a LAMMPS text dump frame, ``ITEM: TIMESTEP`` to ``ITEM: ATOMS`` inclusive.
 _HEADER_LINES = 9
 
@@ -290,11 +296,19 @@ def _parse_frame(timestep, bound_lines, columns, body) -> Frame | None:
     """
     bounds = np.array([[float(v) for v in line.split()[:2]]
                        for line in bound_lines])
+    triple = _position_triple(columns)
+    scaled = triple[0].startswith("xs")
+    if scaled and any(len(line.split()) > 2 for line in bound_lines):
+        raise ValueError(
+            f"dump columns {columns} hold scaled positions {' '.join(triple)} "
+            f"in a triclinic box (a tilt factor on a bounds line); only an "
+            f"orthogonal box converts them by its bounds")
     try:
-        wanted = [columns.index(name) for name in ("id", "type", "x", "y", "z")]
+        wanted = [columns.index(name) for name in ("id", "type") + triple]
     except ValueError as exc:
         raise ValueError(
-            f"dump columns {columns} lack one of id, type, x, y, z, so there "
+            f"dump columns {columns} lack id, type or a position triple "
+            f"({', '.join(' '.join(t) for t in POSITION_COLUMNS)}), so there "
             f"is no way to tell which field is which"
         ) from exc
 
@@ -317,12 +331,38 @@ def _parse_frame(timestep, bound_lines, columns, body) -> Frame | None:
             return None
 
     block = block[np.argsort(block[:, 0])]
+    if scaled:
+        block[:, 2:5] = bounds[:, 0] + block[:, 2:5] * (bounds[:, 1] - bounds[:, 0])
     return Frame(
         timestep=timestep,
         box_bounds=bounds,
         positions=np.ascontiguousarray(block[:, 2:5]),
         types=block[:, 1].astype(np.int64),
     )
+
+
+def _position_triple(columns) -> tuple[str, str, str]:
+    """The position columns a frame is read from: the first complete triple of
+    :data:`POSITION_COLUMNS`, and ``x y z`` whenever it is complete, whatever else is there.
+
+    Without ``x y z``, a triple holding some but not all of its names raises naming it. With no
+    position column at all, ``x y z`` is returned, for the caller's missing-column error.
+    """
+    if all(name in columns for name in POSITION_COLUMNS[0]):
+        return POSITION_COLUMNS[0]
+    partial = [triple for triple in POSITION_COLUMNS
+               if any(name in columns for name in triple)
+               and not all(name in columns for name in triple)]
+    if partial:
+        raise ValueError(
+            f"dump columns {columns} hold an incomplete position triple "
+            f"({'; '.join(' '.join(t) for t in partial)}); positions are read "
+            f"from one complete triple of "
+            f"{', '.join(' '.join(t) for t in POSITION_COLUMNS)}")
+    for triple in POSITION_COLUMNS:
+        if all(name in columns for name in triple):
+            return triple
+    return POSITION_COLUMNS[0]
 
 
 def _all_numeric(line: str) -> bool:
