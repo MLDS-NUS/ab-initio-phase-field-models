@@ -39,11 +39,17 @@ def l_s(H: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, *,
 
     ``metric``: ``"rel_frob"`` ``||H - target||_F^2 / ||target||_F^2`` or ``"s_metric"``
     ``||R H R - I||_F^2`` with ``R = target^-1/2``.
-    ``active`` ``(P, n)`` bool, each row's present channels: given, a row is compared on its active
-    principal block alone (``H`` is the identity outside it, and only active pairs enter the residual
-    and the denominator); ``target`` and ``target_rootinv`` then carry the identity outside it."""
+    ``active`` ``(P, n)`` bool, each row's present channels, with ``H`` ``(P, shells, n, n)``: given, a row
+    is compared on its active principal block alone (``H`` is the identity outside it, and only active
+    pairs enter the residual and the denominator); ``target`` and ``target_rootinv`` then carry the
+    identity outside it."""
     pairs = None
     if active is not None:
+        if H.dim() != 4 or active.shape != (H.shape[0], H.shape[-1]):
+            raise ValueError(
+                f"active has shape {tuple(active.shape)} against H "
+                f"{tuple(H.shape)}; the masked shell anchor takes H "
+                f"(P, shells, n, n) and one (P, n) mask row per state")
         pairs = _pairs(active).unsqueeze(1)          # (P, 1, n, n), over the shells
         H = _principal_block(H, pairs)
     if metric == "rel_frob":

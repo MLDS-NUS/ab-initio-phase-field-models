@@ -185,7 +185,9 @@ per row:
 - `M_k0` `(rows, n, n)`, `S_k` `(rows, shells, n, n)`, and the bulk target `(rows, n-1, n-1)`: `S_cc(0)`
   on the row's independent species, the first `m = |P| - 1` present species `P` in channel order, in its
   leading `m x m` block. Entries outside a row's active block are ignored, whatever they hold (NaN, say);
-  a non-finite entry inside it drops the shell or the bulk row, and is refused in `M_k0`.
+  a non-finite entry inside it drops the shell or the bulk row, and is refused in `M_k0`. A finite bulk
+  block that is not positive definite is refused, naming the file and row: `S_cc(0)` is positive definite
+  by construction, and its inverse square root `R` has no meaning otherwise.
 
 A row with fewer than two species present feeds `L_P` alone. Each other row is compared on its active
 principal block: `L_M` on `M_PP`, `L_S` on `H_PP(k)` against `kB T S_PP(k)^-1` (an absent species
@@ -196,8 +198,11 @@ drops no shell), and `L_bulk` on
 with `a` the row's active indicator, so `z_i` vanishes on an absent channel and is `(x_1, -(1 - x_1))`
 at two channels. The block is scored `norm(R S_cc(0) R - I)^2` over its `m x m` entries, with
 `R = S_target^-1/2` fixed at load; `bulk_residual` is then `s_metric`, and `bulk_sigma`, `bulk_ok` are
-`None` (they are refused). The principal block is the `rho_eps -> 0` limit of the full matrix: the
-ideal term `kB T / rho_eps` of an absent channel makes its block of `H^-1` vanish. The manifold reads
+`None` (they are refused). Why the principal block and not the full `H^-1`: the true ideal term
+`kB T / rho` of an absent channel is infinite, and in that limit the absent channel's block of `H^-1`
+vanishes, leaving `(H_PP)^-1`. The model's own `H` cannot carry that limit: its ideal term clamps the
+density at `rho_eps`, so on a channel that is exactly absent it carries no ideal stiffness at all. The
+manifold reads
 every ok row, pure ones too, as `rho = n (x_1, ..., x_n)`; fractions that do not sum to one within
 `1e-6` are refused, naming the line.
 

@@ -193,7 +193,12 @@ def _species_present(archive, col, path: Path) -> np.ndarray:
         raise KeyError(
             f"{path} carries no declared active column "
             f"{col[ACTIVE_COLUMN]!r}")
-    active = np.asarray(archive[col[ACTIVE_COLUMN]]).astype(bool)
+    active = np.asarray(archive[col[ACTIVE_COLUMN]])
+    if active.dtype != np.bool_:
+        raise ValueError(
+            f"{path}: the active column {col[ACTIVE_COLUMN]!r} is "
+            f"{active.dtype}, not bool; a mask is written as one, so that a "
+            f"fraction or a density stored there is not read as a presence")
     x = np.stack([np.asarray(archive[name], np.float64) for name in names],
                  axis=-1)
     rho = np.stack([np.asarray(archive[name], np.float64)
@@ -547,8 +552,8 @@ def _vector_form(columns: Mapping[str, Any], eos_columns: Mapping[str, Any],
                 f"one fraction column per channel, columns['composition'] = "
                 f"(...), with eos_columns['x_columns'] and "
                 f"columns[{ACTIVE_COLUMN!r}]")
-        # The zero-wavenumber projector and the manifold's own
-        # composition-to-density map both walk ONE composition axis.
+        # One channel: the zero-wavenumber projector and the manifold's own
+        # composition-to-density map both walk ONE composition axis, and one channel has none.
         _refuse_beyond_two_channels(n_channels, "the composition-axis anchors")
         return False
     if n_channels < 3:
@@ -560,6 +565,10 @@ def _vector_form(columns: Mapping[str, Any], eos_columns: Mapping[str, Any],
             f"exactly one code path")
     for what, names in (("columns['composition']", composition),
                         ("eos_columns['x_columns']", eos_columns["x_columns"])):
+        if isinstance(names, str) or not all(isinstance(n, str) for n in names):
+            raise ValueError(
+                f"{what}={names!r} is not a tuple of column names, one per "
+                f"channel in channel order")
         if len(tuple(names)) != n_channels:
             raise ValueError(
                 f"{what}={tuple(names)!r} has {len(tuple(names))} names "
@@ -702,7 +711,8 @@ class AnchorTables:
 
     #: The vector form only (``None`` otherwise): each row's present species ``(P, n)`` bool, per anchor.
     #: There ``mobility_target`` is zero and ``shell_target``/``shell_target_rootinv`` the identity outside a
-    #: row's active block, ``bulk_zvec`` is ``(P, n, n-1)`` and ``bulk_target`` ``(P, n-1, n-1)``, with
+    #: row's active block (a row with no valid shell keeps zeros, behind its False mask, as two channels
+    #: do), ``bulk_zvec`` is ``(P, n, n-1)`` and ``bulk_target`` ``(P, n-1, n-1)``, with
     #: ``bulk_zmask`` ``(P, n-1)`` marking the independent species and ``bulk_target_rootinv`` the target's
     #: inverse square root on them.
     mobility_active: Optional[torch.Tensor] = None

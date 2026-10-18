@@ -269,6 +269,19 @@ def test_the_masked_mobility_residual_is_the_active_blocks_own():
                               block, rtol=1e-12)
 
 
+def test_a_non_finite_entry_outside_the_mobility_block_reaches_no_gradient():
+    pred = _spd_t(3, 3, 1).requires_grad_(True)
+    target = _spd_t(3, 3, 2)
+    target[1, 1, :] = target[1, :, 1] = float("inf")
+    outside = torch.zeros(3, 3, 3, dtype=torch.float64)
+    outside[1, 1, :] = outside[1, :, 1] = float("nan")
+    outside[2, 0, :] = outside[2, :, 0] = float("inf")
+    loss = l_m(pred + outside, target, active=_ACTIVE)
+    loss.backward()
+    assert bool(torch.isfinite(loss)) and bool(torch.isfinite(pred.grad).all())
+    assert float(pred.grad[1, 1].abs().sum()) == 0.0
+
+
 @pytest.mark.parametrize("metric", ["rel_frob", "s_metric"])
 def test_the_masked_shell_residual_is_the_active_blocks_own(metric):
     from aipf.train.anchors import _rootinv_on_blocks
@@ -307,7 +320,7 @@ def test_the_masked_bulk_residual_is_the_active_blocks_own():
     x = torch.tensor([[0.2, 0.3, 0.5], [0.4, 0.0, 0.6], [0.0, 0.7, 0.3]],
                      dtype=torch.float64)
     H0 = _spd_t(3, 3, 5)
-    H0[1, 1, :] = H0[1, :, 1] = 1e5                   # the ideal term of an absent channel
+    H0[1, 1, :] = H0[1, :, 1] = 1e5                   # whatever H holds on an absent channel: unread
     kBT = torch.tensor([1.0, 1.3, 0.7], dtype=torch.float64)
     rho_tot = torch.tensor([0.5, 0.6, 0.7], dtype=torch.float64)
     from aipf.losses.static import sinv_rootinv
@@ -598,3 +611,47 @@ def test_a_toy_ternary_recovers_a_known_zero_wavenumber_curvature(tmp_path):
         assert np.linalg.norm(S - target[r, :m, :m]) <= 1e-4 * np.linalg.norm(
             target[r, :m, :m]), r
     assert np.linalg.norm(H - _H_STAR) <= 1e-3 * np.linalg.norm(_H_STAR)
+
+
+# ---------------------------------------------------------------------------
+# review: the mask's dtype, the name tuples, the shell mask's shape, the early residual check
+# ---------------------------------------------------------------------------
+def test_an_active_column_that_is_not_a_bool_mask_is_refused(tmp_path):
+    _write(tmp_path / "tier", active=(_X > 0).astype(np.int64))
+    with pytest.raises(ValueError, match="is int64, not bool"):
+        AnchorTables.load(_ternary(tmp_path), **_declared())
+
+
+def test_a_column_name_where_a_tuple_of_names_belongs_is_refused(ternary):
+    system, declared = ternary
+    with pytest.raises(ValueError, match="not a tuple of column names"):
+        AnchorTables.load(system, **{**declared, "eos_columns": dict(
+            _EOS_COLUMNS, x_columns="x_Fe")})
+
+
+def test_the_masked_shell_anchor_wants_a_shell_axis():
+    with pytest.raises(ValueError, match=r"takes H\s+\(P, shells, n, n\)"):
+        l_s(_spd_t(3, 3, 1), _spd_t(3, 3, 2), torch.ones(3, 1, dtype=torch.bool),
+            active=_ACTIVE)
+
+
+def test_fit_refuses_a_bulk_residual_that_does_not_match_the_tables_before_loading(ternary):
+    import dataclasses
+    from aipf.train.config import TrainConfig
+    from aipf.train.fit import _check_bulk_residual
+
+    system, declared = ternary
+    system = dataclasses.replace(system, defaults={**system.defaults,
+                                                   "training": {"tables": declared}})
+    scalar = TrainConfig(lambda_bulk=1.0, bulk_residual="relative_inverse", seed=0)
+    block = TrainConfig(lambda_bulk=1.0, bulk_residual="s_metric", seed=0)
+    with pytest.raises(ValueError, match="vector-form anchor tables"):
+        _check_bulk_residual(system, scalar, None)
+    _check_bulk_residual(system, block, None)
+    _check_bulk_residual(system, TrainConfig(bulk_residual="relative_inverse", seed=0), None)
+    from test_train_anchors import _declared as binary_declared, _demo
+    binary = dataclasses.replace(_demo(ternary[0].paths.raw()), defaults={
+        "k_fit_stat": 1.5, "training": {"tables": binary_declared()}})
+    with pytest.raises(ValueError, match="on scalar anchor tables"):
+        _check_bulk_residual(binary, block, None)
+    _check_bulk_residual(binary, scalar, None)

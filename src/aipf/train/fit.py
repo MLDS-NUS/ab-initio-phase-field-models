@@ -197,6 +197,28 @@ def _anchors_from_system(system: System, anchors):
     return AnchorTables.load(system, **tables)
 
 
+def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
+    """Before anything is loaded: a trained ``L_bulk`` on vector-form tables (a tuple composition, the
+    concentration block) declares ``bulk_residual="s_metric"``, and scalar tables declare a scalar form."""
+    if not cfg.lambda_bulk or anchors is NO_ANCHORS:
+        return
+    if isinstance(anchors, AnchorTables):
+        vector = anchors.bulk_active is not None
+    else:
+        tables = _training(system).get(_TABLES_KEY)
+        if tables is None:
+            return
+        vector = isinstance(dict(tables.get("columns") or {}).get("composition"),
+                            (tuple, list))
+    if vector != (cfg.bulk_residual == "s_metric"):
+        raise ValueError(
+            f"bulk_residual={cfg.bulk_residual!r} on "
+            f"{'vector-form' if vector else 'scalar'} anchor tables: the "
+            f"concentration block of three or more channels is scored by "
+            f"'s_metric' alone, and one S_cc(0) per row by "
+            f"'relative_inverse' or 'sigma_chi2'")
+
+
 def _archive_keys(system: System) -> ArchiveKeys:
     """How this system's mode archive spells its quantities; the names come from
     :mod:`aipf.pipeline.modes`, the writer."""
@@ -823,6 +845,7 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
 
     cfg = TrainConfig(**{**_config_from_system(system), "seed": int(seed),
                          **dict(config_overrides or {})})
+    _check_bulk_residual(system, cfg, anchors)
 
     # the model is built under the run's own model stream, forked from the global one and restored
     with seeded_rng(cfg.seed_for("model")):
