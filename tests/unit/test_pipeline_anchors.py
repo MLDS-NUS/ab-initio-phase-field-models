@@ -550,9 +550,9 @@ def test_one_channel_has_no_concentration_mode_to_return():
         concentration_weights((1.0,))
 
 
-def test_three_channels_have_no_single_concentration_mode():
-    with pytest.raises(ValueError, match="Pass explicit weights"):
-        concentration_weights((0.2, 0.3, 0.5))
+def test_three_channels_have_one_concentration_mode_per_independent_species():
+    """No single mode: the rows of a matrix (test_pipeline_anchors_vector.py)."""
+    assert concentration_weights((0.2, 0.3, 0.5)).shape == (2, 3)
 
 
 def test_the_concentration_series_is_the_weighted_channel_sum():

@@ -223,25 +223,43 @@ def extrapolate_to_zero(centres, intercepts, *, k_max: float) -> np.ndarray:
 
 
 def concentration_weights(fractions) -> np.ndarray:
-    """Concentration-mode weights ``z = (f_1, -f_0)`` for two channel fractions ``f``. Two channels only.
+    """Concentration-mode weights for the channel fractions ``f``: ``z = (f_1, -f_0)`` for two channels.
+
+    Beyond two, the ``(m, n)`` matrix whose rows are ``z_i = e_i - f_i a``, with ``a = (f > 0)`` the present
+    channels and ``i`` the first ``m = |a| - 1`` of them in channel order (the anchor loader's convention,
+    which is ``(f_1, -f_0)`` at two channels); ``(0, n)`` for a pure composition.
     """
     f = np.asarray(fractions, dtype=np.float64)
+    if f.ndim == 1 and f.shape[0] >= 3:
+        present = f > 0.0
+        independent = np.nonzero(present)[0][:-1]
+        out = -f[independent, None] * present.astype(np.float64)[None, :]
+        out[np.arange(independent.size), independent] += 1.0
+        return out
     if f.shape != (2,):
         raise ValueError(
             f"fractions has shape {tuple(f.shape)}: the concentration mode "
-            f"is defined here for exactly two channels, and with more there "
-            f"is no single one to return. Pass explicit weights instead")
+            f"is defined here for exactly two channels, or as the rows of a "
+            f"matrix for three or more, and one channel has none")
     return np.array([f[1], -f[0]])
 
 
 def concentration_series(amplitudes, *, weights) -> np.ndarray:
-    """``(n_frames, n_modes)`` complex128 weighted channel sum, accumulated in channel order."""
+    """``(n_frames, n_modes)`` complex128 weighted channel sum, accumulated in channel order.
+
+    ``weights`` ``(m, n_channels)`` (:func:`concentration_weights` beyond two channels) gives one series per
+    row, ``(n_frames, m, n_modes)``."""
     rho = np.asarray(amplitudes)
     if rho.ndim != 3:
         raise ValueError(
             f"amplitudes has shape {tuple(rho.shape)}, which is not "
             f"(n_frames, n_channels, n_modes)")
     w = np.asarray(weights, dtype=np.float64)
+    if w.ndim == 2 and w.shape[1] == rho.shape[1]:
+        out = np.zeros((rho.shape[0], w.shape[0], rho.shape[2]), np.complex128)
+        for i, row in enumerate(w):
+            out[:, i] = concentration_series(rho, weights=row)
+        return out
     if w.shape != (rho.shape[1],):
         raise ValueError(
             f"weights has shape {tuple(w.shape)} against {rho.shape[1]} "
@@ -252,8 +270,93 @@ def concentration_series(amplitudes, *, weights) -> np.ndarray:
     return out
 
 
-def quarter_growth(series) -> float:
-    """``last/first - 1`` of the mean of the last and first quarter of a per-frame series."""
+def _mixture(composition, what: str) -> np.ndarray:
+    """A composition vector of three or more channels with at least two present, as float64."""
+    f = np.asarray(composition, dtype=np.float64)
+    if f.ndim != 1 or f.shape[0] < 3:
+        raise ValueError(
+            f"{what}: composition has shape {tuple(f.shape)}; the vector form "
+            f"is one fraction per channel for three or more channels, and two "
+            f"channels pass the scalar fraction")
+    if int((f > 0.0).sum()) < 2:
+        raise ValueError(
+            f"{what}: composition {f.tolist()} has one species present, and "
+            f"a pure composition has no concentration mode to judge")
+    return f
+
+
+def concentration_matrix_series(amplitudes, wavenumbers, *, composition,
+                                n_atoms: float, k_qc: float) -> np.ndarray:
+    """``(n_frames, m, m)`` per-frame ``S_cc``: ``Re sum_K c_i c_j^* / (N |K|)`` over the modes
+    ``K = {0 < k <= k_qc}``, ``c_i = z_i . rho`` (:func:`concentration_weights`), ``N`` the atom count.
+
+    ``amplitudes`` ``(n_frames, n_channels, n_modes)`` are the raw sums over atoms; ``composition`` has three
+    or more channels. Its ideal-mixture expectation is :func:`ideal_concentration_matrix`."""
+    f = _mixture(composition, "concentration_matrix_series")
+    k = np.asarray(wavenumbers, dtype=np.float64)
+    rho = np.asarray(amplitudes)
+    if rho.ndim != 3 or k.shape != (rho.shape[2],):
+        raise ValueError(
+            f"amplitudes {tuple(rho.shape)} and wavenumbers {tuple(k.shape)} "
+            f"are not (n_frames, n_channels, n_modes) and (n_modes,)")
+    if rho.shape[1] != f.shape[0]:
+        raise ValueError(
+            f"composition has {f.shape[0]} channels against {rho.shape[1]} "
+            f"in the amplitudes")
+    modes = (k > 0.0) & (k <= float(k_qc))
+    if not modes.any():
+        raise ValueError(
+            f"no mode has 0 < k <= k_qc={float(k_qc):.6g}: the screen would "
+            f"average nothing")
+    if not float(n_atoms) > 0.0:
+        raise ValueError(f"n_atoms={n_atoms!r} is not a positive atom count")
+    c = concentration_series(rho[:, :, modes],
+                             weights=concentration_weights(f))
+    return (np.einsum("fim,fjm->fij", c, c.conj()).real
+            / (float(n_atoms) * int(modes.sum())))
+
+
+def ideal_concentration_matrix(composition) -> np.ndarray:
+    """``(m, m)`` ``S_id = Z^T diag(x) Z = diag(x_I) - x_I x_I^T``, the ideal mixture's concentration block."""
+    f = _mixture(composition, "ideal_concentration_matrix")
+    x = f[np.nonzero(f > 0.0)[0][:-1]]
+    return np.diag(x) - np.outer(x, x)
+
+
+def concentration_level(block, composition) -> float:
+    """``lambda_max(S_id^-1 B)`` of a time block's mean ``S_cc`` ``B`` ``(m, m)``, as the largest ``eigvalsh`` of
+    ``S_id^-1/2 B S_id^-1/2``; ``B / [x (1 - x)]`` at two channels."""
+    s_id = ideal_concentration_matrix(composition)
+    b = np.asarray(block, dtype=np.float64)
+    if b.shape != s_id.shape:
+        raise ValueError(
+            f"block has shape {tuple(b.shape)} against the {s_id.shape} "
+            f"concentration block of composition {np.asarray(composition).tolist()}")
+    evals, evecs = np.linalg.eigh(s_id)
+    root = evecs @ np.diag(evals ** -0.5) @ evecs.T
+    return float(np.linalg.eigvalsh(root @ (0.5 * (b + b.T)) @ root)[-1])
+
+
+def quarter_growth(series, composition=None) -> float:
+    """``last/first - 1`` of the mean of the last and first quarter of a per-frame series.
+
+    With a ``composition`` vector (three or more channels), ``series`` is ``(n_frames, m, m)``
+    (:func:`concentration_matrix_series`) and the growth is ``lambda(Q4) / lambda(Q1) - 1`` of the quarters'
+    mean matrices (:func:`concentration_level`)."""
+    if composition is not None:
+        f = _mixture(composition, "quarter_growth")
+        s = np.asarray(series, dtype=np.float64)
+        q = s.shape[0] // 4 if s.ndim == 3 else 0
+        if s.ndim != 3:
+            raise ValueError(
+                f"series has shape {tuple(s.shape)}, which is not one "
+                f"(m, m) matrix per frame")
+        if q < 1:
+            raise ValueError(
+                f"{s.shape[0]} frames: a quarter of the run is empty and the "
+                f"growth would be nan rather than a verdict")
+        return float(concentration_level(s[-q:].mean(axis=0), f)
+                     / concentration_level(s[:q].mean(axis=0), f) - 1.0)
     s = np.asarray(series, dtype=np.float64)
     if s.ndim != 1:
         raise ValueError(
@@ -267,8 +370,9 @@ def quarter_growth(series) -> float:
     return float(s[-q:].mean() / s[:q].mean() - 1.0)
 
 
-def time_fifths(values) -> np.ndarray:
-    """``(5,)`` means over the index fifths ``[F*w//5, F*(w+1)//5)`` of the frame axis."""
+def time_fifths(values, *, axis=None) -> np.ndarray:
+    """``(5,)`` means over the index fifths ``[F*w//5, F*(w+1)//5)`` of the frame axis, over everything in a
+    fifth; ``axis=0`` averages over the frames alone, ``(5, ...)`` (the matrix fifths of a vector form)."""
     v = np.asarray(values)
     if v.ndim < 1:
         raise ValueError("values has no frame axis")
@@ -277,12 +381,20 @@ def time_fifths(values) -> np.ndarray:
         raise ValueError(
             f"{n} frames: at least one fifth would be empty and its mean a "
             f"nan that no comparison can read")
-    return np.array([v[n * w // 5:n * (w + 1) // 5].mean() for w in range(5)])
+    return np.array([v[n * w // 5:n * (w + 1) // 5].mean(axis=axis)
+                     for w in range(5)])
 
 
 def condensing(fifths, composition, *, ratio: float, ideal_factor: float
                ) -> bool:
-    """Condensing evidence: last fifth ``> ratio * first`` AND ``> ideal_factor * x (1 - x)``."""
+    """Condensing evidence: last fifth ``> ratio * first`` AND ``> ideal_factor * x (1 - x)``.
+
+    With a ``composition`` vector, ``fifths`` is ``(5, m, m)`` (:func:`time_fifths` with ``axis=0``) and the
+    test reads the levels ``lambda(F)`` (:func:`concentration_level`): ``lambda(F5) > ratio * lambda(F1)`` AND
+    ``lambda(F5) > ideal_factor``."""
+    if np.ndim(composition) != 0:
+        first, last = _fifth_levels(fifths, composition, "condensing")
+        return bool(last > ratio * max(first, 1e-12) and last > ideal_factor)
     f = np.asarray(fifths, dtype=np.float64)
     if f.shape != (5,):
         raise ValueError(
@@ -300,7 +412,19 @@ def single_phase(growth, fifths, composition, temperature, *,
 
     Stationary: ``growth <= growth_tol`` or :func:`condensing` false. Level: last fifth at most
     ``level_factor * x (1 - x)``, waived at ``temperature >= t_min``. ``fifths=None`` judges on growth alone.
+    With a ``composition`` vector the fifths are ``(5, m, m)`` and the level is ``lambda(F5) <= level_factor``
+    (:func:`condensing`, :func:`quarter_growth`).
     """
+    if np.ndim(composition) != 0:
+        f = _mixture(composition, "single_phase")
+        stationary = bool(growth <= growth_tol)
+        if not stationary and fifths is not None:
+            stationary = not condensing(fifths, f, ratio=condensing_ratio,
+                                        ideal_factor=condensing_ideal_factor)
+        level_ok = (True if fifths is None else bool(
+            _fifth_levels(fifths, f, "single_phase")[1] <= level_factor))
+        waived = t_min is not None and float(temperature) >= float(t_min)
+        return bool(stationary and (level_ok or waived))
     x = float(composition)
     stationary = bool(growth <= growth_tol)
     if not stationary and fifths is not None:
@@ -313,6 +437,18 @@ def single_phase(growth, fifths, composition, temperature, *,
                         <= level_factor * x * (1 - x))
     waived = t_min is not None and float(temperature) >= float(t_min)
     return bool(stationary and (level_ok or waived))
+
+
+def _fifth_levels(fifths, composition, what: str) -> tuple[float, float]:
+    """``(lambda(F1), lambda(F5))`` of ``(5, m, m)`` matrix fifths."""
+    f = _mixture(composition, what)
+    blocks = np.asarray(fifths, dtype=np.float64)
+    if blocks.ndim != 3 or blocks.shape[0] != 5:
+        raise ValueError(
+            f"fifths has shape {tuple(blocks.shape)}, which is not five "
+            f"(m, m) matrices")
+    return (concentration_level(blocks[0], f),
+            concentration_level(blocks[-1], f))
 
 
 @dataclass(frozen=True)
@@ -432,7 +568,7 @@ def kernel_shape(runs, *, t_min: float, shape_set: str,
                 "caller believe in a restriction that had no effect")
         flags = [True] * len(runs)
     reference = None
-    shapes = []
+    shapes, carried = [], []
     for run, keep in zip(runs, flags):
         if run.temperature < t_min or not keep:
             continue
@@ -444,19 +580,40 @@ def kernel_shape(runs, *, t_min: float, shape_set: str,
             reference = k
         n_channels = icpt.shape[1]
         shape = np.zeros((len(reference), n_channels, n_channels))
+        carries = np.ones((n_channels, n_channels), dtype=bool)
         for a in range(n_channels):
             for b in range(n_channels):
                 y = icpt[:, a, b]
                 y0 = np.polyfit(k[:2] ** 2, y[:2], 1)[1]
+                if y0 == 0.0 and not np.any(y):
+                    # an absent channel: a pair the run does not carry, nan and not a 0/0
+                    shape[:, a, b] = np.nan
+                    carries[a, b] = False
+                    continue
                 shape[:, a, b] = np.interp(reference, k, y / y0)
         shapes.append(shape)
+        carried.append(carries)
     if not shapes:
         raise ValueError(
             f"no run in the set is at or above t_min={t_min:.6g}: the shape "
             f"is an average over a campaign's hot runs and there are none, "
             f"so pass a t_min at or below this campaign's top temperature")
-    return KernelShape(wavenumbers=reference, kernel=np.mean(shapes, 0),
-                       spread=np.std(shapes, 0), n_runs=len(shapes),
+    carried = np.asarray(carried)
+    if carried.all():
+        kernel, spread = np.mean(shapes, 0), np.std(shapes, 0)
+    else:
+        # per pair, over the runs that carry it; nan where none does
+        stacked = np.asarray(shapes)
+        kernel = np.full(stacked.shape[1:], np.nan)
+        spread = np.full(stacked.shape[1:], np.nan)
+        for a in range(stacked.shape[2]):
+            for b in range(stacked.shape[3]):
+                runs_ab = carried[:, a, b]
+                if runs_ab.any():
+                    kernel[:, a, b] = stacked[runs_ab, :, a, b].mean(0)
+                    spread[:, a, b] = stacked[runs_ab, :, a, b].std(0)
+    return KernelShape(wavenumbers=reference, kernel=kernel,
+                       spread=spread, n_runs=len(shapes),
                        t_min=float(t_min))
 
 
@@ -495,8 +652,10 @@ def shape_amplitude(run, shape, *, k_max: float
 class AnchorTable:
     """A campaign's measured rows at one DECLARED pressure (``None`` when the system controls none).
 
-    Per row: ``composition``, ``temperature``, ``densities`` ``(n_rows, C)``, ``M_window``,
-    ``M_zero_wavenumber``, ``M_shape``, ``shape_residual`` ``(n_rows, C, C)``, ``growth``, ``single_phase``.
+    Per row: ``composition`` ``(n_rows,)`` (one fraction) or ``(n_rows, C)`` (one per channel),
+    ``temperature``, ``densities`` ``(n_rows, C)``, ``M_window``, ``M_zero_wavenumber``, ``M_shape``,
+    ``shape_residual`` ``(n_rows, C, C)``, ``growth``, ``single_phase``. On a channel a row does not carry
+    (zero density) :meth:`density_scaled` and the kernel shape's ``0/0`` come out nan.
     """
 
     pressure: float | None
@@ -520,15 +679,18 @@ class AnchorTable:
 
     def density_scaled(self, source: str) -> tuple[np.ndarray, np.ndarray]:
         """Diagonal ``M_aa / rho_a`` and upper-triangle cross ``M_ab / sqrt(rho_a rho_b)`` mobilities.
+
+        An entry of an absent channel (zero density) is nan, with no division warning.
         """
         m = self.matrices(source)
         n_channels = self.densities.shape[1]
-        diagonal = np.stack([m[:, a, a] / self.densities[:, a]
+        diagonal = np.stack([_divide(m[:, a, a], self.densities[:, a])
                              for a in range(n_channels)], axis=1)
         pairs = [(a, b) for a in range(n_channels)
                  for b in range(a + 1, n_channels)]
         cross = np.stack(
-            [m[:, a, b] / np.sqrt(self.densities[:, a] * self.densities[:, b])
+            [_divide(m[:, a, b],
+                     np.sqrt(self.densities[:, a] * self.densities[:, b]))
              for a, b in pairs],
             axis=1) if pairs else np.zeros((m.shape[0], 0))
         return diagonal, cross
@@ -539,6 +701,15 @@ class AnchorTable:
         diagonal, _ = self.density_scaled(source)
         return diagonal * np.asarray(thermal_energy, dtype=np.float64)[
             ..., None]
+
+
+def _divide(numerator, denominator) -> np.ndarray:
+    """``numerator / denominator``, nan where the denominator is zero (an absent channel), warning-free."""
+    numerator, denominator = np.asarray(numerator), np.asarray(denominator)
+    out = np.full(np.broadcast_shapes(numerator.shape, denominator.shape),
+                  np.nan, dtype=np.result_type(numerator, denominator, 1.0))
+    return np.divide(numerator, denominator, out=out,
+                     where=denominator != 0.0)
 
 
 def anchor_table(runs, *, pressure: float | None, composition, densities,
@@ -556,15 +727,16 @@ def anchor_table(runs, *, pressure: float | None, composition, densities,
     flags = np.asarray(single_phase, dtype=bool)
     growth = np.asarray(growth, dtype=np.float64)
     n_rows = len(runs)
+    n_channels = runs[0].M_window.shape[0]
     for name, value, shape_wanted in (
-            ("composition", composition, (n_rows,)),
+            ("composition", composition,
+             (n_rows, n_channels) if composition.ndim == 2 else (n_rows,)),
             ("growth", growth, (n_rows,)),
             ("single_phase", flags, (n_rows,))):
         if value.shape != shape_wanted:
             raise ValueError(
                 f"{name} has shape {tuple(value.shape)} against {n_rows} "
                 f"runs")
-    n_channels = runs[0].M_window.shape[0]
     if densities.shape != (n_rows, n_channels):
         raise ValueError(
             f"densities has shape {tuple(densities.shape)} against "
