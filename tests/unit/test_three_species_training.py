@@ -285,9 +285,11 @@ def test_one_step_trains_every_term_finitely_and_reloads_strictly(toy, tmp_path)
     weighted = {"L_M": weights["lambda_M"], "L_S": weights["lambda_S"],
                 "L_bulk": weights["lambda_bulk"], "L_P": weights["lambda_P"],
                 "L_W": weights["lambda_wpsd"]}
-    expected = step["L_dyn"] + sum(w * step[name] for name, w in weighted.items())
-    assert steps["loss"][0] == pytest.approx(expected, rel=1e-5)
     assert all(step[name] > 0.0 for name in weighted), step
+    contributions = [w * step[name] for name, w in weighted.items()]
+    expected = step["L_dyn"] + sum(contributions)
+    # the terms span five decades: a tenth of the smallest one, so leaving any one out fails
+    assert steps["loss"][0] == pytest.approx(expected, rel=0.0, abs=0.1 * min(contributions))
 
     path = run / "final.ckpt"
     declared = Checkpoint(path=str(path.relative_to(tmp_path)),
