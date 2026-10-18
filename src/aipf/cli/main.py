@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_cmd.add_parser(sub)
     diagnose_cmd.add_parser(sub)
     modes_cmd.add_parser(sub)
+    __import__("aipf.cli.sidecar_cmd", fromlist=["add_parser"]).add_parser(sub)
     __import__("aipf.cli.rollout_cmd", fromlist=["add_parser"]).add_parser(sub)
     __import__("aipf.cli.md_cmd", fromlist=["add_parser"]).add_parser(sub)
     return p

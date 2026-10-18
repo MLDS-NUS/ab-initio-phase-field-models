@@ -35,6 +35,7 @@ REQUIRED = {
               "--source", "--resume-optimizer", "--anchors"),
     "diagnose": ("--system", "--ckpt", "--stage"),
     "modes": ("--system", "--tag", "--sigma", "--k-cut"),
+    "modes-sidecar": ("--system", "--tree", "--pattern"),
 }
 
 #: A complete invocation of each verb, from which one flag at a time is
@@ -47,6 +48,8 @@ COMPLETE = {
                  "--stage", "kappa"],
     "modes": ["modes", "--system", "demo", "--tag", "t1",
               "--sigma", "2.0", "--k-cut", "2.0"],
+    "modes-sidecar": ["modes-sidecar", "--system", "demo", "--tree", "sub",
+                      "--pattern", "run_*"],
 }
 
 
