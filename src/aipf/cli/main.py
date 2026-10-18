@@ -18,12 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="store_true",
                    help="print the package version and exit")
     sub = p.add_subparsers(dest="command", metavar="<command>")
-    from aipf.cli import data_cmd, diagnose_cmd, modes_cmd, train_cmd
+    from aipf.cli import data_cmd, diagnose_cmd, modes_cmd, sidecar_cmd, train_cmd
     data_cmd.add_parser(sub)
     train_cmd.add_parser(sub)
     diagnose_cmd.add_parser(sub)
     modes_cmd.add_parser(sub)
-    __import__("aipf.cli.sidecar_cmd", fromlist=["add_parser"]).add_parser(sub)
+    sidecar_cmd.add_parser(sub)
     __import__("aipf.cli.rollout_cmd", fromlist=["add_parser"]).add_parser(sub)
     __import__("aipf.cli.md_cmd", fromlist=["add_parser"]).add_parser(sub)
     return p

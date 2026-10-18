@@ -23,7 +23,7 @@ command does not take as a flag comes from that system's declaration ([system.md
 | code | meaning |
 |---|---|
 | 0 | done; the last line printed is the output (a directory, a file, or `ok`) |
-| 1 | `aipf md run`: the engine ran and failed, or the pre-flight of a `--dry-run` did not pass; `aipf md doctor`: a check the site needs is broken or could not be inspected |
+| 1 | `aipf md run`: the engine ran and failed, or the pre-flight of a `--dry-run` did not pass; `aipf md doctor`: a check the site needs is broken or could not be inspected; `aipf modes-sidecar`: at least one run could not be converted (the others were) |
 | 2 | refused before anything ran: a usage error, an undeclared system, location or site fact, an `aipf.toml` that is not valid TOML, or a declaration that is missing a key. The reason is on stderr and names the key, flag or variable to set |
 
 ## Configuration
@@ -134,23 +134,33 @@ directory holding `modes.npz`. See [data.md](data.md#modes).
 
 ## aipf modes-sidecar
 
-    aipf modes-sidecar --system S --tree SUBDIR --pattern GLOB [--verify]
+    aipf modes-sidecar --system S --tree SUBDIR --pattern GLOB [--verify] [--remove-partials]
 
-Writes `rho_k.npy` beside every `modes.npz` of the run directories `GLOB` selects under `SUBDIR`, which
-is relative to the declared `source_root` as a `--source` SUBDIR of `aipf train` is (an absolute tree is
-refused, exit 2). Each sidecar is checked bit for bit against the archive before it is renamed into
-place ([data.md](data.md#the-memory-mapped-sidecar)); `modes.npz` is never changed. Prints one line per
-run, `written <run>`, `skipped <run>` or `replaced <run>: <why>`, then
-`N written, M replaced, K skipped under <tree>`. A glob that selects no archive is refused (exit 2).
+Writes `rho_k.npy` and its record `rho_k.json` beside every `modes.npz` of the run directories `GLOB`
+selects under `SUBDIR`, which is relative to the declared `source_root` as a `--source` SUBDIR of
+`aipf train` is (an absolute SUBDIR is refused, exit 2). Each sidecar is read back through the page
+cache and compared with the archive bit for bit before it is renamed into place
+([data.md](data.md#the-memory-mapped-sidecar)); `modes.npz` is never changed. Prints one line per run,
+`written <run>`, `skipped <run>`, `replaced <run>: <why>` or `failed <run>: <error>`, then one
+`partial <file>` (or `removed partial <file>`) line per temporary file of a killed writer, then
+`N written, M replaced, K skipped, F failed under <dir>; P partial file(s) left, R removed`. A glob
+that selects no archive is refused (exit 2); a run that cannot be converted (a cut or unreadable
+archive, one without `rho_k`, a failed write) is reported and the next is converted, and the command
+then exits 1.
 
 - An existing sidecar the training reader accepts (shape, dtype and order against the archive's
-  header) is skipped without reading the archive's amplitudes, so a repeated or interrupted run picks
-  up where it stopped. `--verify` also compares its frames with the archive's and rewrites one that
-  differs.
-- An existing sidecar the reader refuses is rewritten from the archive.
-- Each archive is read once, and only when its sidecar is written or verified; the writer holds the
-  archive's amplitudes and one chunk of frames. Jobs over disjoint globs (a batch array) can run in
-  parallel.
+  header, its record against the archive array's CRC-32 and size) is skipped without reading the
+  archive's amplitudes, so a repeated or interrupted run picks up where it stopped. `--verify` also
+  compares its frames with the archive's and rewrites one that differs.
+- An existing sidecar the reader refuses (another shape, a rewritten `rho_k`, no record) is rewritten
+  from the archive.
+- Each archive is read once, and only when its sidecar is written or verified. Writing holds the
+  archive's amplitudes and one chunk of frames, and the read-back maps the new file, so the peak
+  resident set is about twice one run's `rho_k` plus the interpreter. Jobs over disjoint globs (a
+  batch array) can run in parallel.
+- `--remove-partials` deletes the `.partial` files whose name records the machine the command runs on
+  and a process that no longer exists; the others (another machine's, a live process's, or a name not
+  in that form) are listed and kept.
 
 Training maps the sidecars once the system declares `defaults["training"]["mmap_sidecar"] = True`
 ([training.md](training.md#memory-mapped-amplitudes)).

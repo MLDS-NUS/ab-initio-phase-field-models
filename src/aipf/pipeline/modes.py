@@ -12,9 +12,11 @@ import itertools
 import json
 import os
 import secrets
+import socket
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Union
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -46,6 +48,14 @@ REFERENCE_BOX_KEY = "reference_box"
 #: so a window's frames are one contiguous byte range (:func:`write_mmap_sidecar`; a reader opens it
 #: under :attr:`aipf.train.dataset.ArchiveKeys.mmap_file`).
 MMAP_FILE = "rho_k.npy"
+
+#: The record beside a sidecar of the archive array it was copied from (:func:`mmap_record_path`,
+#: :func:`archive_fingerprint`): the zip member, its CRC-32 and its uncompressed size. A reader refuses a
+#: sidecar without it, or whose archive array has changed since.
+MMAP_RECORD = "rho_k.json"
+
+#: The suffix of a sidecar or record being written, ``.<name>.<host>.<pid>.<token>.partial``.
+PARTIAL_SUFFIX = ".partial"
 
 #: Bytes copied, and compared, per chunk when a sidecar is written: the writer never holds a second
 #: whole timeline.
@@ -88,8 +98,9 @@ class ModesRecord:
         """Write ``modes.npz`` with the composition label, and ``provenance.json``. Returns the archive.
 
         ``mmap_sidecar`` also writes :data:`MMAP_FILE` (:func:`write_mmap_sidecar`); ``modes.npz`` is the
-        same either way. A sidecar already in ``directory`` belongs to the archive being replaced and is
-        removed before ``modes.npz`` is written, so a rewritten archive never sits beside a stale copy."""
+        same either way. A sidecar and its record already in ``directory`` belong to the archive being
+        replaced and are removed before ``modes.npz`` is written, so a rewritten archive never sits beside
+        a stale copy."""
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -114,13 +125,14 @@ class ModesRecord:
                 f"column, which is where the name has to change")
         payload.update(label)
         sidecar = directory / MMAP_FILE
-        if sidecar.is_file():
-            sidecar.unlink()
+        for derived in (sidecar, mmap_record_path(sidecar)):
+            derived.unlink(missing_ok=True)
         np.savez_compressed(directory / "modes.npz", **payload)
         (directory / "provenance.json").write_text(
             json.dumps(dict(self.provenance), indent=1, sort_keys=True))
         if mmap_sidecar:
-            write_mmap_sidecar(sidecar, self.amplitudes)
+            write_mmap_sidecar(sidecar, self.amplitudes,
+                               fingerprint=archive_fingerprint(directory / "modes.npz"))
         return directory / "modes.npz"
 
     @classmethod
@@ -160,6 +172,45 @@ def _frame_chunks(layout: np.ndarray) -> list:
     return [slice(start, start + step) for start in range(0, layout.shape[0], step)]
 
 
+def mmap_record_path(sidecar) -> Path:
+    """The record beside the sidecar ``sidecar``: its name with the suffix ``.json``
+    (:data:`MMAP_RECORD` beside :data:`MMAP_FILE`)."""
+    return Path(sidecar).with_suffix(".json")
+
+
+def archive_fingerprint(archive, key: str = ARCHIVE_KEYS["amplitudes"]) -> dict:
+    """``{"member", "crc32", "file_size"}`` of the array ``key`` of the ``.npz`` ``archive`` (a path or an
+    open :class:`zipfile.ZipFile`), read off the zip directory: nothing is decompressed. Two archives whose
+    arrays differ have, but for a CRC-32 collision of equal-size members, different fingerprints."""
+    member = f"{key}.npy"
+    if isinstance(archive, zipfile.ZipFile):
+        info = archive.getinfo(member)
+    else:
+        with zipfile.ZipFile(archive) as opened:
+            info = opened.getinfo(member)
+    return {"member": member, "crc32": int(info.CRC), "file_size": int(info.file_size)}
+
+
+def _partial_path(path: Path) -> Path:
+    """Where ``path`` is written before it is renamed into place: ``.<name>.<host>.<pid>.<token>.partial``
+    beside it, so a leftover names the machine and process that wrote it."""
+    return path.with_name(f".{path.name}.{socket.gethostname()}.{os.getpid()}."
+                          f"{secrets.token_hex(4)}{PARTIAL_SUFFIX}")
+
+
+def partial_writer(partial, name: str) -> Optional[Tuple[str, int]]:
+    """``(host, pid)`` of the process that was writing ``partial``, a temporary file of the file ``name``
+    (:data:`MMAP_FILE` or :data:`MMAP_RECORD`); ``None`` for a file not named that way."""
+    text = Path(partial).name
+    prefix = f".{name}."
+    if not (text.startswith(prefix) and text.endswith(PARTIAL_SUFFIX)):
+        return None
+    parts = text[len(prefix):-len(PARTIAL_SUFFIX)].rsplit(".", 2)
+    if len(parts) != 3 or not parts[0] or not parts[1].isdigit():
+        return None
+    return parts[0], int(parts[1])
+
+
 def mmap_sidecar_matches(mapped, stored, *, channel_axis: int = 2) -> bool:
     """Whether the sidecar array ``mapped`` holds exactly ``stored``'s amplitudes, bit for bit, in the
     channel-first layout: same shape, same dtype, same bytes. ``channel_axis`` as
@@ -170,16 +221,21 @@ def mmap_sidecar_matches(mapped, stored, *, channel_axis: int = 2) -> bool:
     return all(_same_bits(mapped[chunk], layout[chunk]) for chunk in _frame_chunks(layout))
 
 
-def write_mmap_sidecar(path, stored, *, channel_axis: int = 2) -> Path:
+def write_mmap_sidecar(path, stored, *, fingerprint: Mapping[str, Any],
+                       channel_axis: int = 2) -> Path:
     """Write the amplitudes ``stored`` to ``path`` as the sidecar a memory-mapped reader opens
-    (:data:`MMAP_FILE`): ``(n_frames, n_channels, n_modes)``, C order, ``stored``'s dtype. Returns ``path``.
+    (:data:`MMAP_FILE`): ``(n_frames, n_channels, n_modes)``, C order, ``stored``'s dtype; and beside it
+    its record (:func:`mmap_record_path`), ``fingerprint`` (:func:`archive_fingerprint` of the archive
+    array ``stored`` is). Returns ``path``.
 
     ``channel_axis`` is the channel axis of ``stored``: ``2`` for the archive's
-    ``(n_frames, n_modes, n_channels)``, ``1`` for an array already channel-first. The file is written
-    beside ``path`` under a temporary name (``.<name>.<pid>.<token>.partial``), read back and compared
-    with ``stored`` bit for bit, synced to disk, and only then renamed over ``path``. A reader therefore
-    never sees a partial or unchecked file, two writers of one run each rename a whole checked file, and
-    a failure (a mismatch, a full disk, an interrupt) leaves no file but a killed process's ``.partial``.
+    ``(n_frames, n_modes, n_channels)``, ``1`` for an array already channel-first. Both files are written
+    beside ``path`` under temporary names (``.<name>.<host>.<pid>.<token>.partial``); the sidecar is read
+    back and compared with ``stored`` bit for bit and synced to disk. Then the old record is removed,
+    the sidecar renamed into place, and the record after it. A reader therefore never sees a partial or
+    unchecked sidecar, and an interruption between the steps leaves a sidecar without its record, which
+    the reader refuses and the converter rewrites, never a record vouching for another sidecar. A failure
+    (a mismatch, a full disk, an interrupt) leaves no temporary file but a killed process's ``.partial``.
     Copied in chunks of frames, so no second whole timeline is held."""
     path = Path(path)
     if channel_axis not in (1, 2):
@@ -194,7 +250,10 @@ def write_mmap_sidecar(path, stored, *, channel_axis: int = 2) -> Path:
     chunks = _frame_chunks(layout)
     header = {"descr": np.lib.format.dtype_to_descr(layout.dtype), "fortran_order": False,
               "shape": tuple(int(n) for n in layout.shape)}
-    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.partial")
+    record = mmap_record_path(path)
+    record_text = json.dumps({**dict(fingerprint), "shape": list(header["shape"]),
+                              "dtype": str(layout.dtype)}, indent=1, sort_keys=True)
+    temp, temp_record = _partial_path(path), _partial_path(record)
     try:
         with open(temp, "wb") as handle:
             np.lib.format.write_array_header_1_0(handle, header)
@@ -211,9 +270,16 @@ def write_mmap_sidecar(path, stored, *, channel_axis: int = 2) -> Path:
             raise OSError(
                 f"{path}: the sidecar read back from {temp.name} differs from the amplitudes it "
                 f"was written from; nothing was written")
+        with open(temp_record, "w") as handle:
+            handle.write(record_text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        record.unlink(missing_ok=True)
         os.replace(temp, path)
+        os.replace(temp_record, record)
     finally:
         temp.unlink(missing_ok=True)
+        temp_record.unlink(missing_ok=True)
     return path
 
 

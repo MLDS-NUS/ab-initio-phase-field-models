@@ -4,16 +4,19 @@ What is pinned (docs/reference/training.md, "Memory-mapped amplitudes"):
 
 * every batch a loader serves, every key of every sample, is bit-identical between the reader that
   holds the amplitudes in memory and the one that maps them from ``rho_k.npy``, with 0 and 4 loader
-  workers, on a synthetic three-channel tree (a breathing box, a reference cell, a quality cut) and on
+  workers, on synthetic three-channel runs (a breathing box, a reference cell, a quality cut) and on
   the Fe-B sample archives; a mapped run also pickles as its file, not its frames;
-* ``setup()`` of a tree of mapped runs allocates no amplitudes: its traced Python allocation peak and
-  its resident-set growth stay below one run's ``rho_k``, where the eager reader's peak is the tree;
-* a run without the sidecar reads as before, a tree may mix the two, an undeclared sidecar is ignored,
-  and a sidecar of the wrong shape, frame count, channel count, dtype or order is refused naming the run;
+* ``setup()`` of several mapped runs allocates no amplitudes: its traced Python allocation peak and its
+  resident-set growth stay below one run's ``rho_k``, where the eager reader's peak is all of them;
+* a run without the sidecar reads as before (with a warning when the sidecar is declared), a source may
+  mix the two, an undeclared sidecar is ignored, and a sidecar of the wrong shape, frame count, channel
+  count, dtype or order, an empty one, one without its record and one copied from another ``rho_k`` of
+  the same shape are refused naming the run; the soft limit on open files is raised for the mappings;
 * the converter writes the sidecar as ``moveaxis(rho_k, 2, 1)`` bit for bit, skips a valid one,
-  rewrites a stale one, leaves no partial file and never touches ``modes.npz``;
-* ``ModesRecord.save`` without the flag writes the archive it always wrote, byte for byte, and with it
-  the same archive and the sidecar.
+  rewrites a stale one, reports a damaged archive and goes on, lists (and on request removes) the
+  temporary files of killed writers, and never touches ``modes.npz``;
+* ``ModesRecord.save`` without the flag writes the archive it always wrote, byte for byte (pinned by its
+  sha256), and with it the same archive, the sidecar and its record.
 """
 from __future__ import annotations
 
@@ -31,11 +34,13 @@ import torch
 
 import aipf
 from aipf.pipeline import modes as modes_mod
-from aipf.pipeline.modes import MMAP_FILE, ModesRecord, write_mmap_sidecar
+from aipf.pipeline.modes import (MMAP_FILE, MMAP_RECORD, ModesRecord, archive_fingerprint,
+                                 write_mmap_sidecar)
 from aipf.train.datamodule import (LoaderSettings, ModeDataModule, RunWeighting, SourceSpec,
                                    SplitSettings)
 from aipf.train.dataset import ArchiveKeys, WindowSettings, read_mode_runs
-from aipf.train.mmap_sidecar import REPLACED, SKIPPED, WRITTEN, convert_run, convert_runs
+from aipf.train.mmap_sidecar import (FAILED, REPLACED, SKIPPED, WRITTEN, convert_run, convert_runs,
+                                     leftover_partials)
 
 #: The three-channel archive these tests write, as ``aipf.train.fit`` declares the package's own.
 KEYS = ArchiveKeys(
@@ -172,8 +177,8 @@ def test_the_feb_sample_serves_the_same_batches_mapped_or_in_memory(tmp_path, nu
     shutil.copytree(FEB_SAMPLE, tree)
     keys = _archive_keys(load("feb"))
     assert keys.mmap_file is None          # Fe-B declares no sidecar: it reads as it always did
-    statuses = [status for _d, status, _r in convert_runs(tree, "cube_*",
-                                                          keys=keys.replace(mmap_file=MMAP_FILE))]
+    statuses = [done.status for done in convert_runs(tree, "cube_*",
+                                                     keys=keys.replace(mmap_file=MMAP_FILE))]
     assert statuses == [WRITTEN, WRITTEN]
     window = _window("weak_mid", grid=(32, 32, 32), half_width=10, n_states=5, stride=9)
     eager = _module(tree, "cube_*", keys, window, num_workers=num_workers)
@@ -244,7 +249,8 @@ def test_setup_of_mapped_runs_allocates_less_than_one_runs_amplitudes(tmp_path):
         np.savez(run / "modes.npz", rho_k=amplitudes, nvec=labels,
                  box=np.full((n_frames, 3), 20.0), T_K=1500.0, dt_frame_ps=0.1,
                  x_a=0.5, x_b=0.5, x_c=0.0)
-        write_mmap_sidecar(run / MMAP_FILE, amplitudes)
+        write_mmap_sidecar(run / MMAP_FILE, amplitudes,
+                           fingerprint=archive_fingerprint(run / "modes.npz"))
         del amplitudes
     one_run = n_frames * labels.shape[0] * n_channels * 8
     assert one_run == 16_000_000
@@ -378,6 +384,105 @@ def test_a_system_opts_in_by_declaring_the_sidecar_in_its_training_block():
         _training_archive_keys(wrong)
 
 
+def test_an_empty_sidecar_is_refused_naming_the_run_and_rewritten(tmp_path):
+    tree = _three_channel_tree(tmp_path / "three")
+    good = np.load(tree / "run_d" / MMAP_FILE)
+    (tree / "run_d" / MMAP_FILE).write_bytes(b"")
+    with pytest.raises(ValueError, match="run 'run_d'.*not a readable"):
+        read_mode_runs(tree, "run_*", keys=MAPPED)
+    assert convert_run(tree / "run_d", MAPPED)[0] == REPLACED
+    assert _same_bits(np.load(tree / "run_d" / MMAP_FILE), good)
+
+
+def _rewrite_amplitudes(directory: Path, factor: float) -> None:
+    """The archive's ``rho_k`` replaced by another of the same shape and dtype, everything else kept."""
+    with np.load(directory / "modes.npz") as payload:
+        kept = {k: payload[k] for k in payload.files}
+    kept["rho_k"] = (kept["rho_k"] * factor).astype(kept["rho_k"].dtype)
+    np.savez_compressed(directory / "modes.npz", **kept)
+
+
+def test_a_sidecar_copied_from_another_rho_k_of_the_same_shape_is_refused_and_replaced(tmp_path):
+    tree = _three_channel_tree(tmp_path / "three")
+    _rewrite_amplitudes(tree / "run_b", 2.0)
+    with pytest.raises(ValueError, match=f"run 'run_b'.*{MMAP_RECORD} records it was copied from"):
+        read_mode_runs(tree, "run_*", keys=MAPPED)
+    status, reason = convert_run(tree / "run_b", MAPPED)
+    assert status == REPLACED and "records it was copied from" in reason
+    eager = {r.tag: r for r in read_mode_runs(tree, "run_*", keys=KEYS)}
+    for run in read_mode_runs(tree, "run_*", keys=MAPPED):
+        assert isinstance(run.amplitudes, np.memmap)
+        assert _same_bits(run.amplitudes, eager[run.tag].amplitudes)
+
+
+@pytest.mark.parametrize("record", [None, b"{not json", b"[1, 2]"])
+def test_a_sidecar_without_a_readable_record_is_refused_and_rewritten(tmp_path, record):
+    tree = _three_channel_tree(tmp_path / "three")
+    path = tree / "run_a" / MMAP_RECORD
+    path.unlink() if record is None else path.write_bytes(record)
+    with pytest.raises(ValueError, match=f"run 'run_a'.*{MMAP_RECORD}"):
+        read_mode_runs(tree, "run_*", keys=MAPPED)
+    assert convert_run(tree / "run_a", MAPPED)[0] == REPLACED
+    assert len(read_mode_runs(tree, "run_*", keys=MAPPED)) == 4
+
+
+def test_a_declared_sidecar_missing_from_some_runs_is_a_warning_naming_them(tmp_path, caplog):
+    tree = _three_channel_tree(tmp_path / "three")
+    (tree / "run_c" / MMAP_FILE).unlink()
+    with caplog.at_level("WARNING"):
+        read_mode_runs(tree, "run_*", keys=MAPPED)
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("1 of 4 run(s) have no rho_k.npy" in m and "run_c" in m for m in warned), warned
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        read_mode_runs(tree, "run_*", keys=KEYS)
+    assert not [r for r in caplog.records if "rho_k.npy" in r.getMessage()]
+
+
+def test_the_soft_limit_on_open_files_is_raised_for_the_mappings_or_refused(monkeypatch):
+    import resource
+
+    from aipf.train import dataset
+
+    calls = []
+    monkeypatch.setattr(dataset, "_open_files", lambda: 50)
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (300, 400))
+    monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append(limits))
+    dataset._reserve_open_files(10, "here")
+    assert calls == [(50 + 10 + dataset._SPARE_OPEN_FILES, 400)]
+    calls.clear()
+    dataset._reserve_open_files(300 - 50 - dataset._SPARE_OPEN_FILES, "here")
+    assert calls == []                     # exactly at the soft limit: nothing to raise
+    with pytest.raises(OSError, match="here: mapping 1000 run.*hard limit on open files is 400"):
+        dataset._reserve_open_files(1000, "here")
+
+
+def test_the_open_files_counted_are_the_mappings_still_held(tmp_path):
+    import gc
+
+    from aipf.train import dataset
+
+    tree = _three_channel_tree(tmp_path / "three")
+    before = dataset._open_files()
+    runs = read_mode_runs(tree, "run_*", keys=MAPPED)
+    assert dataset._open_files() == before + 4
+    del runs
+    gc.collect()
+    assert dataset._open_files() == before
+
+
+def test_the_reader_reserves_one_open_file_per_mapped_run(tmp_path, monkeypatch):
+    from aipf.train import dataset
+
+    tree = _three_channel_tree(tmp_path / "three")
+    (tree / "run_c" / MMAP_FILE).unlink()
+    reserved = []
+    monkeypatch.setattr(dataset, "_reserve_open_files", lambda n, where: reserved.append(n))
+    read_mode_runs(tree, "run_*", keys=MAPPED, exclude_tags=("run_d",))
+    read_mode_runs(tree, "run_*", keys=KEYS)
+    assert reserved == [2]
+
+
 # ---------------------------------------------------------------------------
 # 4. the converter
 # ---------------------------------------------------------------------------
@@ -389,16 +494,16 @@ def test_the_converter_writes_the_moved_amplitudes_bit_for_bit_and_then_skips(tm
     archives = {p: p.read_bytes() for p in tree.glob("*/modes.npz")}
     keys = MAPPED.replace(composition=("x_left", "x_right"), composition_fallback="x_B")
     first = list(convert_runs(tree, "cube_*", keys=keys))
-    assert [s for _d, s, _r in first] == [WRITTEN, WRITTEN]
+    assert [done.status for done in first] == [WRITTEN, WRITTEN]
     stamps = {}
-    for directory, _s, _r in first:
+    for directory in (done.directory for done in first):
         with np.load(directory / "modes.npz") as payload:
             moved = np.moveaxis(payload["rho_k"], 2, 1)
         sidecar = np.load(directory / MMAP_FILE)
         assert sidecar.flags.c_contiguous and _same_bits(sidecar, moved)
         stamps[directory] = (directory / MMAP_FILE).stat().st_mtime_ns
-    assert [s for _d, s, _r in convert_runs(tree, "cube_*", keys=keys)] == [SKIPPED, SKIPPED]
-    assert [s for _d, s, _r in convert_runs(tree, "cube_*", keys=keys, verify=True)] == \
+    assert [d.status for d in convert_runs(tree, "cube_*", keys=keys)] == [SKIPPED, SKIPPED]
+    assert [d.status for d in convert_runs(tree, "cube_*", keys=keys, verify=True)] == \
         [SKIPPED, SKIPPED]
     assert {d: (d / MMAP_FILE).stat().st_mtime_ns for d in stamps} == stamps
     assert {p: p.read_bytes() for p in tree.glob("*/modes.npz")} == archives
@@ -448,7 +553,8 @@ def test_the_sidecar_is_the_file_numpy_save_writes(tmp_path, monkeypatch):
     """Chunked writing (forced here to one frame per chunk) gives exactly ``np.save``'s file."""
     record = _record(n_frames=7, seed=4)
     monkeypatch.setattr(modes_mod, "_SIDECAR_CHUNK_BYTES", 1)
-    write_mmap_sidecar(tmp_path / "chunked.npy", record.amplitudes)
+    write_mmap_sidecar(tmp_path / "chunked.npy", record.amplitudes,
+                       fingerprint={"member": "rho_k.npy", "crc32": 0, "file_size": 0})
     np.save(tmp_path / "saved.npy", np.ascontiguousarray(np.moveaxis(record.amplitudes, 2, 1)))
     assert (tmp_path / "chunked.npy").read_bytes() == (tmp_path / "saved.npy").read_bytes()
 
@@ -467,7 +573,17 @@ def test_aipf_modes_sidecar_converts_a_source_tree(tmp_path, monkeypatch, capsys
     assert "written cube_x0.10_T1400_s1" in out and "2 written, 0 replaced, 0 skipped" in out
     assert len(list(tree.glob(f"*/{MMAP_FILE}"))) == 2
     assert main(argv + ["--verify"]) == 0
-    assert "0 written, 0 replaced, 2 skipped" in capsys.readouterr().out
+    assert "0 written, 0 replaced, 2 skipped, 0 failed" in capsys.readouterr().out
+    damaged = tree / "cube_x0.75_T1400_s1"
+    (damaged / MMAP_FILE).unlink()
+    archive = (damaged / "modes.npz").read_bytes()
+    (damaged / "modes.npz").write_bytes(archive[: len(archive) // 2])
+    (damaged / f".{MMAP_FILE}.another-node.1.0a1b2c3d.partial").write_bytes(b"x")
+    assert main(argv) == 1
+    out = capsys.readouterr().out
+    assert "failed cube_x0.75_T1400_s1: " in out
+    assert "partial cube_x0.75_T1400_s1/.rho_k.npy.another-node.1.0a1b2c3d.partial" in out
+    assert "0 written, 0 replaced, 1 skipped, 1 failed" in out and "1 partial file(s) left" in out
     assert main(["modes-sidecar", "--system", "feb", "--tree", "modes/modes_0GPa_v2",
                  "--pattern", "nothing_*"]) == 2
     assert "no run matching" in capsys.readouterr().err
@@ -476,15 +592,97 @@ def test_aipf_modes_sidecar_converts_a_source_tree(tmp_path, monkeypatch, capsys
     assert "is absolute" in capsys.readouterr().err
 
 
+def test_the_converter_reports_a_damaged_archive_and_converts_the_others(tmp_path):
+    tree = _three_channel_tree(tmp_path / "three", sidecar=False)
+    archive = tree / "run_b" / "modes.npz"
+    archive.write_bytes(archive.read_bytes()[: archive.stat().st_size // 2])
+    with np.load(tree / "run_c" / "modes.npz") as payload:
+        kept = {k: payload[k] for k in payload.files if k != "rho_k"}
+    np.savez(tree / "run_c" / "modes.npz", **kept)
+    done = {d.directory.name: d for d in convert_runs(tree, "run_*", keys=MAPPED)}
+    assert {t: d.status for t, d in done.items()} == {
+        "run_a": WRITTEN, "run_b": FAILED, "run_c": FAILED, "run_d": WRITTEN}
+    assert done["run_b"].reason.startswith("BadZipFile") and done["run_c"].reason.startswith("KeyError")
+    assert not (tree / "run_b" / MMAP_FILE).exists() and not (tree / "run_c" / MMAP_FILE).exists()
+
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def test_leftover_partials_are_listed_and_only_a_dead_local_writers_removed(tmp_path):
+    import socket
+
+    tree = _three_channel_tree(tmp_path / "three")
+    run = tree / "run_a"
+    host = socket.gethostname()
+    dead = run / f".{MMAP_FILE}.{host}.{_dead_pid()}.0a1b2c3d.partial"
+    alive = run / f".{MMAP_RECORD}.{host}.{os.getppid()}.0a1b2c3d.partial"
+    elsewhere = run / f".{MMAP_FILE}.another-node.example.{_dead_pid()}.0a1b2c3d.partial"
+    unnamed = run / f".{MMAP_FILE}.junk.partial"
+    for path in (dead, alive, elsewhere, unnamed):
+        path.write_bytes(b"x")
+    left, removed = leftover_partials(run, MAPPED)
+    assert set(left) == {dead, alive, elsewhere, unnamed} and removed == ()
+    done = list(convert_runs(tree, "run_*", keys=MAPPED, remove_partials=True))
+    assert done[0].removed == (dead,) and set(done[0].partials) == {alive, elsewhere, unnamed}
+    assert not dead.exists() and alive.exists() and elsewhere.exists()
+
+
 # ---------------------------------------------------------------------------
 # 5. the writer's default is unchanged
 # ---------------------------------------------------------------------------
 
+#: The time every zip member is stamped with in the writer tests: ``savez`` stamps each member with the
+#: local time it is written.
+_FIXED_TIME = time.struct_time((2000, 1, 1, 0, 0, 0, 5, 1, 0))
+
+#: The ``modes.npz`` of :func:`_pinned_record`, as the writer before the sidecar existed wrote it at
+#: :data:`_FIXED_TIME`: the sha256 of each member's name, compression and bytes in order, and of the
+#: whole file under the zlib it was measured with (deflate output can change with the zlib build).
+_PINNED_MEMBERS = "1ef018d7bdd5b063912d7c48980cfbd3c5aa2895c3829b2b337e153cfb0b5c84"
+_PINNED_FILE = ("1.3.1", "f5b706f7e185c5971283690c4006bf375c4319668509455a4fac91c41e8c0b56")
+
+
+def _pinned_record() -> ModesRecord:
+    rng = np.random.default_rng(6)
+    labels = _labels()
+    shape = (30, labels.shape[0], 3)
+    amplitudes = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    boxes = np.full((30, 3), 9.0) + 0.01 * rng.standard_normal((30, 3))
+    return ModesRecord(amplitudes=amplitudes, labels=labels, boxes=boxes, T=1500.0, dt_frame=0.02,
+                       provenance={"composition": {"x_a": 0.2, "x_b": 0.3, "x_c": 0.5}},
+                       reference_box=np.array([9.0, 9.0, 9.5]))
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_the_archive_save_writes_is_pinned(tmp_path, monkeypatch, flag):
+    import hashlib
+    import zipfile
+    import zlib
+
+    monkeypatch.setattr(time, "localtime", lambda *a: _FIXED_TIME)
+    path = _pinned_record().save(tmp_path / "run", mmap_sidecar=flag)
+    members = hashlib.sha256()
+    with zipfile.ZipFile(path) as opened:
+        for info in opened.infolist():
+            members.update(info.filename.encode())
+            members.update(bytes([info.compress_type]))
+            members.update(opened.read(info))
+    assert members.hexdigest() == _PINNED_MEMBERS
+    if zlib.ZLIB_RUNTIME_VERSION == _PINNED_FILE[0]:
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == _PINNED_FILE[1]
+
+
 def test_save_writes_the_same_archive_with_and_without_the_sidecar(tmp_path, monkeypatch):
     """Byte for byte, with the zip members' timestamps held fixed (``savez`` stamps each member with
     the time it is written)."""
-    fixed = time.localtime(0)
-    monkeypatch.setattr(time, "localtime", lambda *a: fixed)
+    monkeypatch.setattr(time, "localtime", lambda *a: _FIXED_TIME)
     record = _record(n_frames=30, seed=6, reference=np.array([9.0, 9.0, 9.5]))
     plain = record.save(tmp_path / "plain")
     flagged = record.save(tmp_path / "flagged", mmap_sidecar=True)
@@ -493,7 +691,7 @@ def test_save_writes_the_same_archive_with_and_without_the_sidecar(tmp_path, mon
         (tmp_path / "flagged" / "provenance.json").read_bytes()
     assert sorted(p.name for p in (tmp_path / "plain").iterdir()) == ["modes.npz", "provenance.json"]
     assert sorted(p.name for p in (tmp_path / "flagged").iterdir()) == \
-        ["modes.npz", "provenance.json", MMAP_FILE]
+        ["modes.npz", "provenance.json", MMAP_RECORD, MMAP_FILE]
     with np.load(flagged) as payload:
         assert _same_bits(np.load(tmp_path / "flagged" / MMAP_FILE),
                           np.moveaxis(payload["rho_k"], 2, 1))
@@ -504,4 +702,5 @@ def test_saving_over_an_archive_removes_the_sidecar_of_the_one_it_replaces(tmp_p
     first.save(tmp_path / "run", mmap_sidecar=True)
     _record(n_frames=30, seed=8).save(tmp_path / "run")
     assert not (tmp_path / "run" / MMAP_FILE).exists()
+    assert not (tmp_path / "run" / MMAP_RECORD).exists()
     assert len(read_mode_runs(tmp_path, "run", keys=MAPPED)) == 1

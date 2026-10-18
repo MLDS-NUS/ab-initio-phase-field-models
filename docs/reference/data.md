@@ -277,23 +277,32 @@ What training and the rollouts read, under a tree:
 | | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label; a tuple `table_keys["x"]` (three or more channels) is one key per channel, read as the run's label with no fallback; `aipf modes` writes it only from a composition that gives every species a fraction (a `meta.json` written so, not the index's own normalisation, which records the `x_channel` species alone), and an adapter may write the keys itself. A record that gives several species a fraction under one string key is refused |
 | `<tag>/DATA_QUALITY_WARNING.json` | `valid_frames` (training), the declared `quality_key` (rollouts) | int | optional: the frames after this are not read |
 | `<tag>/rho_k.npy` | | `(n_frames, n_channels, n_modes)`, `rho_k`'s dtype, C order | optional: `rho_k` with its channel axis moved, uncompressed, which training maps in place of reading `rho_k` when the system declares `mmap_sidecar` ([training.md](training.md#memory-mapped-amplitudes)) |
+| `<tag>/rho_k.json` | `member`, `crc32`, `file_size`, `shape`, `dtype` | JSON | with `rho_k.npy` only: the zip member of `modes.npz` it was copied from, that member's CRC-32 and uncompressed size, and the sidecar's shape and dtype |
 
 Other keys in an archive are ignored.
 
 ### The memory-mapped sidecar
 
 `rho_k.npy` is derived from `modes.npz`, which keeps `rho_k` and every other key, so the archive is
-complete without it. It is written by
+complete without it. Beside it, `rho_k.json` records the archive array it was copied from: the zip
+member (`rho_k.npy` inside `modes.npz`), its CRC-32 and its uncompressed size, read off the zip
+directory without decompressing anything (`aipf.pipeline.modes.archive_fingerprint`), and the
+sidecar's shape and dtype. A reader refuses a sidecar without its record, or whose record no longer
+matches `modes.npz` ([training.md](training.md#memory-mapped-amplitudes)). Both are written by
 
     ModesRecord.save(directory, *, mmap_sidecar=False) -> Path
-    aipf.pipeline.modes.write_mmap_sidecar(path, stored, *, channel_axis=2) -> Path
+    aipf.pipeline.modes.write_mmap_sidecar(path, stored, *, fingerprint, channel_axis=2) -> Path
 
-`save` writes `modes.npz` and `provenance.json` exactly as without the flag, and with it also
-`rho_k.npy`; a `rho_k.npy` already in the directory is removed before `modes.npz` is replaced, so a
-rewritten archive (`modes_from_dump` with other inputs) never sits beside a stale copy.
-`write_mmap_sidecar` writes in chunks of frames to `.<name>.<pid>.<token>.partial` beside `path`,
-reads the file back and compares it with `stored` bit for bit, syncs it, and renames it over `path`.
-A reader never sees a partial or unchecked file; a failure leaves nothing behind except, after a
-killed process, its `.partial` file, which is safe to delete. `aipf modes-sidecar`
-([cli.md](cli.md#aipf-modes-sidecar)) writes it for archives already on disk. The file is about the
-size of the uncompressed amplitudes, in addition to `modes.npz`.
+`save` writes `modes.npz` and `provenance.json` exactly as without the flag, and with it also the
+sidecar and its record; a sidecar or record already in the directory is removed before `modes.npz` is
+replaced, so a rewritten archive (`modes_from_dump` with other inputs) never sits beside a stale copy.
+`write_mmap_sidecar` writes the sidecar in chunks of frames, and the record, under temporary names
+`.<name>.<host>.<pid>.<token>.partial` beside them. It reads the sidecar back through the page cache
+and compares it with `stored` bit for bit, syncs both files, removes the old record, renames the
+sidecar into place and then the record. A reader never sees a partial or unchecked sidecar, and an
+interruption between the renames leaves a sidecar without a record, which the reader refuses and the
+converter rewrites, never a record vouching for another sidecar. A failure leaves nothing behind
+except, after a killed process, its `.partial` files; `aipf modes-sidecar` lists them and
+`--remove-partials` deletes those of dead processes on the machine it runs on
+([cli.md](cli.md#aipf-modes-sidecar)), which also writes the pair for archives already on disk. The
+sidecar is about the size of the uncompressed amplitudes, in addition to `modes.npz`.

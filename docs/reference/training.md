@@ -61,27 +61,43 @@ it. It lets the pipeline run without the raw archive; a model trained on it carr
 
 By default every run's amplitudes are read into memory when the sources are set up, so a run needs
 RAM for its whole dataset. A run directory may also hold `rho_k.npy`, an uncompressed copy of the
-amplitudes in the layout a run is held in, `(n_frames, n_channels, n_modes)` C order
-([data.md](data.md#the-archive-layout)). With `defaults["training"]["mmap_sidecar"] = True`
-(`aipf.train.dataset.ArchiveKeys.mmap_file = "rho_k.npy"`), `read_mode_runs` opens that file with
-`numpy.load(mmap_mode="r")` and never reads `rho_k` from `modes.npz`: `ModeRun.amplitudes` is a
-read-only `numpy.memmap`, the quality cut a view of it, and a window reads its frames from the file
-when it is cut. The operating system keeps the pages it has read in free RAM, so setup holds the
-labels, the boxes and the scalars, and the resident set of training is bounded by the node, not by
-the dataset.
+amplitudes in the layout a run is held in, `(n_frames, n_channels, n_modes)` C order, and its record
+`rho_k.json` ([data.md](data.md#the-memory-mapped-sidecar)). With
+`defaults["training"]["mmap_sidecar"] = True` (`aipf.train.dataset.ArchiveKeys.mmap_file =
+"rho_k.npy"`), `read_mode_runs` opens that file with `numpy.load(mmap_mode="r")` and never reads
+`rho_k` from `modes.npz`: `ModeRun.amplitudes` is a read-only `numpy.memmap`, the quality cut a view
+of it, and a window reads its frames from the file when it is cut. Setup holds the labels, the boxes
+and the scalars; the frames are paged in as windows read them and stay in the page cache while there
+is free RAM, and the kernel drops them again under memory pressure.
 
-- A run without the file reads into memory, as before, so a tree may mix the two. `read_mode_runs`
-  logs how many runs of a source it mapped.
+- A run without the file reads into memory, as before, so a source may mix the two. When the sidecar
+  is declared and some runs have none, `read_mode_runs` logs a warning with their count and the first
+  few tags (each of them costs its whole timeline in RAM).
 - Before a run is mapped its `rho_k.npy` is checked against `modes.npz`, without decompressing
   `rho_k`: its shape is `rho_k`'s, read off the stored array's header, with the channel axis moved
   (frames, channels and modes, and again the modes against `nvec` and the frames against a per-frame
-  `box`), its dtype is `rho_k`'s and it is in C order. Anything else, or a file that is not a
-  readable `.npy`, raises `ValueError` naming the run. A file with the right shape and other frames
-  is not detected here; `aipf modes-sidecar --verify` compares the frames.
+  `box`), its dtype is `rho_k`'s, it is in C order, and its record `rho_k.json` holds the CRC-32 and
+  size of the `rho_k` member of `modes.npz` as it is now (read off the zip directory). Anything
+  else, a file that is not a readable `.npy` (an empty one included), or a sidecar without its record,
+  raises `ValueError` naming the run. A rewritten `rho_k` of the same shape is therefore refused; a
+  sidecar overwritten by hand with other frames of the right shape is not, and
+  `aipf modes-sidecar --verify` compares the frames.
 - Every window, state, target, box, label and weight is bit-identical to the in-memory reader's,
-  with any number of loader workers. Workers started by `fork` (Linux's default) share the mapping;
-  under `spawn` a mapped run pickles as its file, offset and shape and is mapped again in the worker,
-  so its frames are never copied.
+  with any number of loader workers. Workers started by `fork` (Linux's default) share the mapping.
+  Under `spawn` a mapped run pickles as its file, offset and shape and each worker opens the file
+  again by its path, so its frames are never copied; a sidecar rewritten while such a run trains
+  would be read by the workers started after it, so do not rewrite archives under a running job.
+- Each mapped run keeps one open file descriptor (CPython's `mmap` holds a duplicate), so 1,625 runs
+  hold 1,625 descriptors in the trainer and in every forked worker. Before it maps a source,
+  `read_mode_runs` raises the soft `RLIMIT_NOFILE` to one per run mapped and still held, plus one per
+  run it is about to map, plus 256 for everything else, when it is lower, and refuses with `OSError`
+  when the hard limit is lower than that.
+- Mapped pages that have been read count in the process's resident set (`VmRSS`, as file-backed
+  `RssFile`) although they are cache the kernel can reclaim: a pass over every frame of a 300 MB
+  sidecar adds about 300 MB to it. Shared pages are counted in every process that touched them, so
+  with forked loader workers a scheduler that sums the resident sets of a job's processes (PBS can)
+  may report several times the page cache actually used. Check one pilot job's reported memory
+  before sizing a campaign by it.
 - The `inverse_band_power` run weighting reads its probe windows at setup, which pages those frames
   in. A run read through `--projection` is held in memory: `project_kz0` copies the `n_z = 0` modes
   of the mapped run.

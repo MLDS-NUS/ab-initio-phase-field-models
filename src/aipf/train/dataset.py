@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import re
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Mapping, NamedTuple, Optional, Sequence, Tuple
@@ -216,6 +217,65 @@ def _stored_layout(payload, key: str, path: Path) -> Tuple[Tuple[int, ...], np.d
     return tuple(shape), dtype
 
 
+def _record_problems(path: Path, payload, keys: ArchiveKeys) -> list:
+    """Why the sidecar ``path``'s record does not vouch for the archive array as it is now; empty when it
+    does."""
+    from aipf.pipeline.modes import archive_fingerprint, mmap_record_path
+
+    record = mmap_record_path(path)
+    try:
+        recorded = json.loads(record.read_text())
+    except FileNotFoundError:
+        return [f"there is no {record.name}, the record of the archive array it was copied from "
+                f"(a writer that was interrupted, or not this package's)"]
+    except (OSError, ValueError) as unreadable:
+        return [f"{record.name} is not a readable record ({unreadable})"]
+    current = archive_fingerprint(payload.zip, keys.amplitudes)
+    if not isinstance(recorded, dict) or \
+            {name: recorded.get(name) for name in current} != current:
+        shown = ({name: recorded.get(name) for name in current}
+                 if isinstance(recorded, dict) else recorded)
+        return [f"{record.name} records it was copied from {shown}, and the archive's "
+                f"{keys.amplitudes} is now {current}"]
+    return []
+
+
+#: Open files kept free beyond one per mapped run, for the loader workers' pipes and everything else.
+_SPARE_OPEN_FILES = 256
+
+#: The sidecars :func:`mapped_amplitudes` has mapped that are still held (a view keeps its mapping
+#: alive), each with one open file descriptor.
+_MAPPINGS: "weakref.WeakValueDictionary[int, np.memmap]" = weakref.WeakValueDictionary()
+
+
+def _open_files() -> int:
+    """The open file descriptors this module's mappings hold."""
+    return len(_MAPPINGS)
+
+
+def _reserve_open_files(n_mapped: int, where: str) -> None:
+    """Make room for ``n_mapped`` more open files: a memory-mapped run keeps one open file descriptor for
+    as long as it is held. The room needed is those already held, ``n_mapped`` and
+    :data:`_SPARE_OPEN_FILES`; the soft ``RLIMIT_NOFILE`` is raised toward the hard one when it is lower,
+    and a hard limit that is lower is refused before anything is mapped."""
+    try:
+        import resource
+    except ImportError:          # no rlimits on this platform: nothing to check
+        return
+    need = _open_files() + int(n_mapped) + _SPARE_OPEN_FILES
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY or need <= soft:
+        return
+    if hard != resource.RLIM_INFINITY and need > hard:
+        raise OSError(
+            f"{where}: mapping {n_mapped} run(s) keeps one open file each, {need} with the runs mapped "
+            f"already and {_SPARE_OPEN_FILES} spare, and the hard limit on open files is {hard}: "
+            f"raise it (ulimit -Hn), map fewer runs, or delete their sidecars to read them into memory")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (need, hard))
+    logging.info("%s: raised the soft limit on open files from %d to %d for %d mapped run(s)",
+                 where, soft, need, n_mapped)
+
+
 def mapped_amplitudes(directory, keys: ArchiveKeys, payload) -> Optional[np.memmap]:
     """A run's amplitudes ``(n_frames, n_channels, n_modes)`` mapped read-only from its sidecar
     ``<directory>/<keys.mmap_file>``, or ``None`` when ``keys`` declares none or the run has none.
@@ -223,8 +283,10 @@ def mapped_amplitudes(directory, keys: ArchiveKeys, payload) -> Optional[np.memm
     ``payload`` is the run's open archive. The sidecar is refused, naming the run, unless its shape is
     the archive's amplitudes' in the channel-first layout (frames, channels and modes, read off the
     stored header, and the modes and frames again off the labels and a per-frame box), its dtype is
-    theirs and it is in C order: a stale sidecar raises instead of training. The archive's amplitudes
-    are never decompressed."""
+    theirs, it is in C order, and its record (:func:`aipf.pipeline.modes.mmap_record_path`) names the
+    archive array as it is now (the zip member's CRC-32 and size,
+    :func:`aipf.pipeline.modes.archive_fingerprint`): a stale sidecar raises instead of training. The
+    archive's amplitudes are never decompressed."""
     if keys.mmap_file is None:
         return None
     directory = Path(directory)
@@ -242,7 +304,7 @@ def mapped_amplitudes(directory, keys: ArchiveKeys, payload) -> Optional[np.memm
         mapped = np.load(path, mmap_mode="r")
         if not isinstance(mapped, np.memmap):
             raise ValueError("it holds no single array")
-    except (OSError, ValueError) as unreadable:
+    except (OSError, ValueError, EOFError) as unreadable:
         raise ValueError(
             f"run {directory.name!r}: {path} is not a readable .npy ({unreadable}): rewrite it "
             f"(aipf modes-sidecar) or delete it to read the archive itself") from unreadable
@@ -261,12 +323,14 @@ def mapped_amplitudes(directory, keys: ArchiveKeys, payload) -> Optional[np.memm
         problems.append(f"{expected[2]} modes, {keys.labels} {labels}")
     if len(boxes) == 2 and boxes[0] != expected[0]:
         problems.append(f"{expected[0]} frames, {keys.box} {boxes}")
+    problems += _record_problems(path, payload, keys)
     if problems:
         raise ValueError(
             f"run {directory.name!r}: {path} does not match {archive}: "
             + "; ".join(problems)
             + ". It is stale or another archive's: rewrite it (aipf modes-sidecar) or delete it "
               "to read the archive itself")
+    _MAPPINGS[id(mapped)] = mapped
     return mapped
 
 
@@ -297,6 +361,10 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
     memory, so a tree may mix the two."""
     excluded = set(exclude_tags)
     runs: list[ModeRun] = []
+    if keys.mmap_file is not None:
+        _reserve_open_files(sum((d / keys.mmap_file).is_file() and (d / keys.file_name).is_file()
+                                for d in Path(root).glob(pattern) if d.name not in excluded),
+                            f"{root}/{pattern}")
     for directory in sorted(Path(root).glob(pattern)):
         path = directory / keys.file_name
         if directory.name in excluded or not path.is_file():
@@ -347,9 +415,15 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
             f"no run matching {pattern!r} under {root} holds a "
             f"{keys.file_name!r}")
     if keys.mmap_file is not None:
-        mapped = sum(isinstance(run.amplitudes, np.memmap) for run in runs)
-        logging.info("%s/%s: %d of %d run(s) memory-mapped from %s, the rest read into memory",
-                     root, pattern, mapped, len(runs), keys.mmap_file)
+        eager = [run.tag for run in runs if not isinstance(run.amplitudes, np.memmap)]
+        if eager:
+            logging.warning(
+                "%s/%s: %d of %d run(s) have no %s and were read into memory: %s%s",
+                root, pattern, len(eager), len(runs), keys.mmap_file, ", ".join(eager[:5]),
+                f" and {len(eager) - 5} more" if len(eager) > 5 else "")
+        else:
+            logging.info("%s/%s: all %d run(s) memory-mapped from %s", root, pattern, len(runs),
+                         keys.mmap_file)
     return runs
 
 
