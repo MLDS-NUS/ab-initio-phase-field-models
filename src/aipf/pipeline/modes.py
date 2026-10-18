@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -130,14 +130,24 @@ def recorded_reference(directory: Path):
 
 
 def composition_label(composition: Mapping[str, Any], *,
-                      x_key: str) -> dict[str, float]:
+                      x_key: Union[str, Sequence[str]]) -> dict[str, float]:
     """A state point's composition as label scalars: ``{x_key: x}``, or ``SIDE_KEYS`` when two-sided.
 
-    Empty when the record carries no value.
+    ``x_key`` a tuple, one name per channel (three or more): ``{x_key[i]: x of species[i]}``, every
+    species of the record's ``"species"`` given a value. Empty when the record carries no value; a record
+    that gives several species one label is refused rather than labelled by its first.
     """
     values = (composition or {}).get("x") or {}
     if not values:
         return {}
+    if not isinstance(x_key, str):
+        return _per_channel_label(composition, values, tuple(x_key))
+    if len(values) > 1:
+        raise ValueError(
+            f"composition {composition!r} gives {len(values)} species a "
+            f"fraction and the label x_key={x_key!r} is one scalar; keeping "
+            f"the first would label the run by whichever came first. Declare "
+            f"one label key per channel, table_keys['x'] = (...)")
     value = next(iter(values.values()))
     if value is None:
         return {}
@@ -151,6 +161,21 @@ def composition_label(composition: Mapping[str, Any], *,
             f"keys {SIDE_KEYS}. A label this cannot spell would be written as "
             f"nothing and the run would train as one nobody labelled")
     return dict(zip(SIDE_KEYS, sides))
+
+
+def _per_channel_label(composition, values, x_key) -> dict[str, float]:
+    species = list((composition or {}).get("species") or [])
+    if len(species) != len(x_key) or set(values) != set(species):
+        raise ValueError(
+            f"composition {composition!r} does not give each of the "
+            f"{len(x_key)} channels named by x_key={x_key!r} one fraction: "
+            f"a per-channel label needs 'species' in channel order and a "
+            f"value for every one of them")
+    if any(values[s] is None or np.ndim(values[s]) != 0 for s in species):
+        raise ValueError(
+            f"composition {composition!r} has a missing or two-sided value; a "
+            f"per-channel label is one fraction per channel")
+    return {key: float(values[s]) for key, s in zip(x_key, species)}
 
 
 def frames_prepared(record: Mapping[str, Any], dump) -> int:

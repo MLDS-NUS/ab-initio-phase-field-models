@@ -202,6 +202,9 @@ def _archive_keys(system: System) -> ArchiveKeys:
     :mod:`aipf.pipeline.modes`, the writer."""
     from aipf.pipeline.modes import ARCHIVE_KEYS, REFERENCE_BOX_KEY, SIDE_KEYS
 
+    x_key = system.table_keys["x"]
+    # one label key per channel (three or more): the run's full composition, no two-sided fallback
+    per_channel = isinstance(x_key, tuple)
     return ArchiveKeys(
         file_name=_MODES_FILE,
         amplitudes=ARCHIVE_KEYS["amplitudes"],
@@ -210,8 +213,8 @@ def _archive_keys(system: System) -> ArchiveKeys:
         box=ARCHIVE_KEYS["box"],
         temperature=ARCHIVE_KEYS["temperature"],
         frame_interval=ARCHIVE_KEYS["frame_interval"],
-        composition=SIDE_KEYS,
-        composition_fallback=system.table_keys["x"],
+        composition=x_key if per_channel else SIDE_KEYS,
+        composition_fallback=None if per_channel else x_key,
         quality_file=_QUALITY_FILE,
         quality_key=_QUALITY_KEY,
         reference_box=REFERENCE_BOX_KEY)

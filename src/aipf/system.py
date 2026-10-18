@@ -390,7 +390,8 @@ class System:
     """One physical system, and everything specific to it.
     ``name`` (e.g. ``"demo"``), ``n_species``, ``species`` in channel order, ``masses`` (exactly the species),
     ``atom_types`` (covers the species, may carry extra dump types), ``table_keys`` (``"rho"`` per channel,
-    ``"x_channel"`` index, ``"x"`` column), ``paths``, ``anchor_rules``, ``constants``, ``defaults``.
+    ``"x_channel"`` index, ``"x"`` column, or one per channel beyond two), ``paths``, ``anchor_rules``,
+    ``constants``, ``defaults``.
     ``farm_partition``: metadata fields splitting the farm (``()`` = unsplit). ``traj_names``: recognised
     trajectory filenames by priority. ``tag_from_path``/``tag_path_root``: rebuild a run tag from the path.
     ``checkpoint``, ``functional``, ``mobility``, ``noise``, ``trust_domain``: ``None`` means
@@ -478,12 +479,21 @@ class System:
             )
 
     def _check_table_keys(self) -> None:
-        """``x`` is a column name, ``rho`` has one name per channel, ``x_channel`` is a valid int index."""
+        """``x`` is a column name (or, beyond two channels, a tuple of one per channel), ``rho`` has one name
+        per channel, ``x_channel`` is a valid int index."""
         x_key = self.table_keys.get("x")
-        if x_key is not None and not isinstance(x_key, str):
+        if isinstance(x_key, tuple) and self.n_species >= 3:
+            if len(x_key) != self.n_species or not all(
+                    isinstance(k, str) for k in x_key):
+                raise ValueError(
+                    f"table_keys['x']={x_key!r} is not one column name per "
+                    f"channel of species={self.species!r}"
+                )
+        elif x_key is not None and not isinstance(x_key, str):
             raise ValueError(
                 f"table_keys['x']={x_key!r} is not a column name. It is looked "
-                f"up in a row of a table, so it has to be a string"
+                f"up in a row of a table, so it has to be a string (a tuple of "
+                f"one per channel is the label of three or more channels)"
             )
         rho_keys = self.table_keys.get("rho")
         if rho_keys is not None and len(rho_keys) != self.n_species:

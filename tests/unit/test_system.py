@@ -230,6 +230,19 @@ def test_rho_column_names_are_one_per_channel():
         _system(table_keys={"rho": ("rho_A",)})
 
 
+def test_three_channels_may_label_each_channel_and_two_may_not():
+    """``table_keys['x']`` as a tuple is one label key per channel, three channels or more only: two
+    channels keep one name, and a short tuple would label a channel with nothing."""
+    three = dict(n_species=3, species=("A", "B", "C"), masses={"A": 1.0, "B": 2.0, "C": 3.0},
+                 atom_types={"A": 1, "B": 2, "C": 3})
+    s = _system(table_keys={"x": ("x_A", "x_B", "x_C")}, **three)
+    assert s.table_keys["x"] == ("x_A", "x_B", "x_C")
+    with pytest.raises(ValueError, match="one column name per channel"):
+        _system(table_keys={"x": ("x_A", "x_B")}, **three)
+    with pytest.raises(ValueError, match="has to be a string"):
+        _system(table_keys={"x": ("x_A", "x_B")})
+
+
 def test_x_channel_must_index_into_the_species():
     """Mutation: dropping the ``x_channel`` range check.
 

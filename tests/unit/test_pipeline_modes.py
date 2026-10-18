@@ -345,6 +345,47 @@ def test_a_run_nobody_recorded_a_composition_for_is_labelled_with_nothing():
                              x_key="x_minor") == {}
 
 
+def test_several_species_under_one_label_key_are_refused_not_labelled_by_the_first():
+    three = {"species": ["A", "B", "C"], "kind": "uniform",
+             "x": {"A": 0.2, "B": 0.3, "C": 0.5}}
+    with pytest.raises(ValueError, match="keeping\\s+the first"):
+        composition_label(three, x_key="x_minor")
+
+
+def test_one_label_key_per_channel_labels_every_channel():
+    three = {"species": ["A", "B", "C"], "kind": "uniform",
+             "x": {"C": 0.5, "A": 0.2, "B": 0.3}}
+    assert composition_label(three, x_key=("x_a", "x_b", "x_c")) == {
+        "x_a": 0.2, "x_b": 0.3, "x_c": 0.5}
+    one = {"species": ["A", "B", "C"], "kind": "uniform", "x": {"A": 0.2}}
+    with pytest.raises(ValueError, match="one fraction"):
+        composition_label(one, x_key=("x_a", "x_b", "x_c"))
+    sided = {"species": ["A", "B", "C"], "kind": "two_slab",
+             "x": {"A": [0.1, 0.2], "B": 0.3, "C": 0.5}}
+    with pytest.raises(ValueError, match="two-sided"):
+        composition_label(sided, x_key=("x_a", "x_b", "x_c"))
+
+
+def test_training_reads_a_per_channel_label_as_the_runs_full_composition():
+    """So ``val_split = "labels"`` can hold out a ternary composition; no fallback, no sides."""
+    from aipf.paths import Paths
+    from aipf.system import AnchorRules, System
+    from aipf.train.dataset import _composition
+    from aipf.train.fit import _archive_keys
+
+    system = System(name="demo", n_species=3, species=("A", "B", "C"),
+                    masses={"A": 1.0, "B": 2.0, "C": 3.0},
+                    atom_types={"A": 1, "B": 2, "C": 3},
+                    table_keys={"x": ("x_a", "x_b", "x_c")}, paths=Paths(system="demo"),
+                    anchor_rules=AnchorRules({}), constants={}, defaults={})
+    keys = _archive_keys(system)
+    assert keys.composition == ("x_a", "x_b", "x_c") and keys.composition_fallback is None
+    payload = {"x_a": np.float64(0.2), "x_b": np.float64(0.3), "x_c": np.float64(0.5)}
+    assert _composition(payload, keys, "tag") == (0.2, 0.3, 0.5)
+    with pytest.raises(KeyError, match="none of the declared composition keys"):
+        _composition({"x_a": np.float64(0.2)}, keys, "tag")
+
+
 def test_a_composition_the_archive_cannot_spell_is_refused():
     three = {"kind": "other", "x": {"B": [0.1, 0.2, 0.3]}}
     with pytest.raises(ValueError, match="sides"):

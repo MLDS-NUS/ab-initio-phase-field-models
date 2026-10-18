@@ -25,7 +25,7 @@ command that needs a value the system does not declare refuses, naming the key.
 | `species` | `tuple[str, ...]` | channel order; `n_species` distinct names |
 | `masses` | `dict[str, float]` | exactly the species, in the engine's mass unit |
 | `atom_types` | `dict[str, int]` | dump type per species; must cover the species, may carry more types |
-| `table_keys` | `dict` | `"rho"`: one column name per channel; `"x"`: the composition column (a string); `"x_channel"`: the channel whose fraction `x` is (an index into `species`) |
+| `table_keys` | `dict` | `"rho"`: one column name per channel; `"x"`: the composition column (a string), or with three or more channels a tuple of one per channel, which then labels each run with its full composition; `"x_channel"`: the channel whose fraction `x` is (an index into `species`) |
 | `paths` | `aipf.paths.Paths` | `Paths(system=name, raw_default=None)`; the raw root comes from the environment or `aipf.toml` ([cli.md](cli.md#locations-aipfpaths)) |
 | `anchor_rules` | `AnchorRules` | per-pressure temperature cuts of the anchor tables |
 | `constants` | `dict` | unit conventions and fixed numbers, below |
