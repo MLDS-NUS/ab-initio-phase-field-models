@@ -11,6 +11,7 @@ import hashlib
 import itertools
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Union
@@ -39,6 +40,16 @@ REFERENCE_BOX = "time_mean"
 #: The ``modes.npz`` key of the reference cell ``(3,)`` float64, written only under another rule
 #: (``"first_frame"`` or a stated cell). A reader that finds it reads ``k`` and ``V`` in this cell.
 REFERENCE_BOX_KEY = "reference_box"
+
+#: The optional memory-mapped copy of the amplitudes beside ``modes.npz``: an uncompressed ``.npy`` of
+#: the archive's dtype, ``(n_frames, n_channels, n_modes)`` in C order, the layout a training run holds,
+#: so a window's frames are one contiguous byte range (:func:`write_mmap_sidecar`; a reader opens it
+#: under :attr:`aipf.train.dataset.ArchiveKeys.mmap_file`).
+MMAP_FILE = "rho_k.npy"
+
+#: Bytes copied, and compared, per chunk when a sidecar is written: the writer never holds a second
+#: whole timeline.
+_SIDECAR_CHUNK_BYTES = 64 << 20
 
 #: Metadata step counts of the preparation and production stages. A run with neither is refused.
 STEP_COUNT_KEYS = ("n_equil", "n_prod")
@@ -73,8 +84,12 @@ class ModesRecord:
     provenance: Mapping[str, Any]
     reference_box: Optional[np.ndarray] = None
 
-    def save(self, directory: Path) -> Path:
-        """Write ``modes.npz`` with the composition label, and ``provenance.json``. Returns the archive."""
+    def save(self, directory: Path, *, mmap_sidecar: bool = False) -> Path:
+        """Write ``modes.npz`` with the composition label, and ``provenance.json``. Returns the archive.
+
+        ``mmap_sidecar`` also writes :data:`MMAP_FILE` (:func:`write_mmap_sidecar`); ``modes.npz`` is the
+        same either way. A sidecar already in ``directory`` belongs to the archive being replaced and is
+        removed before ``modes.npz`` is written, so a rewritten archive never sits beside a stale copy."""
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -98,9 +113,14 @@ class ModesRecord:
                 f"label comes from the system's declared composition "
                 f"column, which is where the name has to change")
         payload.update(label)
+        sidecar = directory / MMAP_FILE
+        if sidecar.is_file():
+            sidecar.unlink()
         np.savez_compressed(directory / "modes.npz", **payload)
         (directory / "provenance.json").write_text(
             json.dumps(dict(self.provenance), indent=1, sort_keys=True))
+        if mmap_sidecar:
+            write_mmap_sidecar(sidecar, self.amplitudes)
         return directory / "modes.npz"
 
     @classmethod
@@ -118,6 +138,83 @@ class ModesRecord:
         provenance = json.loads((directory / "provenance.json").read_text())
         return cls(amplitudes, labels, boxes, temperature, interval,
                    provenance, reference)
+
+
+def _same_bits(a: np.ndarray, b: np.ndarray) -> bool:
+    """Whether two arrays of one shape and dtype hold the same bytes (NaN and signed zero included)."""
+    return (a.shape == b.shape and a.dtype == b.dtype
+            and np.array_equal(np.ascontiguousarray(a).view(np.uint8),
+                               np.ascontiguousarray(b).view(np.uint8)))
+
+
+def _channel_first(stored, channel_axis: int) -> np.ndarray:
+    """``stored`` as ``(n_frames, n_channels, n_modes)``, a view."""
+    stored = np.asanyarray(stored)
+    return stored if channel_axis == 1 else np.moveaxis(stored, 2, 1)
+
+
+def _frame_chunks(layout: np.ndarray) -> list:
+    """Slices of the leading axis of about :data:`_SIDECAR_CHUNK_BYTES` each."""
+    frame_bytes = max(1, int(np.prod(layout.shape[1:])) * layout.dtype.itemsize)
+    step = max(1, _SIDECAR_CHUNK_BYTES // frame_bytes)
+    return [slice(start, start + step) for start in range(0, layout.shape[0], step)]
+
+
+def mmap_sidecar_matches(mapped, stored, *, channel_axis: int = 2) -> bool:
+    """Whether the sidecar array ``mapped`` holds exactly ``stored``'s amplitudes, bit for bit, in the
+    channel-first layout: same shape, same dtype, same bytes. ``channel_axis`` as
+    :func:`write_mmap_sidecar`; compared in chunks of frames."""
+    layout = _channel_first(stored, channel_axis)
+    if mapped.shape != layout.shape or mapped.dtype != layout.dtype:
+        return False
+    return all(_same_bits(mapped[chunk], layout[chunk]) for chunk in _frame_chunks(layout))
+
+
+def write_mmap_sidecar(path, stored, *, channel_axis: int = 2) -> Path:
+    """Write the amplitudes ``stored`` to ``path`` as the sidecar a memory-mapped reader opens
+    (:data:`MMAP_FILE`): ``(n_frames, n_channels, n_modes)``, C order, ``stored``'s dtype. Returns ``path``.
+
+    ``channel_axis`` is the channel axis of ``stored``: ``2`` for the archive's
+    ``(n_frames, n_modes, n_channels)``, ``1`` for an array already channel-first. The file is written
+    beside ``path`` under a temporary name (``.<name>.<pid>.<token>.partial``), read back and compared
+    with ``stored`` bit for bit, synced to disk, and only then renamed over ``path``. A reader therefore
+    never sees a partial or unchecked file, two writers of one run each rename a whole checked file, and
+    a failure (a mismatch, a full disk, an interrupt) leaves no file but a killed process's ``.partial``.
+    Copied in chunks of frames, so no second whole timeline is held."""
+    path = Path(path)
+    if channel_axis not in (1, 2):
+        raise ValueError(
+            f"channel_axis={channel_axis!r} is neither 1 (frames, channels, modes) nor 2 (frames, "
+            f"modes, channels)")
+    if np.ndim(stored) != 3:
+        raise ValueError(
+            f"{path}: the amplitudes have shape {tuple(np.shape(stored))}, which is not a timeline "
+            f"of (channels, modes)")
+    layout = _channel_first(stored, channel_axis)
+    chunks = _frame_chunks(layout)
+    header = {"descr": np.lib.format.dtype_to_descr(layout.dtype), "fortran_order": False,
+              "shape": tuple(int(n) for n in layout.shape)}
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.partial")
+    try:
+        with open(temp, "wb") as handle:
+            np.lib.format.write_array_header_1_0(handle, header)
+            for chunk in chunks:
+                np.ascontiguousarray(layout[chunk]).tofile(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        written = np.load(temp, mmap_mode="r")
+        try:
+            ok = mmap_sidecar_matches(written, stored, channel_axis=channel_axis)
+        finally:
+            del written
+        if not ok:
+            raise OSError(
+                f"{path}: the sidecar read back from {temp.name} differs from the amplitudes it "
+                f"was written from; nothing was written")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return path
 
 
 def recorded_reference(directory: Path):
