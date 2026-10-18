@@ -47,6 +47,7 @@ onto; the excluded tags are dropped. Several sources train together: one batch o
 | `source_root` | `{"tier": "raw" or "farm", "path": relative}` | `raw`: under the system's raw root; `farm`: under `<data>/<system>/` (where `aipf modes` writes) |
 | `sources` | `{name: {"root", "pattern", "grid", "exclude_tags"}}` | the declared set, `--source declared`; `exclude_tags` optional |
 | `sample` | `{name: {"root", "pattern", "grid"}}` | the bundled sample, `--source sample`; each root relative to `data/<system>/sample` |
+| `mmap_sidecar` | `True` or `False`, optional | `True`: map the amplitudes of every run that carries `rho_k.npy` instead of reading them into memory ([Memory-mapped amplitudes](#memory-mapped-amplitudes)). Absent or `False`: every run is read into memory, as before |
 
 `--source sample` trains `aipf.train.fit.sample_system(system)`: the system with its raw root
 replaced by `data/<system>/sample` (`aipf.paths.SamplePaths`), its source root that directory and
@@ -55,6 +56,38 @@ the anchor and equation-of-state tables are read from the sample at the paths th
 relative to the raw root (a table tracked under `experiments/<system>/anchors/` first, as always).
 The sample is tracked in the checkout like the published checkpoints, so `AIPF_DATA` does not move
 it. It lets the pipeline run without the raw archive; a model trained on it carries no physics.
+
+### Memory-mapped amplitudes
+
+By default every run's amplitudes are read into memory when the sources are set up, so a run needs
+RAM for its whole dataset. A run directory may also hold `rho_k.npy`, an uncompressed copy of the
+amplitudes in the layout a run is held in, `(n_frames, n_channels, n_modes)` C order
+([data.md](data.md#the-archive-layout)). With `defaults["training"]["mmap_sidecar"] = True`
+(`aipf.train.dataset.ArchiveKeys.mmap_file = "rho_k.npy"`), `read_mode_runs` opens that file with
+`numpy.load(mmap_mode="r")` and never reads `rho_k` from `modes.npz`: `ModeRun.amplitudes` is a
+read-only `numpy.memmap`, the quality cut a view of it, and a window reads its frames from the file
+when it is cut. The operating system keeps the pages it has read in free RAM, so setup holds the
+labels, the boxes and the scalars, and the resident set of training is bounded by the node, not by
+the dataset.
+
+- A run without the file reads into memory, as before, so a tree may mix the two. `read_mode_runs`
+  logs how many runs of a source it mapped.
+- Before a run is mapped its `rho_k.npy` is checked against `modes.npz`, without decompressing
+  `rho_k`: its shape is `rho_k`'s, read off the stored array's header, with the channel axis moved
+  (frames, channels and modes, and again the modes against `nvec` and the frames against a per-frame
+  `box`), its dtype is `rho_k`'s and it is in C order. Anything else, or a file that is not a
+  readable `.npy`, raises `ValueError` naming the run. A file with the right shape and other frames
+  is not detected here; `aipf modes-sidecar --verify` compares the frames.
+- Every window, state, target, box, label and weight is bit-identical to the in-memory reader's,
+  with any number of loader workers. Workers started by `fork` (Linux's default) share the mapping;
+  under `spawn` a mapped run pickles as its file, offset and shape and is mapped again in the worker,
+  so its frames are never copied.
+- The `inverse_band_power` run weighting reads its probe windows at setup, which pages those frames
+  in. A run read through `--projection` is held in memory: `project_kz0` copies the `n_z = 0` modes
+  of the mapped run.
+
+The sidecar is written by `ModesRecord.save(directory, mmap_sidecar=True)` for a new archive and by
+`aipf modes-sidecar` for archives already on disk ([cli.md](cli.md#aipf-modes-sidecar)).
 
 ## Windows
 

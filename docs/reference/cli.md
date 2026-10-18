@@ -13,6 +13,7 @@ command does not take as a flag comes from that system's declaration ([system.md
 | `aipf data build` | indexes a system's raw MD tree into the data farm | [data.md](data.md) |
 | `aipf data rebuild` | recreates the farm's `md` links from its manifest | [data.md](data.md#the-manifest) |
 | `aipf modes` | extracts one state point's Fourier modes | [data.md](data.md#modes) |
+| `aipf modes-sidecar` | writes the memory-mapped copy of a tree's mode archives | [training.md](training.md#memory-mapped-amplitudes) |
 | `aipf train` | trains the system's declared functional | [training.md](training.md) |
 | `aipf diagnose` | runs diagnostic stages over one checkpoint | [diagnose.md](diagnose.md) |
 | `aipf rollout` | integrates a trained functional from an archived run | [rollout.md](rollout.md) |
@@ -130,6 +131,29 @@ recreates the `md` links and `meta.json` files from `manifest.json` and prints
 `--tag` is a run tag or a farm directory (`<partition>/<tag>`) from the manifest; an unindexed tag
 is refused naming the farm. `--sigma` is recorded with the archive, not applied. Prints the
 directory holding `modes.npz`. See [data.md](data.md#modes).
+
+## aipf modes-sidecar
+
+    aipf modes-sidecar --system S --tree SUBDIR --pattern GLOB [--verify]
+
+Writes `rho_k.npy` beside every `modes.npz` of the run directories `GLOB` selects under `SUBDIR`, which
+is relative to the declared `source_root` as a `--source` SUBDIR of `aipf train` is (an absolute tree is
+refused, exit 2). Each sidecar is checked bit for bit against the archive before it is renamed into
+place ([data.md](data.md#the-memory-mapped-sidecar)); `modes.npz` is never changed. Prints one line per
+run, `written <run>`, `skipped <run>` or `replaced <run>: <why>`, then
+`N written, M replaced, K skipped under <tree>`. A glob that selects no archive is refused (exit 2).
+
+- An existing sidecar the training reader accepts (shape, dtype and order against the archive's
+  header) is skipped without reading the archive's amplitudes, so a repeated or interrupted run picks
+  up where it stopped. `--verify` also compares its frames with the archive's and rewrites one that
+  differs.
+- An existing sidecar the reader refuses is rewritten from the archive.
+- Each archive is read once, and only when its sidecar is written or verified; the writer holds the
+  archive's amplitudes and one chunk of frames. Jobs over disjoint globs (a batch array) can run in
+  parallel.
+
+Training maps the sidecars once the system declares `defaults["training"]["mmap_sidecar"] = True`
+([training.md](training.md#memory-mapped-amplitudes)).
 
 ## aipf train
 

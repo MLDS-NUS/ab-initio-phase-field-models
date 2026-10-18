@@ -276,5 +276,24 @@ What training and the rollouts read, under a tree:
 | | `dt_frame_ps` | float64 | the time between frames |
 | | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label; a tuple `table_keys["x"]` (three or more channels) is one key per channel, read as the run's label with no fallback; `aipf modes` writes it only from a composition that gives every species a fraction (a `meta.json` written so, not the index's own normalisation, which records the `x_channel` species alone), and an adapter may write the keys itself. A record that gives several species a fraction under one string key is refused |
 | `<tag>/DATA_QUALITY_WARNING.json` | `valid_frames` (training), the declared `quality_key` (rollouts) | int | optional: the frames after this are not read |
+| `<tag>/rho_k.npy` | | `(n_frames, n_channels, n_modes)`, `rho_k`'s dtype, C order | optional: `rho_k` with its channel axis moved, uncompressed, which training maps in place of reading `rho_k` when the system declares `mmap_sidecar` ([training.md](training.md#memory-mapped-amplitudes)) |
 
 Other keys in an archive are ignored.
+
+### The memory-mapped sidecar
+
+`rho_k.npy` is derived from `modes.npz`, which keeps `rho_k` and every other key, so the archive is
+complete without it. It is written by
+
+    ModesRecord.save(directory, *, mmap_sidecar=False) -> Path
+    aipf.pipeline.modes.write_mmap_sidecar(path, stored, *, channel_axis=2) -> Path
+
+`save` writes `modes.npz` and `provenance.json` exactly as without the flag, and with it also
+`rho_k.npy`; a `rho_k.npy` already in the directory is removed before `modes.npz` is replaced, so a
+rewritten archive (`modes_from_dump` with other inputs) never sits beside a stale copy.
+`write_mmap_sidecar` writes in chunks of frames to `.<name>.<pid>.<token>.partial` beside `path`,
+reads the file back and compares it with `stored` bit for bit, syncs it, and renames it over `path`.
+A reader never sees a partial or unchecked file; a failure leaves nothing behind except, after a
+killed process, its `.partial` file, which is safe to delete. `aipf modes-sidecar`
+([cli.md](cli.md#aipf-modes-sidecar)) writes it for archives already on disk. The file is about the
+size of the uncompressed amplitudes, in addition to `modes.npz`.
