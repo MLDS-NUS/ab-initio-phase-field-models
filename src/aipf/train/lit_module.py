@@ -137,24 +137,32 @@ class LitModule(L.LightningModule):
                      sample_weight=sample_weight)
 
     def mobility_loss(self, M_pred: torch.Tensor, M_target: torch.Tensor, *,
-                       row_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return l_m(M_pred, M_target, row_weight=row_weight)
+                       row_weight: Optional[torch.Tensor] = None,
+                       active: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return l_m(M_pred, M_target, row_weight=row_weight, active=active)
 
     def static_loss(self, H: torch.Tensor, target: torch.Tensor,
                      mask: torch.Tensor, *,
                      target_rootinv: Optional[torch.Tensor] = None,
-                     row_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+                     row_weight: Optional[torch.Tensor] = None,
+                     active: Optional[torch.Tensor] = None) -> torch.Tensor:
         return l_s(H, target, mask, metric=self.config.stat_metric,
-                   target_rootinv=target_rootinv, row_weight=row_weight)
+                   target_rootinv=target_rootinv, row_weight=row_weight,
+                   active=active)
 
     def bulk_loss(self, H0: torch.Tensor, kBT: torch.Tensor,
                    zvec: torch.Tensor, rho_tot: torch.Tensor,
                    target: torch.Tensor, *,
                    sigma: Optional[torch.Tensor] = None,
-                   row_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+                   row_weight: Optional[torch.Tensor] = None,
+                   target_rootinv: Optional[torch.Tensor] = None,
+                   active: Optional[torch.Tensor] = None,
+                   zmask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """``active``, ``zmask`` and ``target_rootinv`` come with a matrix batch (the concentration block)."""
         return l_bulk(H0, kBT, zvec, rho_tot, target,
                       residual=self.config.bulk_residual, sigma=sigma,
-                      row_weight=row_weight)
+                      row_weight=row_weight, target_rootinv=target_rootinv,
+                      active=active, zmask=zmask)
 
     def pressure_loss(self, P_model: torch.Tensor, *,
                        P_target: Optional[torch.Tensor] = None,
@@ -198,7 +206,8 @@ class LitModule(L.LightningModule):
         if "anchor_M" in batch and self.config.lambda_M:
             a = batch["anchor_M"]
             lM = self.mobility_loss(a["M_pred"], a["M_target"],
-                                     row_weight=a.get("row_weight"))
+                                     row_weight=a.get("row_weight"),
+                                     active=a.get("active"))
             parts["L_M"] = lM
             total = total + self.config.lambda_M * lM
 
@@ -207,7 +216,7 @@ class LitModule(L.LightningModule):
             lS = self.static_loss(
                 a["H"], a["target"], a["mask"],
                 target_rootinv=a.get("target_rootinv"),
-                row_weight=a.get("row_weight"))
+                row_weight=a.get("row_weight"), active=a.get("active"))
             parts["L_S"] = lS
             total = total + self.config.lambda_S * lS
 
@@ -215,7 +224,9 @@ class LitModule(L.LightningModule):
             a = batch["anchor_bulk"]
             lB = self.bulk_loss(
                 a["H0"], a["kBT"], a["zvec"], a["rho_tot"], a["target"],
-                sigma=a.get("sigma"), row_weight=a.get("row_weight"))
+                sigma=a.get("sigma"), row_weight=a.get("row_weight"),
+                target_rootinv=a.get("target_rootinv"),
+                active=a.get("active"), zmask=a.get("zmask"))
             parts["L_bulk"] = lB
             total = total + self.config.lambda_bulk * lB
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 _STAT_METRICS: Tuple[str, ...] = ("rel_frob", "s_metric")
-_BULK_RESIDUALS: Tuple[str, ...] = ("relative_inverse", "sigma_chi2")
+_BULK_RESIDUALS: Tuple[str, ...] = ("relative_inverse", "sigma_chi2", "s_metric")
 _CONV_PENALTIES: Tuple[str, ...] = ("hinge", "hinge0", "softplus")
 
 #: Named random streams of one run, each seeded by :func:`derive_seed`: ``model``, ``data``.
