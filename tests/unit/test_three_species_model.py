@@ -39,8 +39,8 @@ def _inv_softplus(y: float) -> float:
     return math.log(math.expm1(y))
 
 
-def ternary_system(**system_fields) -> System:
-    """The Fe-B functional form at three channels."""
+def ternary_system(functional_kwargs=None, **system_fields) -> System:
+    """The Fe-B functional form at three channels; ``functional_kwargs`` replace declared kwargs."""
     fields = dict(
         name="ternary_toy", n_species=3, species=SPECIES,
         masses={"Fe": 55.845, "Cu": 63.546, "Ni": 58.693},
@@ -63,7 +63,7 @@ def ternary_system(**system_fields) -> System:
                 tbasis_ortho_window=(_K_B * 1500.0, _K_B * 2600.0), tbasis_ortho_points=13,
                 kernel_n_quad=64, kernel_n_k_table=65, kernel_k_table_max=8.0,
                 nyquist_mask=True,
-            ),
+            ) | dict(functional_kwargs or {}),
         ),
         mobility=Mobility(
             form="mlp_scaled", T_form="arrhenius",
