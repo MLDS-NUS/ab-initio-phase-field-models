@@ -100,7 +100,7 @@ read from the top level of `defaults`, then from `defaults["training"]`, which w
 | `lambda_dyn` | `1.0` | `L_dyn` |
 | `lambda_M`, `lambda_S`, `lambda_bulk`, `lambda_P`, `lambda_conv`, `lambda_gamma`, `lambda_W` | `0.0` | the other terms; `0.0` is off |
 | `stat_metric` | `rel_frob` | or `s_metric` |
-| `bulk_residual` | `relative_inverse` | or `sigma_chi2` |
+| `bulk_residual` | `relative_inverse` | or `sigma_chi2` (two channels); `s_metric` (the concentration block, three or more) |
 | `conv_penalty`, `conv_margin`, `conv_samples`, `gamma_pt_samples` | `hinge`, `0.0`, `0`, `0` | `conv_penalty` one of `hinge`, `hinge0`, `softplus` |
 | `penalty_seed` | `None` | the penalty probes' stream; required when a penalty is trained |
 | `source_loss_weights` | `{}` | the drift weight per source name (1.0 when a name is absent) |
@@ -122,9 +122,9 @@ does not read them, except the kernel hinge's four shape keys in `extra_experime
 | term | what |
 |---|---|
 | `L_dyn` | the weak-form drift residual, `sum(band (alpha r^2 + (1 - alpha) r^2 / (k^2 + eps))) / n_band`, a batch mean over the band `0 < k <= k_max` |
-| `L_M` | the mobility anchor, `norm(M_pred - M_target)^2 / norm(M_target)^2` per row (Frobenius norms) |
-| `L_S` | the structure-factor shells `0 < k <= k_fit_stat`: the model's `H(k)` against `kB T S(k)^-1` |
-| `L_bulk` | `k = 0`: `S_cc(0) = kB T z^T H(0)^-1 z / rho_tot` against the measured value |
+| `L_M` | the mobility anchor, `norm(M_pred - M_target)^2 / norm(M_target)^2` per row (Frobenius norms; over the row's active block, beyond two channels) |
+| `L_S` | the structure-factor shells `0 < k <= k_fit_stat`: the model's `H(k)` against `kB T S(k)^-1` (on the row's active block `S_PP(k)`, beyond two channels) |
+| `L_bulk` | `k = 0`: `S_cc(0) = kB T z^T H(0)^-1 z / rho_tot` against the measured value; beyond two channels the `m x m` block `kB T Z^T H_PP(0)^-1 Z / rho_tot`, scored `norm(R S_cc R - I)^2` with `R = S_target^-1/2` (`s_metric`) |
 | `L_P` | the pressure `P = mu . rho - f` against the equation-of-state table, relative to `max(abs(P_target), pressure_floor)` |
 | `L_conv` | the hinge `lambda_min(H) >= conv_margin` at points drawn in the trust domain |
 | `L_Gamma` | the hinge `d^2 Gamma / dx^2 >= 0` along the measured equation-of-state paths |
@@ -149,15 +149,57 @@ for under `experiments/<system>/anchors/` first, then under the raw root. `key` 
 |---|---|
 | `m_table`, `s_table`, `eos_csvs` | `{pressure: relative path}` |
 | `pressure_unit` | one pressure unit in the model's energy-per-volume unit |
-| `columns` | `phase` (a name, or `{"mobility": ..., "structure": ...}`), `temperature`, `densities` (channel order), `composition`, `mobility`, `shells`, `structure`, `bulk_target`, `bulk_sigma`, `bulk_ok` |
-| `eos_columns` | `x_column`, `T_column`, `n_columns` (alternatives), `status_column`, `status_ok` |
-| `row_weight` | `None`, or `{"value", "error", "floor"}`: `1 / max(abs(error / value), floor)^2` |
+| `columns` | `phase` (a name, or `{"mobility": ..., "structure": ...}`), `temperature`, `densities` (channel order), `composition`, `mobility`, `shells`, `structure`, `bulk_target`, `bulk_sigma`, `bulk_ok`; the vector form adds `active` |
+| `eos_columns` | `x_column`, `T_column`, `n_columns` (alternatives), `status_column`, `status_ok`; the vector form has `x_columns` in place of `x_column` |
+| `row_weight` | `None`, or `{"value", "error", "floor"}`: `1 / max(abs(error / value), floor)^2`; `value: None` reads `error` as already relative, `1 / max(abs(error), floor)^2` |
 | `pressure_floor` | `None` or the floor of `L_P`'s denominator, in the keys' unit |
 | `w0` | `{"route": "evaluator"}`, `{"route": "lattice"}` or `{"route": "radial", "r_max", "n_points"}`: how `W(0)` enters the bulk anchor |
 
 A row is kept when its `phase` column is true and its temperature is above
 `anchor_rules.T_min_by_pressure` at that pressure (every temperature when none is declared). `defaults["k_fit_stat"]` and
-`constants["kB"]` are read too.
+`constants["kB"]` are read too. Weights are normalised to mean one, and the shells and the bulk anchor
+take the same ones.
+
+The composition is declared in one of two forms, and each count of channels has exactly one:
+
+| channels | `columns["composition"]` | `eos_columns` | also |
+|---|---|---|---|
+| two | one name, the fraction of channel `table_keys["x_channel"]` | `x_column` | |
+| three or more | a tuple, one fraction column per channel in channel order | `x_columns`, the same | `columns["active"]`, the `(rows, n)` bool mask of the species present in a row |
+
+```python
+columns["densities"]   = ("rho_Fe", "rho_Cu", "rho_Ni")   # one name per channel, as always
+columns["composition"] = ("x_Fe", "x_Cu", "x_Ni")
+columns["active"]      = "active"
+eos_columns["x_columns"] = ("x_Fe", "x_Cu", "x_Ni")
+row_weight = {"value": None, "error": "Scc0_err", "floor": 0.02}
+```
+
+One name at three or more channels is refused (it cannot say which channel it labels), the tuple at
+two channels is refused, and so is a mix of the two (a tuple `composition` with `x_column`, or one
+name with `x_columns`). The vector form does not read `table_keys["x_channel"]`. Its tables carry,
+per row:
+
+- `active`, equal on every row to `x > 0` and to `rho > 0`, and fractions summing to one within
+  `1e-6`; a row that disagrees is refused, by file and row index;
+- `M_k0` `(rows, n, n)`, `S_k` `(rows, shells, n, n)`, and the bulk target `(rows, n-1, n-1)`: `S_cc(0)`
+  on the row's independent species, the first `m = |P| - 1` present species `P` in channel order, in its
+  leading `m x m` block. Entries outside a row's active block are ignored, whatever they hold (NaN, say);
+  a non-finite entry inside it drops the shell or the bulk row, and is refused in `M_k0`.
+
+A row with fewer than two species present feeds `L_P` alone. Each other row is compared on its active
+principal block: `L_M` on `M_PP`, `L_S` on `H_PP(k)` against `kB T S_PP(k)^-1` (an absent species
+drops no shell), and `L_bulk` on
+
+    S_cc(0) = kB T Z^T H_PP(0)^-1 Z / rho_tot,   z_i = e_i - x_i a,  i the first m present species,
+
+with `a` the row's active indicator, so `z_i` vanishes on an absent channel and is `(x_1, -(1 - x_1))`
+at two channels. The block is scored `norm(R S_cc(0) R - I)^2` over its `m x m` entries, with
+`R = S_target^-1/2` fixed at load; `bulk_residual` is then `s_metric`, and `bulk_sigma`, `bulk_ok` are
+`None` (they are refused). The principal block is the `rho_eps -> 0` limit of the full matrix: the
+ideal term `kB T / rho_eps` of an absent channel makes its block of `H^-1` vanish. The manifold reads
+every ok row, pure ones too, as `rho = n (x_1, ..., x_n)`; fractions that do not sum to one within
+`1e-6` are refused, naming the line.
 
 `key: "temperature"`, one channel, one row per temperature at one declared state (feeds `L_M` and
 `L_bulk`): `m_table`, `s_table` (paths), `state` (the composition), `rho_total`, `w0`, and `columns`

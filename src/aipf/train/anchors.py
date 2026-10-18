@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from aipf.data.rows import measured_rows
+from aipf.data.rows import FRACTION_SUM_TOL, measured_rows
 from aipf.paths import tracked_tables
 from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.train.pressure import pressure_from_model
@@ -26,7 +26,7 @@ TABLE_COLUMNS: Tuple[str, ...] = (
     "phase",         # bool per row: may this row anchor at all; one name, or one per role (PHASE_ROLES)
     "temperature",   # the row's temperature, in the floor's own unit
     "densities",     # one name per channel, IN CHANNEL ORDER
-    "composition",   # the fraction the bulk projector is built from
+    "composition",   # the fraction the bulk projector is built from; one name per channel beyond two
     "mobility",      # the measured mobility matrix per row
     "shells",        # the shell wavenumbers per row
     "structure",     # the measured structure factor per row and shell
@@ -64,6 +64,15 @@ TEMPERATURE_COLUMNS: Tuple[str, ...] = (
 EOS_COLUMNS: Tuple[str, ...] = (
     "x_column", "T_column", "n_columns", "status_column", "status_ok",
 )
+
+#: The vector form of :data:`EOS_COLUMNS`, beyond two channels: ``x_columns`` names one fraction per
+#: channel, in channel order.
+EOS_VECTOR_COLUMNS: Tuple[str, ...] = (
+    "x_columns", "T_column", "n_columns", "status_column", "status_ok",
+)
+
+#: The ``columns`` key the vector form adds: the ``(rows, n)`` bool mask of the species present in a row.
+ACTIVE_COLUMN = "active"
 
 
 # -- provenance and path resolution --
@@ -150,21 +159,78 @@ def _f32(array) -> torch.Tensor:
 
 
 def _mobility_rows(path: Path, col, t_min: Optional[float]):
-    """``(rho, T, M_target)``: the measured transport matrix, per state."""
+    """``(rho, T, M_target)``: the measured transport matrix, per state; the vector form appends
+    ``active`` and keeps rows with two species or more, the matrix zero outside their active block."""
     with np.load(path) as z:
         keep = _keep(z, col, t_min, "mobility")
-        return (_f32(_densities(z, col, keep)),
-                _f32(z[col["temperature"]][keep]),
-                _f32(z[col["mobility"]][keep]))
+        if ACTIVE_COLUMN not in col:
+            return (_f32(_densities(z, col, keep)),
+                    _f32(z[col["temperature"]][keep]),
+                    _f32(z[col["mobility"]][keep]))
+        active = _species_present(z, col, path)
+        keep = keep & (active.sum(-1) >= 2)
+        measured = np.asarray(z[col["mobility"]], dtype=np.float64)[keep]
+        rho = _densities(z, col, keep)
+        T = z[col["temperature"]][keep]
+    active = active[keep]
+    pairs = active[:, :, None] & active[:, None, :]
+    bad = np.nonzero((pairs & ~np.isfinite(measured)).any(axis=(-2, -1)))[0]
+    if bad.size:
+        raise ValueError(
+            f"{path}: row {int(np.nonzero(keep)[0][bad[0]])} has a non-finite "
+            f"entry in its active block of {col['mobility']!r}; L_M has no "
+            f"filter for one, so it is refused rather than passed on")
+    return (_f32(rho), _f32(T), _f32(np.where(pairs, measured, 0.0)),
+            torch.from_numpy(active))
+
+
+def _species_present(archive, col, path: Path) -> np.ndarray:
+    """``(rows, n)`` bool, the declared ``active`` column of a vector-form table, checked against the
+    fractions and the densities on every row: ``active == (x > 0) == (rho > 0)``, fractions summing to one
+    within :data:`FRACTION_SUM_TOL`."""
+    names = tuple(col["composition"])
+    if col[ACTIVE_COLUMN] not in archive:
+        raise KeyError(
+            f"{path} carries no declared active column "
+            f"{col[ACTIVE_COLUMN]!r}")
+    active = np.asarray(archive[col[ACTIVE_COLUMN]]).astype(bool)
+    x = np.stack([np.asarray(archive[name], np.float64) for name in names],
+                 axis=-1)
+    rho = np.stack([np.asarray(archive[name], np.float64)
+                    for name in col["densities"]], axis=-1)
+    if active.shape != x.shape:
+        raise ValueError(
+            f"{path}: the active column {col[ACTIVE_COLUMN]!r} has shape "
+            f"{tuple(active.shape)} against {x.shape[0]} rows of "
+            f"{x.shape[1]} channels")
+    for what, present in (("x > 0", x > 0.0), ("rho > 0", rho > 0.0)):
+        rows = np.nonzero((active != present).any(axis=-1))[0]
+        if rows.size:
+            row = int(rows[0])
+            raise ValueError(
+                f"{path}: row {row} has active={active[row].tolist()} and "
+                f"{what} is {present[row].tolist()}; a species is present "
+                f"exactly where its fraction and its density are positive")
+    rows = np.nonzero(~(np.abs(x.sum(-1) - 1.0) <= FRACTION_SUM_TOL))[0]
+    if rows.size:
+        row = int(rows[0])
+        raise ValueError(
+            f"{path}: row {row} has fractions {x[row].tolist()} summing to "
+            f"{x[row].sum()!r}, not to one within {FRACTION_SUM_TOL:g}")
+    return active
 
 
 def _relative_error_weights(archive, keep, spec) -> np.ndarray:
-    """``(P,)`` float32 row weights ``1 / max(|error/value|, floor)^2``, normalised to mean one.
+    """``(P,)`` float32 row weights ``1 / max(|error/value|, floor)^2``, normalised to mean one;
+    ``value`` ``None`` means ``error`` is already relative, ``1 / max(|error|, floor)^2``.
 
     A non-finite ratio weighs zero; a table with no finite weight falls back to ones."""
     n = int(keep.sum())
-    rel = np.abs(np.asarray(archive[spec["error"]], float)[keep]
-                 / np.asarray(archive[spec["value"]], float)[keep])
+    if spec["value"] is None:
+        rel = np.abs(np.asarray(archive[spec["error"]], float)[keep])
+    else:
+        rel = np.abs(np.asarray(archive[spec["error"]], float)[keep]
+                     / np.asarray(archive[spec["value"]], float)[keep])
     rel = np.where(np.isfinite(rel), rel, np.inf)
     rel = np.maximum(rel, float(spec["floor"]))
     w = 1.0 / rel ** 2
@@ -191,10 +257,18 @@ def _cat_weights(parts: Sequence[Optional[torch.Tensor]]):
 
 def _shell_rows(path: Path, col, k_fit: float, kB: float,
                 t_min: Optional[float], weight_spec=None):
-    """``(rho, T, k, target, mask)``: shells ``0 < k <= k_fit`` with a finite positive-determinant matrix,
-    ``target = k_B T . S(k)^-1``; short rows repeat their last shell behind a False mask."""
+    """``(rho, T, k, target, mask, weight)``: shells ``0 < k <= k_fit`` with a finite positive-determinant
+    matrix, ``target = k_B T . S(k)^-1``; short rows repeat their last shell behind a False mask.
+
+    The vector form appends ``active``, keeps rows with two species or more, and reads each row on its
+    active block ``S_PP(k)`` alone: the test, the inverse and ``target`` (the identity outside it)."""
     with np.load(path) as z:
         keep = _keep(z, col, t_min, "structure")
+        active = None
+        if ACTIVE_COLUMN in col:
+            active = _species_present(z, col, path)
+            keep = keep & (active.sum(-1) >= 2)
+            active = active[keep]
         rho = _densities(z, col, keep)
         T = z[col["temperature"]][keep].astype(np.float64)
         k_all = z[col["shells"]][keep].astype(np.float64)
@@ -209,8 +283,11 @@ def _shell_rows(path: Path, col, k_fit: float, kB: float,
         k_row = k_all[row]
         in_band = np.isfinite(k_row) & (k_row > 0.0) & (k_row <= k_fit)
         ks, targets = [], []
+        present = None if active is None else np.nonzero(active[row])[0]
         for shell in np.nonzero(in_band)[0]:
             measured = S_all[row, shell]
+            if present is not None:
+                measured = measured[np.ix_(present, present)]
             if not np.all(np.isfinite(measured)):
                 continue
             if _determinant(measured) <= 0.0:
@@ -219,7 +296,11 @@ def _shell_rows(path: Path, col, k_fit: float, kB: float,
                               row, k_row[shell], path)
                 continue
             ks.append(k_row[shell])
-            targets.append(kBT[row] * np.linalg.inv(measured))
+            if present is None:
+                targets.append(kBT[row] * np.linalg.inv(measured))
+            else:
+                targets.append(_embedded(kBT[row] * np.linalg.inv(measured),
+                                         present, n_channels))
         rows_k.append(np.asarray(ks, dtype=np.float64))
         rows_target.append(np.asarray(targets, dtype=np.float64).reshape(
             -1, n_channels, n_channels))
@@ -242,8 +323,35 @@ def _shell_rows(path: Path, col, k_fit: float, kB: float,
         if n_valid < width:
             k_pad[row, n_valid:] = rows_k[row][-1]
             target_pad[row, n_valid:] = rows_target[row][-1]
-    return (_f32(rho), _f32(T), torch.from_numpy(k_pad),
-            torch.from_numpy(target_pad), torch.from_numpy(mask), weight)
+    out = (_f32(rho), _f32(T), torch.from_numpy(k_pad),
+           torch.from_numpy(target_pad), torch.from_numpy(mask), weight)
+    if active is None:
+        return out
+    return out + (torch.from_numpy(active),)
+
+
+def _embedded(block: np.ndarray, present: np.ndarray, n: int) -> np.ndarray:
+    """``(n, n)``: ``block`` on the rows and columns ``present``, the identity's entries elsewhere."""
+    out = np.eye(n)
+    out[np.ix_(present, present)] = block
+    return out
+
+
+def _rootinv_on_blocks(target: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+    """:func:`~aipf.losses.static.sinv_rootinv` of each row's active principal block of ``target``
+    ``(P, ..., n, n)`` (``active`` ``(P, n)``), the identity outside it: exactly block-diagonal."""
+    from aipf.losses.static import sinv_rootinv
+
+    n = target.shape[-1]
+    out = torch.eye(n, dtype=target.dtype).expand(target.shape).clone()
+    for pattern in torch.unique(active, dim=0):
+        rows = (active == pattern).all(-1)
+        idx = torch.nonzero(pattern).flatten()
+        block = target[rows][..., idx[:, None], idx]
+        sub = out[rows]
+        sub[..., idx[:, None], idx] = sinv_rootinv(block)
+        out[rows] = sub
+    return out
 
 
 def _determinant(matrix: np.ndarray) -> float:
@@ -257,7 +365,10 @@ def _bulk_rows(path: Path, col, t_min: Optional[float], x_channel: int,
                weight_spec=None):
     """``(rho, T, zvec, rho_tot, target, weight)``, the zero-wavenumber anchor, ``zvec = (x1, -(1 - x1))``
     with ``x1`` the channel-1 fraction (``1 - x`` when the composition column labels channel 0).
-    ``bulk_sigma``/``bulk_ok`` ``None``: the phase gate alone decides, the target need only be finite."""
+    ``bulk_sigma``/``bulk_ok`` ``None``: the phase gate alone decides, the target need only be finite.
+    The vector form is :func:`_bulk_block_rows`."""
+    if ACTIVE_COLUMN in col:
+        return _bulk_block_rows(path, col, t_min, weight_spec)
     with np.load(path) as z:
         keep = _keep(z, col, t_min, "structure")
         target_all = z[col["bulk_target"]]
@@ -291,6 +402,68 @@ def _bulk_finish(z, col, keep, target_all, x_channel: int, weight_spec):
             _row_weights(z, keep, weight_spec))
 
 
+def _bulk_block_rows(path: Path, col, t_min: Optional[float], weight_spec):
+    """The vector form's zero-wavenumber anchor on the concentration block, per row with ``m + 1 >= 2``
+    present species ``P``: ``(rho, T, Z, rho_tot, target, weight, active, zmask, target_rootinv)``.
+
+    The independent species ``I`` are the first ``m`` present ones in channel order, and ``Z`` ``(P, n, n-1)``
+    has the columns ``z_i = e_i - x_i a`` (``a`` the row's active indicator), zero beyond ``m``. ``target``
+    is the leading ``m x m`` block of the ``(rows, n-1, n-1)`` column, kept when finite (and refused when
+    not positive definite), padded by the identity; ``zmask`` marks the ``m`` columns, ``target_rootinv``
+    is its inverse square root on that block."""
+    if col["bulk_sigma"] is not None or col["bulk_ok"] is not None:
+        raise ValueError(
+            f"bulk_sigma={col['bulk_sigma']!r} and bulk_ok={col['bulk_ok']!r} "
+            f"are declared with a vector composition; their sigma < 0.5 * "
+            f"target test is a scalar one with no meaning on a matrix, so "
+            f"the vector form declares both None and the phase gate decides")
+    with np.load(path) as z:
+        keep = _keep(z, col, t_min, "structure")
+        active = _species_present(z, col, path)
+        keep = keep & (active.sum(-1) >= 2)
+        n = active.shape[1]
+        target_all = np.asarray(z[col["bulk_target"]], dtype=np.float64)
+        if target_all.shape != (active.shape[0], n - 1, n - 1):
+            raise ValueError(
+                f"{path}: {col['bulk_target']!r} has shape "
+                f"{tuple(target_all.shape)}; the concentration block of "
+                f"{n} channels is ({active.shape[0]}, {n - 1}, {n - 1})")
+        m_all = active.sum(-1) - 1
+        finite = np.array([np.isfinite(target_all[r, :m, :m]).all()
+                           for r, m in enumerate(m_all)], dtype=bool)
+        keep = keep & finite
+        x = np.stack([np.asarray(z[name], np.float64)[keep]
+                      for name in col["composition"]], axis=-1)
+        rho = _densities(z, col, keep)
+        T = z[col["temperature"]][keep]
+        weight = _row_weights(z, keep, weight_spec)
+    rows = np.nonzero(keep)[0]
+    active, target_all = active[keep], target_all[keep]
+    n_rows = rows.size
+    zvec = np.zeros((n_rows, n, n - 1))
+    target = np.tile(np.eye(n - 1), (n_rows, 1, 1))
+    zmask = np.zeros((n_rows, n - 1), dtype=bool)
+    for r in range(n_rows):
+        a = active[r].astype(np.float64)
+        independent = np.nonzero(active[r])[0][:-1]
+        m = independent.size
+        for j, i in enumerate(independent):
+            zvec[r, :, j] = -x[r, i] * a
+            zvec[r, i, j] += 1.0
+        block = target_all[r, :m, :m]
+        if not np.all(np.linalg.eigvalsh(0.5 * (block + block.T)) > 0.0):
+            raise ValueError(
+                f"{path}: row {int(rows[r])} has a {m} x {m} "
+                f"{col['bulk_target']!r} block that is not positive "
+                f"definite, which no structure factor is")
+        target[r, :m, :m] = block
+        zmask[r, :m] = True
+    zmask_t = torch.from_numpy(zmask)
+    return (_f32(rho), _f32(T), _f32(zvec), _f32(rho.sum(-1)), _f32(target),
+            weight, torch.from_numpy(active), zmask_t,
+            _f32(_rootinv_on_blocks(torch.from_numpy(target), zmask_t)))
+
+
 def _channel_one_fraction(x, x_channel: int):
     """A two-channel composition label as the fraction of channel 1: ``x`` itself, or ``1 - x``."""
     if int(x_channel) == 1:
@@ -303,9 +476,19 @@ def _channel_one_fraction(x, x_channel: int):
 
 
 def _eos_rows(path: Path, col, pressure: float, pressure_unit: float,
-              x_channel: int):
+              x_channel: Optional[int]):
     """``(rho, T, P_target)``: one absolute-pressure anchor per ok row, at the declared pressure
-    times ``pressure_unit``; ``x`` is the fraction of channel ``x_channel``."""
+    times ``pressure_unit``; ``x`` is the fraction of channel ``x_channel``, or with ``x_columns``
+    one fraction per channel and ``rho = n x`` (every row, pure ones too)."""
+    if "x_columns" in col:
+        rows = [(n * np.asarray(x, dtype=np.float64), temperature)
+                for x, temperature, n in measured_rows(
+                    path, **{name: col[name] for name in EOS_VECTOR_COLUMNS})]
+        if not rows:
+            raise ValueError(f"no usable equation-of-state row in {path}")
+        target = np.full(len(rows), float(pressure) * float(pressure_unit))
+        return (_f32(np.stack([r[0] for r in rows])),
+                _f32(np.asarray([r[1] for r in rows])), _f32(target))
     rho, T = [], []
     for x, temperature, n in measured_rows(path, **{name: col[name]
                                                     for name in EOS_COLUMNS}):
@@ -330,6 +513,64 @@ def _refuse_beyond_two_channels(n_channels: int, what: str) -> None:
             f"{what} walks ONE composition axis, which is a path through an "
             f"{n_channels}-component simplex only when there are two "
             f"components")
+
+
+def _vector_form(columns: Mapping[str, Any], eos_columns: Mapping[str, Any],
+                 n_channels: int) -> bool:
+    """Whether a pressure-keyed declaration takes the vector form (``composition`` a tuple, ``x_columns``,
+    ``active``; beyond two channels) or the single-name form (one ``composition`` and ``x_column``, read
+    with ``table_keys["x_channel"]``; two channels). Each count of channels has exactly one form."""
+    composition = columns.get("composition")
+    vector = isinstance(composition, (tuple, list))
+    eos_vector = "x_columns" in eos_columns
+    if eos_vector and "x_column" in eos_columns:
+        raise ValueError(
+            "eos_columns declares both x_column and x_columns: the manifold's "
+            "composition is one fraction or one per channel, not both")
+    if vector != eos_vector:
+        raise ValueError(
+            f"columns['composition']={composition!r} and eos_columns "
+            f"{'x_columns' if eos_vector else 'x_column'} mix the two forms: "
+            f"a tuple composition goes with x_columns and one name with "
+            f"x_column")
+    if not vector:
+        if ACTIVE_COLUMN in columns:
+            raise ValueError(
+                f"columns[{ACTIVE_COLUMN!r}] is read by the vector form only, "
+                f"and this declaration names one composition column; a "
+                f"declared column that has no effect is refused")
+        if n_channels > 2:
+            raise ValueError(
+                f"columns['composition']={composition!r} is one name and the "
+                f"tables have {n_channels} channels: one fraction cannot say "
+                f"which channel it labels, or what the others hold. Declare "
+                f"one fraction column per channel, columns['composition'] = "
+                f"(...), with eos_columns['x_columns'] and "
+                f"columns[{ACTIVE_COLUMN!r}]")
+        # The zero-wavenumber projector and the manifold's own
+        # composition-to-density map both walk ONE composition axis.
+        _refuse_beyond_two_channels(n_channels, "the composition-axis anchors")
+        return False
+    if n_channels < 3:
+        raise ValueError(
+            f"columns['composition']={tuple(composition)!r} is the vector form "
+            f"and the tables have {n_channels} channels; {n_channels} channels "
+            f"declare one composition name and x_column, read with "
+            f"table_keys['x_channel'], so that each count of channels has "
+            f"exactly one code path")
+    for what, names in (("columns['composition']", composition),
+                        ("eos_columns['x_columns']", eos_columns["x_columns"])):
+        if len(tuple(names)) != n_channels:
+            raise ValueError(
+                f"{what}={tuple(names)!r} has {len(tuple(names))} names "
+                f"against {n_channels} density channels: one per channel, in "
+                f"channel order")
+    if ACTIVE_COLUMN not in columns:
+        raise KeyError(
+            f"the vector form declares columns[{ACTIVE_COLUMN!r}], the "
+            f"species present in each row; it is not inferred from the "
+            f"fractions, it is checked against them")
+    return True
 
 
 def _w0_route(declared: Mapping[str, Any]) -> Dict[str, Any]:
@@ -459,6 +700,17 @@ class AnchorTables:
     #: The declared ``W_hat(0)`` route of the bulk anchor (:func:`_w0_route`).
     w0: Mapping[str, Any]
 
+    #: The vector form only (``None`` otherwise): each row's present species ``(P, n)`` bool, per anchor.
+    #: There ``mobility_target`` is zero and ``shell_target``/``shell_target_rootinv`` the identity outside a
+    #: row's active block, ``bulk_zvec`` is ``(P, n, n-1)`` and ``bulk_target`` ``(P, n-1, n-1)``, with
+    #: ``bulk_zmask`` ``(P, n-1)`` marking the independent species and ``bulk_target_rootinv`` the target's
+    #: inverse square root on them.
+    mobility_active: Optional[torch.Tensor] = None
+    shell_active: Optional[torch.Tensor] = None
+    bulk_active: Optional[torch.Tensor] = None
+    bulk_zmask: Optional[torch.Tensor] = None
+    bulk_target_rootinv: Optional[torch.Tensor] = None
+
     # -- loading ---------------------------------------------------------
     @classmethod
     def load(cls, system, *, key: str, **declared) -> "AnchorTables":
@@ -528,19 +780,25 @@ class AnchorTables:
         ``pressure_unit`` is one unit of the keys' pressure in the model's energy-per-volume unit.
         ``row_weight``: ``None`` (equal rows) or ``{"value", "error", "floor"}`` columns of the structure table.
         ``pressure_floor``: ``None`` or a floor on ``L_P``'s denominator, in the keys' pressure unit.
-        Compositions are read as the fraction of channel ``system.table_keys["x_channel"]``."""
+        Two channels: ``columns["composition"]`` and ``eos_columns["x_column"]`` name one fraction, of
+        channel ``system.table_keys["x_channel"]``. Beyond two (the vector form): one fraction per channel,
+        ``columns["composition"]`` a tuple and ``eos_columns["x_columns"]``, plus ``columns["active"]``,
+        and ``row_weight["value"]`` may be ``None`` (``error`` already relative); rows with fewer than two
+        species feed ``L_P`` alone."""
         w0 = _w0_route(w0)
         root, tracked = system.paths.raw, tracked_tables(system.name)
         m_paths = _resolve(root, m_table, "m_table", tracked)
         s_paths = _resolve(root, s_table, "s_table", tracked)
         eos_paths = _resolve(root, eos_csvs, "eos_csvs", tracked)
         col = _columns(columns, TABLE_COLUMNS, "the declared table columns")
-        eos_col = _columns(eos_columns, EOS_COLUMNS,
-                           "the declared manifold columns")
-        # The zero-wavenumber projector and the manifold's own
-        # composition-to-density map both walk ONE composition axis.
-        _refuse_beyond_two_channels(len(col["densities"]),
-                                    "the composition-axis anchors")
+        vector = _vector_form(columns, eos_columns, len(col["densities"]))
+        if vector:
+            col[ACTIVE_COLUMN] = columns[ACTIVE_COLUMN]
+            eos_col = _columns(eos_columns, EOS_VECTOR_COLUMNS,
+                               "the declared manifold columns")
+        else:
+            eos_col = _columns(eos_columns, EOS_COLUMNS,
+                               "the declared manifold columns")
         phase = col["phase"]
         if isinstance(phase, Mapping) and set(phase) != set(PHASE_ROLES):
             raise KeyError(
@@ -549,7 +807,7 @@ class AnchorTables:
         if row_weight is not None:
             row_weight = _columns(row_weight, ROW_WEIGHT_KEYS,
                                   "the declared row weighting")
-        x_channel = int(system.table_keys["x_channel"])
+        x_channel = None if vector else int(system.table_keys["x_channel"])
 
         floors = dict(getattr(system.anchor_rules, "T_min_by_pressure", {})
                       or {})
@@ -570,7 +828,7 @@ class AnchorTables:
         e_parts = [_eos_rows(p, eos_col, v, pressure_unit, x_channel)
                    for v, p in eos_paths]
 
-        m_rho, m_T, m_target = _cat(m_parts)
+        m_rho, m_T, m_target = _cat([p[:3] for p in m_parts])
         b_rho, b_T, b_zvec, b_tot, b_target = _cat([p[:5] for p in b_parts])
         b_weight = _cat_weights([p[5] for p in b_parts])
         e_rho, e_T, e_target = _cat(e_parts)
@@ -580,11 +838,24 @@ class AnchorTables:
 
         from aipf.losses.static import sinv_rootinv
 
+        masks: Dict[str, Optional[torch.Tensor]] = {}
+        if vector:
+            s_active = torch.cat([p[6] for p in s_parts])
+            masks = dict(
+                mobility_active=torch.cat([p[3] for p in m_parts]),
+                shell_active=s_active,
+                bulk_active=torch.cat([p[6] for p in b_parts]),
+                bulk_zmask=torch.cat([p[7] for p in b_parts]),
+                bulk_target_rootinv=torch.cat([p[8] for p in b_parts]))
+            s_rootinv = _rootinv_on_blocks(s_target, s_active)
+        else:
+            s_rootinv = sinv_rootinv(s_target)
+
         return cls(
             mobility_rho=m_rho, mobility_T=m_T, mobility_target=m_target,
             shell_rho=s_rho, shell_T=s_T, shell_k=s_k,
             shell_target=s_target, shell_mask=s_mask,
-            shell_target_rootinv=sinv_rootinv(s_target),
+            shell_target_rootinv=s_rootinv,
             shell_weight=s_weight,
             bulk_rho=b_rho, bulk_T=b_T, bulk_zvec=b_zvec,
             bulk_rho_tot=b_tot, bulk_target=b_target, bulk_weight=b_weight,
@@ -596,13 +867,15 @@ class AnchorTables:
                 "s_table": tuple((str(p), _digest(p)) for _v, p in s_paths),
                 "eos_csvs": tuple((str(p), _digest(p)) for _v, p in eos_paths),
             },
-            geometry=_geometry(system), w0=w0,
+            geometry=_geometry(system), w0=w0, **masks,
         )
 
     # -- the batch -------------------------------------------------------
     def batch(self, model, kB: float) -> Dict[str, Dict[str, Any]]:
         """The entries ``compute_losses`` reads, model side rebuilt with a graph (a per-step object);
-        an anchor with no rows is left out."""
+        an anchor with no rows is left out. The vector form adds each row's ``active`` mask (and the bulk
+        anchor's ``zmask`` and ``target_rootinv``): the losses compare the active principal block of ``H``
+        and ``M`` alone."""
         refuse_two_dimensions(model_ndim(model), "the anchor losses")
         w_hat = _w_hat_of(model)
         out: Dict[str, Dict[str, Any]] = {}
@@ -612,6 +885,8 @@ class AnchorTables:
                                        self.mobility_T),
                 "M_target": self.mobility_target,
             }
+            if self.mobility_active is not None:
+                out["anchor_M"]["active"] = self.mobility_active
         if self.shell_rho.shape[0]:
             H = (_curvature(model, self.shell_rho, self.shell_T).unsqueeze(1)
                  + w_hat(self.shell_k))
@@ -620,6 +895,8 @@ class AnchorTables:
                 "target_rootinv": self.shell_target_rootinv,
                 "row_weight": self.shell_weight,
             }
+            if self.shell_active is not None:
+                out["anchor_S"]["active"] = self.shell_active
         if self.bulk_rho.shape[0]:
             H0 = (_curvature(model, self.bulk_rho, self.bulk_T)
                   + _w_hat_zero(model, w_hat, self.bulk_rho, self.geometry,
@@ -630,6 +907,10 @@ class AnchorTables:
                 "target": self.bulk_target, "row_weight": self.bulk_weight,
                 "sigma": self.bulk_sigma,
             }
+            if self.bulk_active is not None:
+                out["anchor_bulk"].update(
+                    active=self.bulk_active, zmask=self.bulk_zmask,
+                    target_rootinv=self.bulk_target_rootinv)
         if self.pressure_rho.shape[0]:
             # the box is irrelevant: each row is a single-point grid, carrying the zero wavevector only
             boxes = torch.ones(self.pressure_rho.shape[0], 3,
@@ -806,5 +1087,5 @@ def _curvature(model, rho: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
     return torch.stack(rows, dim=1)
 
 
-__all__ = ["AnchorTables", "TABLE_COLUMNS", "EOS_COLUMNS", "TABLE_KEYS",
-           "TEMPERATURE_COLUMNS", "W0_ROUTES"]
+__all__ = ["AnchorTables", "TABLE_COLUMNS", "EOS_COLUMNS", "EOS_VECTOR_COLUMNS",
+           "ACTIVE_COLUMN", "TABLE_KEYS", "TEMPERATURE_COLUMNS", "W0_ROUTES"]
