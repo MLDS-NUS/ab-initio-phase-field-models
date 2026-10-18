@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -31,13 +31,16 @@ _WEAK_FORMS = ("weak", "weak_mid")
 @dataclass(frozen=True)
 class ArchiveKeys:
     """The key names one archive uses, and which axis holds the channel; every field required but
-    ``reference_box``.
+    ``reference_box`` and ``mmap_file``.
 
     ``amplitudes_channel_axis``: ``1`` for ``(frames, channels, modes)``, ``2`` for
     ``(frames, modes, channels)``.
     ``quality_file`` and ``quality_key`` are declared together or both ``None``.
     ``reference_box``: the key of an optional reference cell ``(3,)``, read when a run carries it
-    (:attr:`ModeRun.reference_box`); ``None`` reads none."""
+    (:attr:`ModeRun.reference_box`); ``None`` reads none.
+    ``mmap_file``: the file name of an optional memory-mapped copy of the amplitudes beside the archive
+    (:data:`aipf.pipeline.modes.MMAP_FILE`), opened in place of the archive's amplitudes when a run has
+    one (:func:`read_mode_runs`); ``None`` reads every run's amplitudes into memory."""
 
     file_name: str
     amplitudes: str
@@ -52,6 +55,7 @@ class ArchiveKeys:
     quality_key: Optional[str]
     # out of repr and equality, so a declaration without it prints and compares as it always did
     reference_box: Optional[str] = field(default=None, repr=False, compare=False)
+    mmap_file: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "composition", tuple(self.composition))
@@ -74,9 +78,40 @@ class ArchiveKeys:
         return dataclasses.replace(self, **changes)
 
 
+class _MappedFrames(NamedTuple):
+    """How a pickled :class:`ModeRun` re-opens its memory-mapped amplitudes: the file, the byte offset
+    of its first frame, the dtype and the shape."""
+
+    filename: str
+    offset: int
+    dtype: np.dtype
+    shape: Tuple[int, ...]
+
+    def open(self) -> np.memmap:
+        return np.memmap(self.filename, dtype=self.dtype, mode="r", offset=self.offset,
+                         shape=self.shape)
+
+
+def _mapping_of(amplitudes) -> Optional[_MappedFrames]:
+    """Where a C-contiguous memory-mapped array (or a contiguous view of one) lies in its file, or
+    ``None`` for anything else."""
+    if (not isinstance(amplitudes, np.memmap) or amplitudes.filename is None
+            or not amplitudes.flags.c_contiguous or amplitudes.size == 0):
+        return None
+    root = amplitudes
+    while isinstance(root.base, np.memmap):
+        root = root.base
+    # the file offset of the mapping np.load opened, plus how far into it this view starts
+    start = (amplitudes.__array_interface__["data"][0]
+             - root.__array_interface__["data"][0])
+    return _MappedFrames(str(amplitudes.filename), int(root.offset) + int(start),
+                         amplitudes.dtype, tuple(amplitudes.shape))
+
+
 @dataclass(frozen=True)
 class ModeRun:
-    """One run's whole timeline in memory; ``amplitudes`` is ``(n_frames, n_channels, n_modes)`` complex.
+    """One run's whole timeline; ``amplitudes`` is ``(n_frames, n_channels, n_modes)`` complex, in memory
+    or a read-only :class:`numpy.memmap` of the run's sidecar (:attr:`ArchiveKeys.mmap_file`).
 
     ``boxes`` is ``(n_frames, 3)`` or ``(3,)``; ``composition`` follows the declared key order.
     ``reference_box`` ``(3,)``, when the archive records one, is the cell every window's ``k`` and ``V``
@@ -94,6 +129,20 @@ class ModeRun:
     composition: Tuple[float, ...]
     reference_box: Optional[np.ndarray] = None
     depth: Optional[float] = None
+
+    def __getstate__(self):
+        # a memory-mapped run pickles as where its frames lie in the file, not as the frames, so a
+        # loader worker started by spawn maps the file as a forked one inherits the mapping
+        state = dict(self.__dict__)
+        mapping = _mapping_of(self.amplitudes)
+        if mapping is not None:
+            state["amplitudes"] = mapping
+        return state
+
+    def __setstate__(self, state):
+        if isinstance(state.get("amplitudes"), _MappedFrames):
+            state = {**state, "amplitudes": state["amplitudes"].open()}
+        self.__dict__.update(state)
 
     @property
     def cell(self) -> np.ndarray:
@@ -146,6 +195,81 @@ def _valid_frame_limit(directory: Path, keys: ArchiveKeys) -> Optional[int]:
     return hi
 
 
+def _stored_layout(payload, key: str, path: Path) -> Tuple[Tuple[int, ...], np.dtype]:
+    """The shape and dtype of the array ``key`` of an open ``.npz``, read off its ``.npy`` header alone:
+    nothing of the array itself is decompressed."""
+    try:
+        member = payload.zip.open(f"{key}.npy")
+    except KeyError:
+        raise KeyError(
+            f"{path}: holds no {key!r}, the amplitudes a memory-mapped copy is checked "
+            f"against") from None
+    with member:
+        version = np.lib.format.read_magic(member)
+        readers = {(1, 0): np.lib.format.read_array_header_1_0,
+                   (2, 0): np.lib.format.read_array_header_2_0}
+        if version not in readers:
+            raise ValueError(
+                f"{path}: {key} is stored in .npy format {version}, whose header this reader "
+                f"does not parse")
+        shape, _, dtype = readers[version](member)
+    return tuple(shape), dtype
+
+
+def mapped_amplitudes(directory, keys: ArchiveKeys, payload) -> Optional[np.memmap]:
+    """A run's amplitudes ``(n_frames, n_channels, n_modes)`` mapped read-only from its sidecar
+    ``<directory>/<keys.mmap_file>``, or ``None`` when ``keys`` declares none or the run has none.
+
+    ``payload`` is the run's open archive. The sidecar is refused, naming the run, unless its shape is
+    the archive's amplitudes' in the channel-first layout (frames, channels and modes, read off the
+    stored header, and the modes and frames again off the labels and a per-frame box), its dtype is
+    theirs and it is in C order: a stale sidecar raises instead of training. The archive's amplitudes
+    are never decompressed."""
+    if keys.mmap_file is None:
+        return None
+    directory = Path(directory)
+    path = directory / keys.mmap_file
+    if not path.is_file():
+        return None
+    archive = directory / keys.file_name
+    shape, dtype = _stored_layout(payload, keys.amplitudes, archive)
+    if len(shape) != 3:
+        raise ValueError(
+            f"{archive}: {keys.amplitudes} has shape {shape}, which is not a timeline of "
+            f"(channels, modes)")
+    expected = shape if keys.amplitudes_channel_axis == 1 else (shape[0], shape[2], shape[1])
+    try:
+        mapped = np.load(path, mmap_mode="r")
+        if not isinstance(mapped, np.memmap):
+            raise ValueError("it holds no single array")
+    except (OSError, ValueError) as unreadable:
+        raise ValueError(
+            f"run {directory.name!r}: {path} is not a readable .npy ({unreadable}): rewrite it "
+            f"(aipf modes-sidecar) or delete it to read the archive itself") from unreadable
+    labels = payload[keys.labels].shape
+    boxes = payload[keys.box].shape
+    problems = []
+    if mapped.shape != expected:
+        problems.append(f"shape {tuple(mapped.shape)}, the archive's amplitudes {expected} "
+                        f"(frames, channels, modes)")
+    if mapped.dtype != dtype:
+        problems.append(f"dtype {mapped.dtype}, the archive's {dtype}")
+    if not mapped.flags.c_contiguous:
+        problems.append("Fortran order, where a window's frames are one contiguous range only in "
+                        "C order")
+    if len(labels) < 1 or labels[0] != expected[2]:
+        problems.append(f"{expected[2]} modes, {keys.labels} {labels}")
+    if len(boxes) == 2 and boxes[0] != expected[0]:
+        problems.append(f"{expected[0]} frames, {keys.box} {boxes}")
+    if problems:
+        raise ValueError(
+            f"run {directory.name!r}: {path} does not match {archive}: "
+            + "; ".join(problems)
+            + ". It is stale or another archive's: rewrite it (aipf modes-sidecar) or delete it "
+              "to read the archive itself")
+    return mapped
+
+
 def _composition(payload: Mapping[str, np.ndarray], keys: ArchiveKeys,
                  tag: str) -> Tuple[float, ...]:
     """A run's composition label, from the declared keys or the fallback."""
@@ -168,7 +292,9 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
     """Every run under ``root`` whose directory matches ``pattern``, loaded, in sorted tag order.
 
     ``exclude_tags`` are skipped before the file is opened; a matching directory with no amplitude
-    file is skipped."""
+    file is skipped. A run with the sidecar ``keys.mmap_file`` maps its amplitudes from it
+    (:func:`mapped_amplitudes`) and never reads them from the archive; every other run reads them into
+    memory, so a tree may mix the two."""
     excluded = set(exclude_tags)
     runs: list[ModeRun] = []
     for directory in sorted(Path(root).glob(pattern)):
@@ -177,15 +303,17 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
             continue
         limit = _valid_frame_limit(directory, keys)
         with np.load(path) as payload:
-            stored = payload[keys.amplitudes]
-            if stored.ndim != 3:
-                raise ValueError(
-                    f"{path}: {keys.amplitudes} has shape "
-                    f"{tuple(stored.shape)}, which is not a timeline of "
-                    f"(channels, modes)")
-            if keys.amplitudes_channel_axis == 2:
-                stored = np.moveaxis(stored, 2, 1)
-            amplitudes = np.ascontiguousarray(stored)
+            amplitudes = mapped_amplitudes(directory, keys, payload)
+            if amplitudes is None:
+                stored = payload[keys.amplitudes]
+                if stored.ndim != 3:
+                    raise ValueError(
+                        f"{path}: {keys.amplitudes} has shape "
+                        f"{tuple(stored.shape)}, which is not a timeline of "
+                        f"(channels, modes)")
+                if keys.amplitudes_channel_axis == 2:
+                    stored = np.moveaxis(stored, 2, 1)
+                amplitudes = np.ascontiguousarray(stored)
             boxes = np.array(payload[keys.box])
             reference = None
             if keys.reference_box is not None and \
@@ -218,6 +346,10 @@ def read_mode_runs(root, pattern: str, *, keys: ArchiveKeys,
         raise FileNotFoundError(
             f"no run matching {pattern!r} under {root} holds a "
             f"{keys.file_name!r}")
+    if keys.mmap_file is not None:
+        mapped = sum(isinstance(run.amplitudes, np.memmap) for run in runs)
+        logging.info("%s/%s: %d of %d run(s) memory-mapped from %s, the rest read into memory",
+                     root, pattern, mapped, len(runs), keys.mmap_file)
     return runs
 
 

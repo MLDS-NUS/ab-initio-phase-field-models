@@ -76,6 +76,11 @@ _QUALITY_FILE, _QUALITY_KEY = "DATA_QUALITY_WARNING.json", "valid_frames"
 #: The channel axis of the archived ``(n_frames, n_modes, n_channels)`` amplitudes.
 _ARCHIVE_CHANNEL_AXIS = 2
 
+#: The ``defaults["training"]`` entry that opts a system into the memory-mapped amplitudes: ``True``
+#: maps every run that carries the sidecar ``aipf.pipeline.modes.MMAP_FILE``; ``False`` or absent reads
+#: every run into memory.
+_MMAP_KEY = "mmap_sidecar"
+
 
 # -- reading the declaration --
 def _training(system: System) -> Mapping[str, Any]:
@@ -221,7 +226,8 @@ def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
 
 def _archive_keys(system: System) -> ArchiveKeys:
     """How this system's mode archive spells its quantities; the names come from
-    :mod:`aipf.pipeline.modes`, the writer."""
+    :mod:`aipf.pipeline.modes`, the writer. No sidecar: :func:`_training_archive_keys` adds the one a
+    system opts into."""
     from aipf.pipeline.modes import ARCHIVE_KEYS, REFERENCE_BOX_KEY, SIDE_KEYS
 
     x_key = system.table_keys["x"]
@@ -240,6 +246,21 @@ def _archive_keys(system: System) -> ArchiveKeys:
         quality_file=_QUALITY_FILE,
         quality_key=_QUALITY_KEY,
         reference_box=REFERENCE_BOX_KEY)
+
+
+def _training_archive_keys(system: System) -> ArchiveKeys:
+    """:func:`_archive_keys` as a training run reads the archives: with the sidecar
+    :data:`aipf.pipeline.modes.MMAP_FILE` when the system declares
+    ``defaults["training"]["mmap_sidecar"] = True``, else none."""
+    from aipf.pipeline.modes import MMAP_FILE
+
+    mapped = _training(system).get(_MMAP_KEY, False)
+    if not isinstance(mapped, bool):
+        raise ValueError(
+            f"defaults[{_TRAINING_KEY!r}][{_MMAP_KEY!r}]={mapped!r} is not True or False: it "
+            f"says whether runs with the sidecar {MMAP_FILE!r} are memory-mapped")
+    keys = _archive_keys(system)
+    return keys.replace(mmap_file=MMAP_FILE) if mapped else keys
 
 
 #: The trees a declared ``source_root`` can sit in: ``"raw"`` (``system.paths.raw()``) or
@@ -887,7 +908,7 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     window = window or _window_from_system(system)
     weighting = weighting or _weighting_from_system(system,
                                                      lit.resolved_k_max())
-    dm = ModeDataModule(sources=tuple(sources), keys=_archive_keys(system),
+    dm = ModeDataModule(sources=tuple(sources), keys=_training_archive_keys(system),
                         window=window,
                         split=_split_from_system(system, split_mode),
                         weighting=weighting,
