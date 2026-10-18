@@ -249,7 +249,7 @@ What training and the rollouts read, under a tree:
 | | `reference_box` | `(3,)` float64 | optional: the reference cell, written only under a rule other than `time_mean` |
 | | `T_K` | float64 | the temperature |
 | | `dt_frame_ps` | float64 | the time between frames |
-| | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label; a tuple `table_keys["x"]` (three or more channels) is one key per channel, read as the run's label with no fallback, and a record that gives several species a fraction under one string key is refused |
+| | the system's `table_keys["x"]`, or `x_left` and `x_right` | float64 | the composition label; a tuple `table_keys["x"]` (three or more channels) is one key per channel, read as the run's label with no fallback; `aipf modes` writes it only from a composition that gives every species a fraction (a `meta.json` written so, not the index's own normalisation, which records the `x_channel` species alone), and an adapter may write the keys itself. A record that gives several species a fraction under one string key is refused |
 | `<tag>/DATA_QUALITY_WARNING.json` | `valid_frames` (training), the declared `quality_key` (rollouts) | int | optional: the frames after this are not read |
 
 Other keys in an archive are ignored.

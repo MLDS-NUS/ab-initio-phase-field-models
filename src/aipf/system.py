@@ -484,10 +484,10 @@ class System:
         x_key = self.table_keys.get("x")
         if isinstance(x_key, tuple) and self.n_species >= 3:
             if len(x_key) != self.n_species or not all(
-                    isinstance(k, str) for k in x_key):
+                    isinstance(k, str) for k in x_key) or len(set(x_key)) != len(x_key):
                 raise ValueError(
-                    f"table_keys['x']={x_key!r} is not one column name per "
-                    f"channel of species={self.species!r}"
+                    f"table_keys['x']={x_key!r} is not one distinct column name "
+                    f"per channel of species={self.species!r}"
                 )
         elif x_key is not None and not isinstance(x_key, str):
             raise ValueError(

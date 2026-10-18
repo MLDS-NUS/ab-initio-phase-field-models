@@ -237,8 +237,10 @@ def test_three_channels_may_label_each_channel_and_two_may_not():
                  atom_types={"A": 1, "B": 2, "C": 3})
     s = _system(table_keys={"x": ("x_A", "x_B", "x_C")}, **three)
     assert s.table_keys["x"] == ("x_A", "x_B", "x_C")
-    with pytest.raises(ValueError, match="one column name per channel"):
+    with pytest.raises(ValueError, match="one distinct column name per channel"):
         _system(table_keys={"x": ("x_A", "x_B")}, **three)
+    with pytest.raises(ValueError, match="one distinct column name per channel"):
+        _system(table_keys={"x": ("x_A", "x_B", "x_A")}, **three)
     with pytest.raises(ValueError, match="has to be a string"):
         _system(table_keys={"x": ("x_A", "x_B")})
 

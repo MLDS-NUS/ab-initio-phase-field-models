@@ -8,12 +8,17 @@ The pressure is declared, never parsed from a path.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
+from aipf.data.rows import FRACTION_SUM_TOL
+
 from .extract_modes import reference_box, wavevectors
+
+_LOG = logging.getLogger(__name__)
 
 #: Stored matrix a density-scaled column is built from: ``"window"`` (:attr:`RunMobility.M_window`)
 #: or ``"zero_wavenumber"`` (:attr:`RunMobility.M_zero_wavenumber`).
@@ -231,6 +236,7 @@ def concentration_weights(fractions) -> np.ndarray:
     """
     f = np.asarray(fractions, dtype=np.float64)
     if f.ndim == 1 and f.shape[0] >= 3:
+        _simplex_point(f, "concentration_weights")
         present = f > 0.0
         independent = np.nonzero(present)[0][:-1]
         out = -f[independent, None] * present.astype(np.float64)[None, :]
@@ -270,6 +276,17 @@ def concentration_series(amplitudes, *, weights) -> np.ndarray:
     return out
 
 
+def _simplex_point(f: np.ndarray, what: str) -> None:
+    """Refuse fractions that are not finite, are negative, or do not sum to one within
+    :data:`aipf.data.rows.FRACTION_SUM_TOL` (the manifold reader's tolerance)."""
+    if not (np.all(np.isfinite(f)) and np.all(f >= 0.0)
+            and abs(float(f.sum()) - 1.0) <= FRACTION_SUM_TOL):
+        raise ValueError(
+            f"{what}: composition {f.tolist()} is not a point of the simplex "
+            f"(finite, non-negative, summing to one within "
+            f"{FRACTION_SUM_TOL:g})")
+
+
 def _mixture(composition, what: str) -> np.ndarray:
     """A composition vector of three or more channels with at least two present, as float64."""
     f = np.asarray(composition, dtype=np.float64)
@@ -278,6 +295,7 @@ def _mixture(composition, what: str) -> np.ndarray:
             f"{what}: composition has shape {tuple(f.shape)}; the vector form "
             f"is one fraction per channel for three or more channels, and two "
             f"channels pass the scalar fraction")
+    _simplex_point(f, what)
     if int((f > 0.0).sum()) < 2:
         raise ValueError(
             f"{what}: composition {f.tolist()} has one species present, and "
@@ -346,11 +364,11 @@ def quarter_growth(series, composition=None) -> float:
     if composition is not None:
         f = _mixture(composition, "quarter_growth")
         s = np.asarray(series, dtype=np.float64)
-        q = s.shape[0] // 4 if s.ndim == 3 else 0
         if s.ndim != 3:
             raise ValueError(
                 f"series has shape {tuple(s.shape)}, which is not one "
                 f"(m, m) matrix per frame")
+        q = s.shape[0] // 4
         if q < 1:
             raise ValueError(
                 f"{s.shape[0]} frames: a quarter of the run is empty and the "
@@ -531,7 +549,9 @@ def run_mobility(amplitudes, box_lengths, nvec, *, temperature: float,
 class KernelShape:
     """The mobility-spectrum shape a campaign shares: ``kernel`` and ``spread`` ``(n_shells, C, C)``.
 
-    ``wavenumbers`` are the first qualifying run's shells.
+    ``wavenumbers`` are the first qualifying run's shells. ``n_runs`` counts the qualifying runs, whether
+    or not each carries every channel pair; a pair's mean and spread are over the runs that carry it,
+    nan where none does (:func:`kernel_shape`).
     """
 
     wavenumbers: np.ndarray
@@ -547,6 +567,11 @@ def kernel_shape(runs, *, t_min: float, shape_set: str,
 
     Each run is divided by its own ``k = 0`` value. ``single_phase_flags`` is required by
     ``"single_phase_above_temperature"`` only.
+
+    A pair a run does not carry (an absent channel: its intercepts all exactly zero) is nan in that run's
+    shape, without a ``0/0`` warning, and is left out of that pair's mean and spread, which are over the
+    runs that carry it; nan where no run does. When every run carries every pair (every two-channel
+    campaign), the mean and spread are the plain ones over all qualifying runs.
     """
     if shape_set not in SHAPE_SETS:
         raise ValueError(f"shape_set={shape_set!r} is not one of {SHAPE_SETS}")
@@ -680,7 +705,8 @@ class AnchorTable:
     def density_scaled(self, source: str) -> tuple[np.ndarray, np.ndarray]:
         """Diagonal ``M_aa / rho_a`` and upper-triangle cross ``M_ab / sqrt(rho_a rho_b)`` mobilities.
 
-        An entry of an absent channel (zero density) is nan, with no division warning.
+        An entry of a channel at zero density (an absent channel) is nan, with no division warning, at
+        any channel count, two included.
         """
         m = self.matrices(source)
         n_channels = self.densities.shape[1]
@@ -742,6 +768,15 @@ def anchor_table(runs, *, pressure: float | None, composition, densities,
             f"densities has shape {tuple(densities.shape)} against "
             f"{n_rows} runs of {n_channels} channels")
     fits = [shape_amplitude(run, shape, k_max=shape_k_max) for run in runs]
+    if composition.ndim == 2:
+        present = composition > 0.0
+        for row, (fit, active) in enumerate(zip(fits, present)):
+            bad = np.isnan(fit[0]) & active[:, None] & active[None, :]
+            if bad.any():
+                _LOG.warning(
+                    "anchor table: row %d has a nan M_shape on active pair(s) %s: "
+                    "no run of the shape's campaign carries them",
+                    row, [tuple(int(i) for i in p) for p in np.argwhere(bad)])
     return AnchorTable(
         pressure=None if pressure is None else float(pressure),
         composition=composition,

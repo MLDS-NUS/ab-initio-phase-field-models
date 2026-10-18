@@ -260,3 +260,25 @@ def test_a_table_takes_one_composition_vector_per_run():
     assert isinstance(table, AnchorTable) and table.composition.shape == (2, 3)
     with pytest.raises(ValueError, match="composition has shape"):
         anchor_table(runs, composition=np.full((2, 2), 0.5), **kwargs)
+
+
+@pytest.mark.parametrize("bad", [(0.2, 0.3, 0.6), (0.6, -0.1, 0.5), (0.5, float("nan"), 0.5)])
+def test_a_composition_off_the_simplex_is_refused(bad):
+    with pytest.raises(ValueError, match="not a point of the simplex"):
+        concentration_weights(bad)
+    with pytest.raises(ValueError, match="not a point of the simplex"):
+        ideal_concentration_matrix(bad)
+
+
+def test_a_nan_shape_on_an_active_pair_is_reported(caplog):
+    binary = _stub(1000.0, _icpt([4.0, 3.0, 1.0], absent=(1,)))
+    shape = kernel_shape([binary], t_min=0.0, shape_set="above_temperature")
+    full = _stub(1000.0, _icpt([4.0, 3.0, 1.0]))
+    with caplog.at_level("WARNING", logger="aipf.pipeline.anchors"):
+        anchor_table([binary, full], pressure=0.0,
+                     composition=np.array([[0.5, 0.0, 0.5], [0.2, 0.3, 0.5]]),
+                     densities=np.array([[0.04, 0.0, 0.04], [0.02, 0.03, 0.05]]),
+                     growth=np.zeros(2), single_phase=np.ones(2, bool), shape=shape,
+                     shape_k_max=9.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1 and "row 1" in messages[0], messages
