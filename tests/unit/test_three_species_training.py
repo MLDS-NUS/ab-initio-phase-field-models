@@ -4,8 +4,10 @@ The declaration is the Fe-B-shaped one of ``test_three_species_model.py`` plus t
 the anchor tables (``docs/reference/training.md``, Anchor tables): one fraction column per channel,
 the ``active`` mask and a relative ``Scc0_err``. The tables and the manifold are written here in the
 layout a ternary campaign writes (key names included), with a ternary row, a binary row with one
-species absent and a pure row, and the mode archive is a three-channel ``ModesRecord`` with one
-ternary run and one run whose third channel is identically zero.
+species absent and a pure row (the manifold with one column the reader ignores), and the mode
+archive is a three-channel ``ModesRecord`` with one ternary run and one run whose Cu channel is
+identically zero. ``fit`` reads ``modes.npz`` and its provenance; a ``meta.json`` is read only by
+the data index, so none is written.
 
 What is pinned: the declaration validates and builds; ``AnchorTables.load`` keeps the rows each
 anchor should (a pure row feeds ``L_P`` alone), carries the active masks, warns about no shell of
@@ -39,7 +41,10 @@ from test_three_species_model import SPECIES, ternary_system
 
 @pytest.fixture(autouse=True)
 def _demo_scratch_is_its_own(monkeypatch):
+    """The toy declares its own raw root; a user's ``AIPF_RAW`` or ``AIPF_RAW_TERNARY_TOY``, which
+    ``Paths`` prefers to a declared default, must not replace it."""
     monkeypatch.delenv("AIPF_RAW", raising=False)
+    monkeypatch.delenv("AIPF_RAW_TERNARY_TOY", raising=False)
 
 
 _GRID = (4, 4, 4)
@@ -106,8 +111,9 @@ def _write_tables(root):
     np.savez(root / "M_table.npz", M_k0=M, **common)
     np.savez(root / "S_table.npz", k_shells=np.tile(_SHELLS, (n_rows, 1)), S_k=S, Scc0=Scc0,
              Scc0_err=np.array([0.05, 0.08, np.nan]), **common)
-    lines = ["x_Fe,x_Cu,x_Ni,T_K,n_atoms_per_A3,status"]
-    lines += [f"{_X[r, 0]},{_X[r, 1]},{_X[r, 2]},{_T[r]},{_TOTAL[r]},ok" for r in range(n_rows)]
+    lines = ["x_Fe,x_Cu,x_Ni,T_K,n_atoms_per_A3,P_GPa,status"]
+    lines += [f"{_X[r, 0]},{_X[r, 1]},{_X[r, 2]},{_T[r]},{_TOTAL[r]},0.0001,ok"
+              for r in range(n_rows)]
     (root / "eos_n_x_T.csv").write_text("\n".join(lines) + "\n")
 
 
@@ -254,8 +260,10 @@ def test_the_loader_records_every_file_it_read_with_its_digest(toy, tmp_path):
 
 def test_one_step_trains_every_term_finitely_and_reloads_strictly(toy, tmp_path):
     system, sources = toy
+    # the first step runs at lr times the warm-up's start factor, 1e-6: lr = 1e3 makes it 1e-3
     run = fit(system, run_name="one_step", sources=sources, steps=1, seed=0,
-              resume_optimizer=False, root=tmp_path / "data", log_every_step=True)
+              resume_optimizer=False, root=tmp_path / "data", log_every_step=True,
+              config_overrides={"lr": 1e3})
     # the starting weights, built as fit builds them: under the run's own model stream
     cfg = TrainConfig(**{**_config_from_system(system), "seed": 0})
     with seeded_rng(cfg.seed_for("model")):
@@ -272,6 +280,14 @@ def test_one_step_trains_every_term_finitely_and_reloads_strictly(toy, tmp_path)
     (step,) = steps["terms"]
     assert terms <= set(step), step
     assert all(np.isfinite(step[name]) for name in terms), step
+    # every term is in the total the step minimised, at its declared weight
+    weights = _defaults()
+    weighted = {"L_M": weights["lambda_M"], "L_S": weights["lambda_S"],
+                "L_bulk": weights["lambda_bulk"], "L_P": weights["lambda_P"],
+                "L_W": weights["lambda_wpsd"]}
+    expected = step["L_dyn"] + sum(w * step[name] for name, w in weighted.items())
+    assert steps["loss"][0] == pytest.approx(expected, rel=1e-5)
+    assert all(step[name] > 0.0 for name in weighted), step
 
     path = run / "final.ckpt"
     declared = Checkpoint(path=str(path.relative_to(tmp_path)),
@@ -283,9 +299,11 @@ def test_one_step_trains_every_term_finitely_and_reloads_strictly(toy, tmp_path)
     for value in after.values():
         if value.is_floating_point():
             assert torch.isfinite(value).all()
-    changed = [k for k in before if before[k].is_floating_point()
-               and not torch.equal(before[k], after[k])]
-    assert changed, "one optimiser step changed no parameter"
+    moved = {k: float((after[k] - before[k]).abs().max()) for k in before
+             if before[k].is_floating_point()}
+    # an Adam step moves each parameter with a gradient by about the learning rate
+    assert max(moved.values()) > 1e-4, moved
+    assert sum(v > 1e-5 for v in moved.values()) >= len(moved) // 2, moved
 
 
 def test_the_starting_weights_the_step_test_compares_against_are_the_runs_own(toy, tmp_path):
