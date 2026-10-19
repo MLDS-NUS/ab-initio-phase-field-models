@@ -56,7 +56,7 @@ def _declared_model(published_model):
 
 @pytest.fixture(autouse=True)
 def _thread_count_restored():
-    """Tests here pin torch to one thread; the count is put back afterwards, or every later test in
+    """Some tests here pin torch to one thread; the count is put back afterwards, or every later test in
     the process runs on one thread and a child process (which starts at the default) disagrees."""
     threads = torch.get_num_threads()
     yield

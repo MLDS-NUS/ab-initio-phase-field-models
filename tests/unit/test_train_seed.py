@@ -590,9 +590,12 @@ def test_the_whole_first_step_is_the_same_in_another_process():
     points, its total, every gradient and the weights after one optimizer
     step -- so both sides run one implementation."""
     here = os.path.dirname(os.path.abspath(__file__))
+    # the child runs at this process's thread count: reductions round by it, and a parent pinned to
+    # one thread would otherwise disagree in the last bits with a child at the default
     out = subprocess.run(
         [sys.executable, "-c",
          f"import sys; sys.path.insert(0, {here!r});"
+         f"import torch; torch.set_num_threads({torch.get_num_threads()});"
          "import test_train_seed as t; print(t.subprocess_digest())"],
         capture_output=True, text=True, check=True, env=_child_env())
     assert out.stdout.strip() == subprocess_digest()

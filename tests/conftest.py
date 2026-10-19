@@ -46,3 +46,15 @@ def _no_leaked_thread_count(request):
         sys.modules["torch"].set_num_threads(before)  # charge this test, not every later one
         pytest.fail(f"{request.node.nodeid}: left torch.set_num_threads({after}) on for the rest of "
                     f"the process (it was {before})", pytrace=False)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _no_leaked_thread_count_by_a_module(request):
+    # the function-scoped guard reads its "before" after module fixtures are set up, so it cannot see theirs
+    before = _thread_count()
+    yield
+    after = _thread_count()
+    if before is not None and after != before:
+        sys.modules["torch"].set_num_threads(before)  # charge this module, not every later one
+        pytest.fail(f"{request.node.nodeid}: a module fixture left torch.set_num_threads({after}) on "
+                    f"for the rest of the process (it was {before})", pytrace=False)
