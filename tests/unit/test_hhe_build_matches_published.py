@@ -47,6 +47,15 @@ def _bridged(published_model):
     return load_lightning_hparams_into(NonlocalKernel(**kwargs), state).eval()
 
 
+@pytest.fixture(autouse=True)
+def _thread_count_restored():
+    """Tests here pin torch to one thread; the count is put back afterwards, or every later test in
+    the process runs on one thread and a child process (which starts at the default) disagrees."""
+    threads = torch.get_num_threads()
+    yield
+    torch.set_num_threads(threads)
+
+
 def test_the_declared_kb_is_the_one_the_bridge_is_given():
     assert load("hhe").constants["kB"] == _K_B
 

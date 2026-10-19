@@ -54,6 +54,15 @@ def _declared_model(published_model):
                               published_model["state_dict"]).eval()
 
 
+@pytest.fixture(autouse=True)
+def _thread_count_restored():
+    """Tests here pin torch to one thread; the count is put back afterwards, or every later test in
+    the process runs on one thread and a child process (which starts at the default) disagrees."""
+    threads = torch.get_num_threads()
+    yield
+    torch.set_num_threads(threads)
+
+
 def test_the_declared_kb_is_the_one_the_bridge_is_given():
     assert load("feb").constants["kB"] == _K_B
 

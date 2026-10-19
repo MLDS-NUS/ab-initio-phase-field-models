@@ -1,7 +1,10 @@
 """Puts ``tests/`` on the import path, so every test can ``import declared_roots``.
 
 Also fails any test that leaves torch's process-wide deterministic-algorithms flag on: every later
-CUDA matmul in the same process then refuses. See docs/reference/training.md, "Devices and determinism"."""
+CUDA matmul in the same process then refuses. See docs/reference/training.md, "Devices and determinism".
+And fails any test that leaves torch's intra-op thread count changed: every later test then runs on
+that count, and one that compares against a child process (which starts at the default) disagrees in
+the last bits."""
 import sys
 from pathlib import Path
 
@@ -27,3 +30,19 @@ def _no_leaked_deterministic_flag(request):
         source = "a fixture it uses" if on_at_setup else "the test"
         pytest.fail(f"{request.node.nodeid}: {source} left torch.use_deterministic_algorithms(True) on "
                     "for the rest of the process", pytrace=False)
+
+
+def _thread_count():
+    torch = sys.modules.get("torch")  # never imported: nothing can have changed it
+    return None if torch is None else torch.get_num_threads()
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_thread_count(request):
+    before = _thread_count()
+    yield
+    after = _thread_count()
+    if before is not None and after != before:
+        sys.modules["torch"].set_num_threads(before)  # charge this test, not every later one
+        pytest.fail(f"{request.node.nodeid}: left torch.set_num_threads({after}) on for the rest of "
+                    f"the process (it was {before})", pytrace=False)
