@@ -176,7 +176,7 @@ does not read them, except the kernel hinge's shape keys and `L_conv`'s source k
 | `L_S` | the structure-factor shells `0 < k <= k_fit_stat`: the model's `H(k)` against `kB T S(k)^-1` (on the row's active block `S_PP(k)`, beyond two channels) |
 | `L_bulk` | `k = 0`: `S_cc(0) = kB T z^T H(0)^-1 z / rho_tot` against the measured value; beyond two channels the `m x m` block `kB T Z^T H_PP(0)^-1 Z / rho_tot`, scored `norm(R S_cc R - I)^2` with `R = S_target^-1/2` (`s_metric`) |
 | `L_P` | the pressure `P = mu . rho - f` against the equation-of-state table, relative to `max(abs(P_target), pressure_floor)` |
-| `L_conv` | the hinge `lambda_min(H) >= conv_margin` at points drawn in the trust domain; or, with `conv_states="anchors"`, `lambda_min(H(k)) >= conv_margin` on each single-phase anchor row's active block at every `k` of a declared line (Penalties) |
+| `L_conv` | the hinge `lambda_min(H) >= conv_margin` at points drawn in the trust domain; or, with `conv_states="anchors"`, `lambda_min(H(k)) >= conv_margin` on each single-phase anchor row's active block at every `k` of a declared line (see Penalties) |
 | `L_Gamma` | the hinge `d^2 Gamma / dx^2 >= 0` along the measured equation-of-state paths |
 | `L_W` | the kernel hinge `lambda_min(W(k) - W(0)) >= margin + kappa k^2` on `n_k` wavenumbers `linspace(k_max / n_k, k_max, n_k)`, scored `mean(relu(margin + kappa k^2 - lambda_min)^2)`; two channels take the closed-form smallest eigenvalue (of a symmetric kernel). Why: the floor gives the kernel a positive square-gradient stiffness at every k, so instability can only start at k = 0, and with `W(k_max) ~ 0` it pins `W(0) <= -kappa k_max^2` (about -18 for the Fe-B declaration), the attractive kernel that carries the miscibility gap. It is not an optional regulariser: weighed at 0, Fe-B loses its gap |
 
@@ -302,7 +302,7 @@ anchor tables measured single phase:
 | key | meaning |
 |---|---|
 | `conv_states` | `"trust_domain"` (absent: the points drawn above) or `"anchors"` |
-| `conv_k` | `(n_k, k_max)`, required with `"anchors"`: the line `linspace(0, k_max, n_k)`, `n_k >= 2`; refused with `"trust_domain"` |
+| `conv_k` | `(n_k, k_max)`, required with `"anchors"`: the line `linspace(0, k_max, n_k)`, `n_k >= 2` a whole number, kept as a list; refused with `"trust_domain"` |
 
 With `"anchors"`, on every `anchor_bulk` row (the rows the phase gate kept; rows with fewer than two
 species present are not bulk rows) and every `k` of the line, `k = 0` included,
@@ -313,8 +313,8 @@ scored by `conv_penalty` exactly as on the trust domain (`hinge`, `hinge0`, `sof
 `viol_frac` and `lam_worst`, `viol_frac` counting `lambda_min < 0`), the mean over rows and wavenumbers.
 `PP` is the row's active principal block: rows are grouped by active pattern and each block is taken at
 its own size, never padded, since an exactly absent channel carries no ideal stiffness in the model
-(`rho_eps` clamps its density) and a full-matrix minimum would read that channel. At two channels,
-whose tables carry no `active` column, a channel is active where its density is positive. The
+(`rho_eps` clamps its density) and a full-matrix minimum would read that channel. Tables without an
+`active` column (the two-channel form) count a channel active where its density is positive. The
 condition holds for any equilibrium single-phase state (`S(k)` finite and positive at every `k`), so
 it only removes a model that is unstable where the measurement says the liquid is not; it constrains
 the total-number direction at finite `k`, which a number-conserving kernel hinge leaves free.
@@ -327,8 +327,12 @@ next ones the evaluator's table, as `L_bulk` and `L_S` do. A kernel evaluated as
 has no `W(k)` on a bare wavenumber, is refused, and so is a run that loads no anchor tables
 (`anchors=NO_ANCHORS`, `aipf train --anchors none`, no `tables` declared, before the run directory
 exists) or tables without a bulk row. No point is drawn, so `penalty_seed` is needed only for
-`L_Gamma`; `conv_samples` and `conv_T_measure` are not read. `MANIFEST.json` records the line and
-the row count under `penalties["conv_states"]`. The trust-domain `L_conv` and `L_Gamma` are as above.
+`L_Gamma`; `conv_samples` and `conv_T_measure` are not read. As for the kernel hinge, `W(k)` is flat
+beyond `kernel_k_table_max`, so a line past it repeats its last slice. `MANIFEST.json` records the line
+and the row count under `penalties["conv_states"]`, and each step logs `train/L_conv_viol_frac` and
+`train/L_conv_lam_worst` (in `steps.json`, `L_conv/viol_frac` and `L_conv/lam_worst`). A
+two-dimensional model is refused as for the trust-domain `L_conv`. The trust-domain `L_conv` and
+`L_Gamma` are as above.
 
 ## Starting weights
 

@@ -298,3 +298,10 @@ def test_the_demo_system_without_a_hinge_has_no_hinge_key(tmp_path):
     system, _ = _demo_system_with_modes(tmp_path)
     extra = TrainConfig(**_config_from_system(system)).extra_experiment_config
     assert not set(extra) & set(OPTIONAL_KEYS)
+
+
+def test_a_float64_basis_reduces_a_float32_kernel_in_the_kernels_dtype():
+    D = torch.from_numpy(_random_symmetric(3, 4, seed=3)).float()
+    k = torch.linspace(0.5, 2.0, 4)
+    loss = l_w(D, k, kappa=0.5, margin=3.0, basis=number_conserving_basis(3))
+    assert loss.dtype == torch.float32 and float(loss) > 0.0

@@ -70,6 +70,7 @@ def l_w(D: torch.Tensor, k: torch.Tensor, *, kappa: float,
         eigmin = (eigmin_sym2(D) if D.shape[-1] == 2
                   else torch.linalg.eigvalsh(D)[..., 0])
     else:
+        basis = basis.to(dtype=D.dtype, device=D.device)
         R = basis.transpose(-1, -2) @ D @ basis
         m = R.shape[-1]
         eigmin = (R[..., 0, 0] if m == 1 else eigmin_sym2(R) if m == 2

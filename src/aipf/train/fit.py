@@ -441,7 +441,8 @@ def _dimension_refusals(system: System, ndim: int, cfg: TrainConfig,
                 "the anchor tables are three-dimensional only and this system declares them: "
                 "train a two-dimensional model with the drift term alone, anchors=NO_ANCHORS "
                 "(aipf train --anchors none)")
-        if (float(cfg.lambda_conv) != 0.0 and system.trust_domain is not None) or \
+        if (float(cfg.lambda_conv) != 0.0 and (system.trust_domain is not None
+                                               or conv_states(cfg) == "anchors")) or \
                 (float(cfg.lambda_gamma) != 0.0 and "gamma_paths" in block):
             lines.append(
                 "the convexity and Gamma-path penalties are three-dimensional only and this "
@@ -734,6 +735,12 @@ class _MultiSourceDriver(LitModule):
                 self.log(f"train/{name}", value.detach(), on_step=False,
                          on_epoch=True)
                 step_terms[name] = float(value.detach())
+            if conv is not None and self._penalties.reads_anchors:
+                # what the anchor-state L_conv found this step: the fraction of (row, k) pairs with
+                # lambda_min < 0 and the smallest lambda_min
+                for key, value in conv[1].items():
+                    self.log(f"train/L_conv_{key}", value, on_step=False, on_epoch=True)
+                    step_terms[f"L_conv/{key}"] = float(value)
         if self._hinge is not None:
             # once per step: the hinge reads the kernel alone
             hinge = self._hinge.loss(self.model)
@@ -888,7 +895,6 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     cfg = TrainConfig(**{**_config_from_system(system), "seed": int(seed),
                          **dict(config_overrides or {})})
     _check_bulk_residual(system, cfg, anchors)
-    _check_conv_states(system, cfg, anchors)
 
     # the model is built under the run's own model stream, forked from the global one and restored
     with seeded_rng(cfg.seed_for("model")):
@@ -900,6 +906,8 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     if projection is not None or model_ndim(model) != 3 or any(
             len(getattr(s, "grid", (0, 0, 0))) != 3 for s in sources):
         lz_ref = _refuse_dimensions(system, model_ndim(model), cfg, sources, projection, anchors)
+    # after the dimensions: a two-dimensional model is told it trains no L_conv at all
+    _check_conv_states(system, cfg, anchors)
     saved = (None if init_from is None
              else _load_weights_into(model, init_from,
                                      system.paths.raw, system, path=init_path))

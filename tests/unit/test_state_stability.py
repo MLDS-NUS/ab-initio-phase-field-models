@@ -22,7 +22,8 @@ from aipf.train.config import TrainConfig
 from aipf.train.datamodule import SourceSpec
 from aipf.train.fit import _config_from_system, fit
 from aipf.train.penalties import (STATE_KEYS, ConvexityProbe, Penalties, StateStability,
-                                  conv_states, declared_fields, penalties_from_system)
+                                  conv_line, conv_states, declared_fields,
+                                  penalties_from_system)
 
 import test_three_species_training as t3
 
@@ -285,7 +286,8 @@ def test_the_keys_map_where_a_saved_checkpoint_does_and_round_trip():
     for key in STATE_KEYS:
         assert NONLOSS_KEY_MAP_LIGHTNING[key] == "extra_experiment_config", key
     assert declared_fields({"lambda_M": 0.5}) == {}
-    assert declared_fields({**_ANCHORS, "lr": 1e-3}) == {"extra_experiment_config": _ANCHORS}
+    assert declared_fields({**_ANCHORS, "lr": 1e-3}) == {
+        "extra_experiment_config": {"conv_states": "anchors", "conv_k": [8, 3.0]}}
     cfg = hparams_to_train_config({**_ANCHORS, "lambda_conv": 1.0, "conv_margin": 0.05},
                                   weight_map=WEIGHT_MAP_A, key_map=NONLOSS_KEY_MAP_LIGHTNING,
                                   implicit_weights=IMPLICIT_WEIGHTS_A)
@@ -350,3 +352,86 @@ def test_fit_refuses_the_anchors_source_with_no_anchors_before_the_run_directory
         fit(system, run_name="refused", sources=sources, steps=1, seed=0,
             resume_optimizer=False, root=tmp_path / "data", anchors=NO_ANCHORS)
     assert not (tmp_path / "data").exists()
+
+
+# ---------------------------------------------------------------------------
+# the declared line, two channels, L_Gamma beside it, two dimensions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [(32, 3.96), [32, 3.96], (32.0, "3.96")])
+def test_the_line_is_kept_as_one_list_however_it_is_declared(value):
+    assert declared_fields({"conv_k": value}) == {"extra_experiment_config": {"conv_k": [32, 3.96]}}
+    assert conv_line(value) == (32, 3.96)
+
+
+@pytest.mark.parametrize("value", [{"n_k": 32, "k_max": 3.96}, "32,3.96", 32, (32.5, 3.96),
+                                   (32, 3.96, 1.0)])
+def test_a_line_that_is_not_two_numbers_is_refused_naming_the_key(value):
+    with pytest.raises(ValueError, match="conv_k"):
+        conv_line(value)
+
+
+def _two_channel(tmp_path):
+    import test_train_anchors as ta
+    import test_train_penalties as tp
+
+    ta._write_tables(tmp_path / "tier")
+    tp._eos_csv(tmp_path / "eos" / "eos.csv")
+    system = ta._demo(tmp_path)
+    training = {"penalty_seed": 7, "tables": ta._declared(), "gamma_paths": {
+        "eos_csvs": {0.0: "eos/eos.csv"},
+        "eos_columns": {"x_column": "x_B", "T_column": "T_K", "n_columns": ("n",),
+                        "status_column": "status", "status_ok": "ok"},
+        "x_grid": (0.1, 0.9, 0.05), "poly_degree": 2, "T_measure": "uniform", "q_floor": 1e-6}}
+    system = dataclasses.replace(system, defaults={**system.defaults, "training": training})
+    return system, AnchorTables.load(system, **ta._declared())
+
+
+def test_two_channel_scalar_tables_read_the_full_block_through_the_batch(tmp_path):
+    system, tables = _two_channel(tmp_path)
+    assert tables.bulk_active is None and tables.rows()["anchor_bulk"] == 3
+    torch.manual_seed(0)
+    model = build(system)
+    probe = StateStability.from_tables(tables, n_k=5, k_max=3.0, form="hinge", margin=1e6)
+    bulk = tables.batch(model, 1.0, curvature=True)["anchor_bulk"]
+    lam, rows, k = probe.eigmin(model, bulk)
+    assert rows.tolist() == [0, 1, 2]
+    local = bulk["curvature"].detach().double().numpy()
+    W = model.kernel.w_hat(k).detach().double().numpy()
+    H0 = bulk["H0"].detach().double().numpy()
+    for r in range(3):
+        want = [np.linalg.eigvalsh(0.5 * (H0[r] + H0[r].T))[0]]
+        want += [np.linalg.eigvalsh(0.5 * ((local[r] + W[q]) + (local[r] + W[q]).T))[0]
+                 for q in range(1, 5)]
+        assert np.allclose(lam[r].detach().numpy(), want, rtol=1e-5, atol=1e-6)
+    loss, _ = probe.loss(model, bulk)
+    loss.backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert float(loss) > 0.0 and grads and all(bool(torch.isfinite(g).all()) for g in grads)
+
+
+def test_beside_l_gamma_the_seed_is_gammas_and_its_draws_are_its_own(tmp_path):
+    system, tables = _two_channel(tmp_path)
+    both = TrainConfig(lambda_conv=1.0, lambda_gamma=1.0, gamma_pt_samples=3,
+                       extra_experiment_config=_ANCHORS)
+    with pytest.raises(KeyError, match=r"\['L_Gamma'\]"):
+        penalties_from_system(system, both, tables)
+    seeded = dataclasses.replace(both, penalty_seed=7)
+    penalties = penalties_from_system(system, seeded, tables)
+    assert penalties.terms() == ("L_conv", "L_Gamma") and penalties.reads_anchors
+    alone = penalties_from_system(system, dataclasses.replace(seeded, lambda_conv=0.0), tables)
+    c, g = penalties.draw()
+    _, g_alone = alone.draw()
+    assert c is None and torch.equal(g.n_path, g_alone.n_path) and torch.equal(g.T, g_alone.T)
+
+
+def test_a_two_dimensional_model_is_told_it_trains_no_l_conv(tmp_path):
+    from aipf.train.fit import _dimension_refusals
+
+    system, _ = _two_channel(tmp_path)
+    system = dataclasses.replace(system, trust_domain=None)
+    lines = _dimension_refusals(system, 2, _cfg(), (), "mean", NO_ANCHORS)
+    assert any("convexity" in line for line in lines), lines
+    assert not any("convexity" in line for line in
+                   _dimension_refusals(system, 2, TrainConfig(lambda_conv=1.0), (), "mean",
+                                       NO_ANCHORS))

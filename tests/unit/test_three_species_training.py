@@ -368,6 +368,7 @@ def test_one_step_with_the_subspace_hinge_and_the_anchor_state_penalty(toy, tmp_
                 "L_W": weights["lambda_wpsd"], "L_conv": weights["lambda_conv"]}
     # a margin of 100 is violated on every row, so the penalty is active
     assert step["L_conv"] > 0.0
+    assert 0.0 <= step["L_conv/viol_frac"] <= 1.0 and np.isfinite(step["L_conv/lam_worst"])
     contributions = [w * step[name] for name, w in weighted.items() if step[name] > 0.0]
     expected = step["L_dyn"] + sum(w * step[name] for name, w in weighted.items())
     assert steps["loss"][0] == pytest.approx(expected, rel=0.0, abs=0.1 * min(contributions))

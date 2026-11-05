@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -47,7 +47,21 @@ def declared_fields(declared: Mapping[str, Any]) -> Dict[str, Any]:
     it declares none: ``extra_experiment_config`` holding whichever of :data:`STATE_KEYS` it declares,
     as :func:`aipf.train.kernel_hinge.declared_fields` keeps the hinge's shape."""
     keys = {key: declared[key] for key in STATE_KEYS if key in declared}
+    if "conv_k" in keys:
+        keys["conv_k"] = list(conv_line(keys["conv_k"]))
     return {"extra_experiment_config": keys} if keys else {}
+
+
+def conv_line(value: Any) -> Tuple[int, float]:
+    """A declared ``conv_k`` as ``(n_k, k_max)``: a sequence of two numbers, ``n_k`` a whole one; anything
+    else is refused naming the key (a mapping, a string, a fractional ``n_k``)."""
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence) \
+            or len(value) != 2:
+        raise ValueError(f"conv_k={value!r}: declare the line as (n_k, k_max), two numbers")
+    n_k, k_max = value
+    if isinstance(n_k, bool) or float(n_k) != int(float(n_k)):
+        raise ValueError(f"conv_k={value!r}: n_k={n_k!r} counts wavenumbers, a whole number")
+    return int(float(n_k)), float(k_max)
 
 
 def conv_states(cfg: TrainConfig) -> str:
@@ -426,7 +440,7 @@ def penalties_from_system(system: System, cfg: TrainConfig,
                 f"system {system.name!r} trains L_conv with conv_states='anchors' and declares no "
                 f"conv_k = (n_k, k_max), the wavenumber line it reads: this package has no "
                 f"default for it")
-        n_k, k_max = extra["conv_k"]
+        n_k, k_max = conv_line(extra["conv_k"])
         conv = StateStability.from_tables(anchors, n_k=n_k, k_max=k_max,
                                           form=str(cfg.conv_penalty),
                                           margin=float(cfg.conv_margin))
@@ -465,5 +479,5 @@ def penalties_from_system(system: System, cfg: TrainConfig,
 
 
 __all__ = ["CONV_STATES", "ConvexityProbe", "GammaPaths", "PathDraw", "Penalties",
-           "PENALTY_TERMS", "STATE_KEYS", "StateStability", "conv_states", "declared_fields",
+           "PENALTY_TERMS", "STATE_KEYS", "StateStability", "conv_line", "conv_states", "declared_fields",
            "penalties_from_system"]
