@@ -412,3 +412,102 @@ def test_a_fit_trains_the_inverse_form_and_its_checkpoint_records_it(tmp_path):
     ck = torch.load(run / "final.ckpt", map_location="cpu", weights_only=False)
     assert ck["config"]["bulk_residual"] == "s_metric_inverse"
     assert TrainConfig.from_dict(ck["config"]).bulk_residual == "s_metric_inverse"
+
+
+# ---------------------------------------------------------------------------
+# several absent channels: every pattern of n = 4 and n = 5 in one batch
+# ---------------------------------------------------------------------------
+def _loader_rows(x, active):
+    """``(zvec, zmask)`` exactly as ``anchors._bulk_block_rows`` builds them: the independent species are
+    the first ``m`` present ones in channel order, ``z_j = e_i - x_i a``, ``zmask`` the prefix of ``m``."""
+    n_rows, n = active.shape
+    zvec = np.zeros((n_rows, n, n - 1))
+    zmask = np.zeros((n_rows, n - 1), dtype=bool)
+    for r in range(n_rows):
+        a = active[r].astype(np.float64)
+        independent = np.nonzero(active[r])[0][:-1]
+        for j, i in enumerate(independent):
+            zvec[r, :, j] = -x[r, i] * a
+            zvec[r, i, j] += 1.0
+        zmask[r, :independent.size] = True
+    return torch.from_numpy(zvec), torch.from_numpy(zmask)
+
+
+def _every_pattern(n):
+    import itertools
+    return np.array([p for p in itertools.product([False, True], repeat=n) if sum(p) >= 2])
+
+
+def _numpy_inverse_form(H, kBT, rho, x, active, target):
+    """``||T inv(S_model) T - I||_F^2`` on the row's active block, by direct inversion (independent of
+    the Schur route)."""
+    p = np.nonzero(active)[0]
+    m = p.size - 1
+    a = np.ones(p.size)
+    Z = np.stack([np.eye(p.size)[j] - x[p[j]] * a for j in range(m)], axis=-1)
+    S = kBT / rho * Z.T @ np.linalg.inv(H[np.ix_(p, p)]) @ Z
+    w, v = np.linalg.eigh(target[:m, :m])
+    T = v @ np.diag(np.sqrt(w)) @ v.T
+    return np.sum((T @ np.linalg.inv(S) @ T - np.eye(m)) ** 2)
+
+
+@pytest.mark.parametrize("n", [4, 5])
+@pytest.mark.parametrize("spd", [True, False])
+def test_every_active_pattern_with_several_absent_channels_in_one_batch(n, spd):
+    active = _every_pattern(n)
+    assert len(active) == {4: 11, 5: 26}[n]
+    assert (active.sum(-1) <= n - 2).any()                  # rows with two or more padded columns
+    P = len(active)
+    rng = np.random.default_rng(100 * n + spd)
+    x = (0.1 + rng.random((P, n))) * active
+    x = x / x.sum(-1, keepdims=True)
+    zvec, zmask = _loader_rows(x, active)
+    H = np.empty((P, n, n))
+    target = np.tile(np.eye(n - 1), (P, 1, 1))
+    for r in range(P):
+        p = np.nonzero(active[r])[0]
+        m = p.size - 1
+        V = np.linalg.qr(rng.standard_normal((p.size, p.size)))[0]
+        lam = 0.5 + 2.5 * rng.random(p.size)
+        if not spd:
+            lam[::2] *= -1.0                                 # indefinite, |eigenvalue| >= 0.5
+        block = V @ np.diag(lam) @ V.T
+        H[r] = 1e6 * rng.standard_normal((n, n))             # garbage off the active block
+        H[r][np.ix_(p, p)] = block
+        a = rng.standard_normal((m, m))
+        target[r, :m, :m] = 0.05 * (a @ a.T + m * np.eye(m))
+    kBT = 0.5 + rng.random(P)
+    rho = 0.5 + rng.random(P)
+    w = 0.1 + rng.random(P)
+    act_t = torch.from_numpy(active)
+    target_t = torch.from_numpy(target)
+    root = torch.eye(n - 1, dtype=_F64).repeat(P, 1, 1)
+    for r in range(P):
+        m = int(zmask[r].sum())
+        root[r, :m, :m] = spd_root(target_t[r, :m, :m])
+    H_t = torch.from_numpy(H).requires_grad_(True)
+    kBT_t, rho_t, w_t = (torch.from_numpy(v) for v in (kBT, rho, w))
+
+    # Q nonsingular on every row: the stiffness is finite, the identity beyond m
+    K = concentration_stiffness(_principal_block(H_t.detach(), _pairs(act_t)), zvec, act_t, zmask)
+    assert bool(torch.isfinite(K).all())
+    for r in range(P):
+        m = int(zmask[r].sum())
+        assert torch.equal(K[r, m:, m:], torch.eye(n - 1 - m, dtype=_F64))
+        assert float(K[r, :m, m:].abs().sum() + K[r, m:, :m].abs().sum()) == 0.0
+
+    per = _per_row(H_t.detach(), kBT_t, zvec, rho_t, target_t, target_root=root,
+                   active=act_t, zmask=zmask)
+    for r in range(P):
+        want = _numpy_inverse_form(H[r], kBT[r], rho[r], x[r], active[r], target[r])
+        assert float(per[r]) == pytest.approx(want, rel=1e-8), (r, active[r])
+
+    loss = l_bulk(H_t, kBT_t, zvec, rho_t, target_t, residual="s_metric_inverse",
+                  target_root=root, active=act_t, zmask=zmask, row_weight=w_t)
+    assert bool(torch.isfinite(loss))
+    assert float(loss) == pytest.approx(float((w_t * per).sum() / w_t.sum()), rel=1e-12)
+    loss.backward()
+    assert bool(torch.isfinite(H_t.grad).all())
+    outside = ~(act_t[:, :, None] & act_t[:, None, :])
+    assert float(H_t.grad[outside].abs().sum()) == 0.0
+    assert float(H_t.grad[~outside].abs().sum()) > 0.0
