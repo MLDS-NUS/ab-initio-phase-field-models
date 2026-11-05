@@ -149,7 +149,7 @@ read from the top level of `defaults`, then from `defaults["training"]`, which w
 | `lambda_dyn` | `1.0` | `L_dyn` |
 | `lambda_M`, `lambda_S`, `lambda_bulk`, `lambda_P`, `lambda_conv`, `lambda_gamma`, `lambda_W` | `0.0` | the other terms; `0.0` is off |
 | `stat_metric` | `rel_frob` | or `s_metric` |
-| `bulk_residual` | `relative_inverse` | or `sigma_chi2` (two channels); `s_metric` (the concentration block, three or more) |
+| `bulk_residual` | `relative_inverse` | or `sigma_chi2` (two channels); `s_metric` or `s_metric_inverse` (the concentration block, three or more) |
 | `conv_penalty`, `conv_margin`, `conv_samples`, `gamma_pt_samples` | `hinge`, `0.0`, `0`, `0` | `conv_penalty` one of `hinge`, `hinge0`, `softplus` |
 | `penalty_seed` | `None` | the penalty probes' stream; required when a penalty is trained |
 | `source_loss_weights` | `{}` | the drift weight per source name (1.0 when a name is absent) |
@@ -174,7 +174,7 @@ does not read them, except the kernel hinge's shape keys and `L_conv`'s source k
 | `L_dyn` | the weak-form drift residual, `sum(band (alpha r^2 + (1 - alpha) r^2 / (k^2 + eps))) / n_band`, a batch mean over the band `0 < k <= k_max` |
 | `L_M` | the mobility anchor, `norm(M_pred - M_target)^2 / norm(M_target)^2` per row (Frobenius norms; over the row's active block, beyond two channels) |
 | `L_S` | the structure-factor shells `0 < k <= k_fit_stat`: the model's `H(k)` against `kB T S(k)^-1` (on the row's active block `S_PP(k)`, beyond two channels) |
-| `L_bulk` | `k = 0`: `S_cc(0) = kB T z^T H(0)^-1 z / rho_tot` against the measured value; beyond two channels the `m x m` block `kB T Z^T H_PP(0)^-1 Z / rho_tot`, scored `norm(R S_cc R - I)^2` with `R = S_target^-1/2` (`s_metric`) |
+| `L_bulk` | `k = 0`: `S_cc(0) = kB T z^T H(0)^-1 z / rho_tot` against the measured value; beyond two channels the `m x m` block `kB T Z^T H_PP(0)^-1 Z / rho_tot`, scored `norm(R S_cc R - I)^2` with `R = S_target^-1/2` (`s_metric`), or in stiffness space `norm(T S_cc^-1 T - I)^2` with `T = S_target^1/2` (`s_metric_inverse`) |
 | `L_P` | the pressure `P = mu . rho - f` against the equation-of-state table, relative to `max(abs(P_target), pressure_floor)` |
 | `L_conv` | the hinge `lambda_min(H) >= conv_margin` at points drawn in the trust domain; or, with `conv_states="anchors"`, `lambda_min(H(k)) >= conv_margin` on each single-phase anchor row's active block at every `k` of a declared line (see Penalties) |
 | `L_Gamma` | the hinge `d^2 Gamma / dx^2 >= 0` along the measured equation-of-state paths |
@@ -272,14 +272,29 @@ drops no shell), and `L_bulk` on
 
 with `a` the row's active indicator, so `z_i` vanishes on an absent channel and is `(x_1, -(1 - x_1))`
 at two channels. The block is scored `norm(R S_cc(0) R - I)^2` over its `m x m` entries, with
-`R = S_target^-1/2` fixed at load; `bulk_residual` is then `s_metric`, and `bulk_sigma`, `bulk_ok` are
-`None` (they are refused). Why the principal block and not the full `H^-1`: the true ideal term
+`R = S_target^-1/2` fixed at load (`bulk_residual: s_metric`), or `norm(T S_cc(0)^-1 T - I)^2` with
+`T = S_target^1/2`, also fixed at load (`bulk_residual: s_metric_inverse`); `bulk_sigma`, `bulk_ok` are
+`None` (they are refused). Both take the same row weights, active blocks and independent species. Why
+the principal block and not the full `H^-1`: the true ideal term
 `kB T / rho` of an absent channel is infinite, and in that limit the absent channel's block of `H^-1`
 vanishes, leaving `(H_PP)^-1`. The model's own `H` cannot carry that limit: its ideal term clamps the
 density at `rho_eps`, so on a channel that is exactly absent it carries no ideal stiffness at all. The
 manifold reads
 every ok row, pure ones too, as `rho = n (x_1, ..., x_n)`; fractions that do not sum to one within
 `1e-6` are refused, naming the line.
+
+`s_metric_inverse` compares stiffnesses, as `relative_inverse` does at two channels, and is that residual
+at `m = 1`. `s_metric` has a barrier where `H_PP(0)` turns singular along a concentration direction
+(`S_cc -> infinity`), and past it, with a negative concentration stiffness, a plateau: `S_cc -> 0-`, the
+residual tends to `m` and its gradient to zero. `s_metric_inverse` is smooth through that point:
+
+    S_cc(0)^-1 = (rho_tot / kB T) (Z^T H_PP^-1 Z)^-1 = (rho_tot / kB T) (A_ZZ - A_Zu A_uu^-1 A_uZ),
+    A = Q^-1 H_PP Q^-T,  Q = [Z  1_P],
+
+a Schur complement that inverts no `H`, only the fixed basis `Q` (`det Q = +-1`: `1_P` is outside
+`span Z` whatever the fractions) and the scalar `A_uu = x^T H_PP x`, the total-number stiffness
+(`aipf.losses.static.concentration_stiffness`). It fails only where `A_uu = 0`, a mechanical
+instability.
 
 `key: "temperature"`, one channel, one row per temperature at one declared state (feeds `L_M` and
 `L_bulk`): `m_table`, `s_table` (paths), `state` (the composition), `rho_total`, `w0`, and `columns`
