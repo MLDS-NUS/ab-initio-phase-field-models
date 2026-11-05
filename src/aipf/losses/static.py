@@ -3,12 +3,15 @@
 ``L_S`` acts on shells ``0 < k <= k_fit`` (masked mean over padded shells); ``L_bulk`` is ``k = 0``
 through ``S_cc(0) = k_BT . z^T H(0)^-1 z / rho_tot``, a scalar for two channels and the
 ``(n-1) x (n-1)`` concentration block ``k_BT . Z^T H_PP(0)^-1 Z / rho_tot`` beyond. The ``L_bulk``
-residual form is declared."""
+residual form is declared: the block is scored in ``S`` space (``"s_metric"``) or in stiffness space,
+``S^-1`` (``"s_metric_inverse"``, the block's ``"relative_inverse"``)."""
 from __future__ import annotations
 
 import torch
 
-_RESIDUAL_FORMS = ("relative_inverse", "sigma_chi2", "s_metric")
+_RESIDUAL_FORMS = ("relative_inverse", "sigma_chi2", "s_metric", "s_metric_inverse")
+#: The forms that score the concentration block of a matrix batch; the others score one ``S_cc(0)``.
+_BLOCK_FORMS = ("s_metric", "s_metric_inverse")
 
 
 def sinv_rootinv(Sinv: torch.Tensor) -> torch.Tensor:
@@ -17,6 +20,14 @@ def sinv_rootinv(Sinv: torch.Tensor) -> torch.Tensor:
     evals, evecs = torch.linalg.eigh(Sinv)
     inv_root = evals.clamp(min=1e-12).rsqrt()
     return evecs @ torch.diag_embed(inv_root) @ evecs.transpose(-1, -2)
+
+
+def spd_root(S: torch.Tensor) -> torch.Tensor:
+    """Symmetric square root ``V diag(lambda^1/2) V^T``, so ``root . root = S``; eigenvalues floored at
+    0. The counterpart of :func:`sinv_rootinv`, for the ``"s_metric_inverse"`` residual's ``S_t^1/2``."""
+    evals, evecs = torch.linalg.eigh(S)
+    root = evals.clamp(min=0.0).sqrt()
+    return evecs @ torch.diag_embed(root) @ evecs.transpose(-1, -2)
 
 
 def _pairs(active: torch.Tensor) -> torch.Tensor:
@@ -87,7 +98,8 @@ def l_bulk(H0: torch.Tensor, kBT: torch.Tensor, zvec: torch.Tensor,
            clamp: float | None = None,
            target_rootinv: torch.Tensor | None = None,
            active: torch.Tensor | None = None,
-           zmask: torch.Tensor | None = None) -> torch.Tensor:
+           zmask: torch.Tensor | None = None,
+           target_root: torch.Tensor | None = None) -> torch.Tensor:
     """The k=0 bulk anchor on ``H0`` ``(P, n, n)``, ``kBT``/``rho_tot`` ``(P,)``.
 
     A scalar batch, ``zvec`` ``(P, n)`` and ``target`` ``(P,)``: ``residual`` ``"relative_inverse"``
@@ -98,17 +110,22 @@ def l_bulk(H0: torch.Tensor, kBT: torch.Tensor, zvec: torch.Tensor,
     row's ``m`` independent species), ``target`` and ``target_rootinv`` ``R = target^-1/2`` ``(P, n-1, n-1)``
     (the identity beyond ``m``), ``active`` ``(P, n)`` and ``zmask`` ``(P, n-1)`` bool. ``residual``
     ``"s_metric"`` ``||R S_model R - I||_F^2`` over the ``m x m`` block, with
-    ``S_model = kBT Z^T H_PP^-1 Z / rho_tot`` on the active principal block of ``H0``. A matrix batch under
-    a scalar residual is refused, and so is a scalar batch under ``"s_metric"``."""
+    ``S_model = kBT Z^T H_PP^-1 Z / rho_tot`` on the active principal block of ``H0``; or
+    ``"s_metric_inverse"`` ``||T S_model^-1 T - I||_F^2`` with ``T = target_root = target^1/2``
+    ``(P, n-1, n-1)`` (the identity beyond ``m``), its stiffness-space form, which is
+    ``"relative_inverse"`` at ``m = 1`` and smooth where ``H_PP`` is singular along a concentration
+    direction (:func:`concentration_stiffness`; ``jitter`` is not used there). A matrix batch under a
+    scalar residual is refused, and so is a scalar batch under either block form."""
     if residual not in _RESIDUAL_FORMS:
         raise ValueError(f"residual={residual!r}, expected one of "
                          f"{_RESIDUAL_FORMS}")
-    if residual == "s_metric" or zvec.dim() == 3:
+    if residual in _BLOCK_FORMS or zvec.dim() == 3:
         per_row = _block_residual(H0, kBT, zvec, rho_tot, target,
                                   residual=residual, sigma=sigma,
                                   jitter=jitter, clamp=clamp,
                                   target_rootinv=target_rootinv,
-                                  active=active, zmask=zmask)
+                                  active=active, zmask=zmask,
+                                  target_root=target_root)
     else:
         n = H0.shape[-1]
         eye = torch.eye(n, dtype=H0.dtype, device=H0.device)
@@ -135,32 +152,81 @@ def l_bulk(H0: torch.Tensor, kBT: torch.Tensor, zvec: torch.Tensor,
 
 
 def _block_residual(H0, kBT, zvec, rho_tot, target, *, residual, sigma,
-                    jitter, clamp, target_rootinv, active, zmask):
-    """``(P,)`` ``||R S_model R - I||_F^2`` on each row's concentration block (:func:`l_bulk`)."""
-    if residual != "s_metric":
+                    jitter, clamp, target_rootinv, active, zmask, target_root=None):
+    """``(P,)`` the block residual of each row's concentration block (:func:`l_bulk`)."""
+    if residual not in _BLOCK_FORMS:
         raise ValueError(
             f"zvec has shape {tuple(zvec.shape)}, the columns of an "
             f"(n-1) x (n-1) concentration block, and residual={residual!r} "
-            f"compares one scalar S_cc(0); declare 's_metric' for the block")
-    missing = [name for name, value in (("target_rootinv", target_rootinv),
+            f"compares one scalar S_cc(0); declare 's_metric' or "
+            f"'s_metric_inverse' for the block")
+    root_name, root = (("target_rootinv", target_rootinv) if residual == "s_metric"
+                       else ("target_root", target_root))
+    missing = [name for name, value in ((root_name, root),
                                         ("active", active), ("zmask", zmask))
                if value is None]
     if zvec.dim() != 3 or target.dim() != 3 or missing:
         raise ValueError(
-            f"residual='s_metric' compares the concentration block and needs "
+            f"residual={residual!r} compares the concentration block and needs "
             f"a matrix batch, zvec (P, n, n-1) and target (P, n-1, n-1) with "
-            f"target_rootinv, active and zmask; got zvec "
+            f"{root_name}, active and zmask; got zvec "
             f"{tuple(zvec.shape)}, target {tuple(target.shape)}"
             + (f", and no {missing}" if missing else ""))
     if sigma is not None or clamp is not None:
         raise ValueError(
-            "residual='s_metric' takes neither sigma nor clamp: the block is "
+            f"residual={residual!r} takes neither sigma nor clamp: the block is "
             "weighted by its row weights alone")
     n = H0.shape[-1]
     eye = torch.eye(n, dtype=H0.dtype, device=H0.device)
     H = _principal_block(H0, _pairs(active))
-    y = torch.linalg.solve(H + jitter * eye, zvec)            # (P, n, n-1)
-    model = (kBT / rho_tot)[:, None, None] * (zvec.transpose(-1, -2) @ y)
-    m_eye = torch.eye(model.shape[-1], dtype=model.dtype, device=model.device)
-    sq = (target_rootinv @ model @ target_rootinv - m_eye).pow(2)
+    if residual == "s_metric":
+        y = torch.linalg.solve(H + jitter * eye, zvec)            # (P, n, n-1)
+        model = (kBT / rho_tot)[:, None, None] * (zvec.transpose(-1, -2) @ y)
+        m_eye = torch.eye(model.shape[-1], dtype=model.dtype, device=model.device)
+        sq = (target_rootinv @ model @ target_rootinv - m_eye).pow(2)
+    else:
+        stiffness = (rho_tot / kBT)[:, None, None] * concentration_stiffness(
+            H, zvec, active, zmask)
+        m_eye = torch.eye(stiffness.shape[-1], dtype=stiffness.dtype,
+                          device=stiffness.device)
+        sq = (target_root @ stiffness @ target_root - m_eye).pow(2)
     return torch.where(_pairs(zmask), sq, 0.0).sum(dim=(-2, -1))
+
+
+def concentration_stiffness(H: torch.Tensor, zvec: torch.Tensor, active: torch.Tensor,
+                            zmask: torch.Tensor) -> torch.Tensor:
+    """``(P, n-1, n-1)`` ``(Z^T H^-1 Z)^-1`` on each row's ``m`` independent species, the identity beyond,
+    without inverting ``H``; ``H`` ``(P, n, n)`` is the identity outside the active block (as
+    :func:`_principal_block` leaves it), ``zvec``, ``active``, ``zmask`` as in :func:`l_bulk`.
+
+    On the active block ``Q = [Z  u]``, ``u = 1_P``, which is never in ``span Z``: ``Q`` maps the
+    coordinates ``(c, beta)`` to ``sum_i c_i (e_i - x_i 1) + beta 1``, which is ``c_i - s + beta`` on an
+    independent species ``i`` and ``beta - s`` on the dependent one (``s = sum_i c_i x_i``), and that is
+    zero only for ``c = 0``, ``beta = 0``, whatever the fractions; ``det Q = +-1``. With
+    ``A = Q^-1 H Q^-T``, ``A^-1 = Q^T H^-1 Q``, whose ``ZZ`` block is ``Z^T H^-1 Z``; so its inverse is the
+    Schur complement ``A_ZZ - A_Zu A_uu^-1 A_uZ``, a polynomial in ``H`` over the scalar ``A_uu = w^T H w``
+    (``w`` the last row of ``Q^-1``, the row's fractions when they sum to one on ``P``), the total-number
+    stiffness. It is smooth wherever ``A_uu != 0``, through any singularity of ``H`` along a concentration
+    direction. Off the active block each column beyond ``m`` is the unit vector of one absent channel,
+    so ``Q`` is invertible on every row and those entries come out as the identity."""
+    P, n, _ = zvec.shape
+    if not torch.equal(zmask.sum(-1), active.sum(-1) - 1):
+        raise ValueError(
+            "zmask marks m = (present species) - 1 independent columns on every "
+            "row; it does not here")
+    with torch.no_grad():
+        dtype = H.dtype
+        absent = ~active
+        # the columns beyond m, in order, take the absent channels' unit vectors, in channel order
+        order = torch.argsort(zmask.to(torch.int8), dim=-1, stable=True)
+        rank = (torch.cumsum(absent.to(torch.int64), dim=-1) - 1).clamp(min=0, max=n - 2)
+        col = torch.gather(order, -1, rank)                          # (P, n)
+        pad = (torch.nn.functional.one_hot(col, n - 1).to(dtype)
+               * absent.to(dtype).unsqueeze(-1))                     # (P, n, n-1)
+        Q = torch.cat([torch.where(zmask.unsqueeze(-2), zvec.to(dtype), pad),
+                       active.to(dtype).unsqueeze(-1)], dim=-1)      # (P, n, n)
+        Q_inv = torch.linalg.inv(Q)
+    A = Q_inv @ H @ Q_inv.transpose(-1, -2)
+    A_zz, A_zu = A[..., :-1, :-1], A[..., :-1, -1:]
+    A_uz, A_uu = A[..., -1:, :-1], A[..., -1:, -1:]
+    return A_zz - (A_zu @ A_uz) / A_uu

@@ -21,7 +21,7 @@ from aipf.losses.names import (
     WEIGHT_MAP_B,
 )
 from aipf.losses.pressure import l_p_absolute, l_p_variance
-from aipf.losses.static import l_bulk, l_s, sinv_rootinv
+from aipf.losses.static import l_bulk, l_s, sinv_rootinv, spd_root
 
 __all__ = [
     "CANONICAL_LOSSES",
@@ -47,4 +47,5 @@ __all__ = [
     "eigmin_sym2",
     "number_conserving_basis",
     "sinv_rootinv",
+    "spd_root",
 ]
