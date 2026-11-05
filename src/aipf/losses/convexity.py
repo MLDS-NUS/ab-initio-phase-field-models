@@ -15,7 +15,15 @@ def l_conv(H: torch.Tensor, *, form: str = "hinge",
     ``"softplus"`` ``0.02 * softplus((margin - lam) / 0.02)``."""
     if form not in _CONV_FORMS:
         raise ValueError(f"form={form!r}, expected one of {_CONV_FORMS}")
-    lam_min = torch.linalg.eigvalsh(H)[..., 0]
+    return l_conv_eigmin(torch.linalg.eigvalsh(H)[..., 0], form=form, margin=margin)
+
+
+def l_conv_eigmin(lam_min: torch.Tensor, *, form: str = "hinge",
+                  margin: float = 0.0) -> tuple[torch.Tensor, dict]:
+    """:func:`l_conv` on smallest eigenvalues the caller already took (of a principal block, say):
+    the same three forms over every entry of ``lam_min``, and the same aux."""
+    if form not in _CONV_FORMS:
+        raise ValueError(f"form={form!r}, expected one of {_CONV_FORMS}")
     if form == "hinge":
         loss = F.relu(margin - lam_min).pow(2).mean()
     elif form == "hinge0":

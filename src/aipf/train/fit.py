@@ -35,7 +35,8 @@ from .checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
                                  load_lightning_hparams_into)
 from .kernel_hinge import HINGE_TERM, KernelHinge, declared_fields as _hinge_fields
 from .lit_module import LitModule, seeded_rng
-from .penalties import PENALTY_TERMS, penalties_from_system
+from .penalties import (PENALTY_TERMS, conv_states, declared_fields as _conv_fields,
+                        penalties_from_system)
 from .projection import PROJECTIONS, archive_cells, check_projection, common_lz
 
 __all__ = ["DEVICES", "DeviceUnavailable", "DimensionMismatch", "OptimizerLayoutMismatch",
@@ -108,17 +109,20 @@ def _declared(block: Mapping[str, Any], name: str, where: str) -> Any:
 def _config_from_system(system: System) -> Dict[str, Any]:
     """Every :class:`TrainConfig` field ``system.defaults`` declares; the ``"training"`` block wins
     over the top level. The kernel hinge's keys, spelt as a saved checkpoint spells them, map as
-    :mod:`aipf.train.ckpt_compat` maps that checkpoint (:func:`aipf.train.kernel_hinge.declared_fields`)."""
+    :mod:`aipf.train.ckpt_compat` maps that checkpoint (:func:`aipf.train.kernel_hinge.declared_fields`),
+    and so do ``L_conv``'s source keys (:func:`aipf.train.penalties.declared_fields`)."""
     fields = {f.name for f in dataclasses.fields(TrainConfig)}
     out = {k: v for k, v in system.defaults.items() if k in fields}
     out.update({k: v for k, v in _training(system).items() if k in fields})
     if "source_loss_weights" in out:
         out["source_loss_weights"] = dict(out["source_loss_weights"])
-    hinge = _hinge_fields({**system.defaults, **_training(system)})
-    if "extra_experiment_config" in hinge:
-        hinge["extra_experiment_config"] = {**dict(out.get("extra_experiment_config") or {}),
-                                            **hinge["extra_experiment_config"]}
-    out.update(hinge)
+    declared = {**system.defaults, **_training(system)}
+    for mapped in (_hinge_fields(declared), _conv_fields(declared)):
+        if "extra_experiment_config" in mapped:
+            mapped["extra_experiment_config"] = {
+                **dict(out.get("extra_experiment_config") or {}),
+                **mapped["extra_experiment_config"]}
+        out.update(mapped)
     return out
 
 
@@ -222,6 +226,19 @@ def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
             f"concentration block of three or more channels is scored by "
             f"'s_metric' alone, and one S_cc(0) per row by "
             f"'relative_inverse' or 'sigma_chi2'")
+
+
+def _check_conv_states(system: System, cfg: TrainConfig, anchors) -> None:
+    """Before anything is loaded: a trained ``L_conv`` with ``conv_states="anchors"`` reads the anchor
+    tables, so a run that loads none (``NO_ANCHORS``, or a system that declares none) is refused."""
+    if not cfg.lambda_conv or conv_states(cfg) != "anchors":
+        return
+    if anchors is NO_ANCHORS or (anchors is None and _training(system).get(_TABLES_KEY) is None):
+        raise ValueError(
+            f"lambda_conv={cfg.lambda_conv!r} with conv_states='anchors' reads the anchor_bulk rows "
+            f"and this run loads no anchor tables (anchors=NO_ANCHORS, aipf train --anchors none, or "
+            f"no defaults[{_TRAINING_KEY!r}][{_TABLES_KEY!r}]): load them, or declare "
+            f"conv_states='trust_domain'")
 
 
 def _archive_keys(system: System) -> ArchiveKeys:
@@ -702,12 +719,16 @@ class _MultiSourceDriver(LitModule):
         step_terms = {"L_dyn": float(total.detach())}
         if self._anchors is not None or self._penalties is not None:
             # once per step, not per source: the anchors and the probes are grid-independent
-            conv, gamma = (self._penalties.losses(self.model)
-                           if self._penalties is not None else (None, None))
-            anchors, anchor_parts = self.compute_losses(
-                ({} if self._anchors is None
-                 else self._anchors.batch(self.model, self._anchor_kB)),
-                conv=conv, gamma=gamma)
+            if self._penalties is not None and self._penalties.reads_anchors:
+                # L_conv on the anchor states reads the bulk anchor's own curvature: one batch
+                tables = self._anchors.batch(self.model, self._anchor_kB, curvature=True)
+                conv, gamma = self._penalties.losses(self.model, anchor_batch=tables)
+            else:
+                conv, gamma = (self._penalties.losses(self.model)
+                               if self._penalties is not None else (None, None))
+                tables = ({} if self._anchors is None
+                          else self._anchors.batch(self.model, self._anchor_kB))
+            anchors, anchor_parts = self.compute_losses(tables, conv=conv, gamma=gamma)
             total = total + anchors
             for name, value in anchor_parts.items():
                 self.log(f"train/{name}", value.detach(), on_step=False,
@@ -867,6 +888,7 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     cfg = TrainConfig(**{**_config_from_system(system), "seed": int(seed),
                          **dict(config_overrides or {})})
     _check_bulk_residual(system, cfg, anchors)
+    _check_conv_states(system, cfg, anchors)
 
     # the model is built under the run's own model stream, forked from the global one and restored
     with seeded_rng(cfg.seed_for("model")):
@@ -898,8 +920,9 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     anchors = _anchors_from_system(system, anchors)
     if anchors is not None:
         lit.attach_anchors(anchors, float(_declared_constant(system, "kB")))
-    penalties = penalties_from_system(system, cfg)
+    penalties = penalties_from_system(system, cfg, anchors)
     if penalties is not None:
+        penalties.check(model)
         lit.attach_penalties(penalties)
     hinge = KernelHinge.from_config(cfg)
     if hinge is not None:

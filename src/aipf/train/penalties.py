@@ -1,20 +1,25 @@
 """The two hinge penalties' probes: points drawn from the declared ``penalty_seed``, then ``L_conv``
-on the system's trust domain and ``L_Gamma`` along its measured equation-of-state paths."""
+on the system's trust domain and ``L_Gamma`` along its measured equation-of-state paths.
+
+``L_conv`` may instead be declared on the anchor tables' single-phase states (``conv_states="anchors"``,
+:class:`StateStability`): ``lambda_min[d2 f_loc + W_hat(k)] >= conv_margin`` on each ``anchor_bulk``
+row's active block, at every ``k`` of a declared line from ``0`` on. It draws nothing."""
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import torch
 
 from aipf.data.rows import measured_rows
-from aipf.losses.convexity import gamma_on_path, l_conv, l_gamma
+from aipf.losses.convexity import gamma_on_path, l_conv, l_conv_eigmin, l_gamma
 from aipf.spectral import model_ndim, refuse_two_dimensions
 from aipf.system import System, TrustDomain
 
-from .anchors import EOS_COLUMNS, _columns, _curvature, _digest, _resolve, _w_hat_of
+from .anchors import (EOS_COLUMNS, AnchorTables, _columns, _curvature, _digest, _resolve,
+                      _w_hat_of)
 from .config import TrainConfig
 from .sampling import T_MEASURES, sample_trust_domain
 
@@ -25,6 +30,38 @@ GAMMA_PATH_KEYS: Tuple[str, ...] = (
 
 #: The two terms this module feeds, in canonical order.
 PENALTY_TERMS: Tuple[str, ...] = ("L_conv", "L_Gamma")
+
+#: Where ``L_conv`` reads its states, declared as ``conv_states``: ``"trust_domain"`` (points drawn in
+#: the system's trust domain, at ``k = 0``; the default) or ``"anchors"`` (the ``anchor_bulk`` rows, on
+#: a declared wavenumber line).
+CONV_STATES: Tuple[str, ...] = ("trust_domain", "anchors")
+
+#: The declared (and saved) spelling of ``L_conv``'s source, kept in ``extra_experiment_config`` and
+#: only when declared: ``conv_states`` (one of :data:`CONV_STATES`) and ``conv_k``, the line
+#: ``(n_k, k_max)`` the ``"anchors"`` source reads (``linspace(0, k_max, n_k)``).
+STATE_KEYS: Tuple[str, ...] = ("conv_states", "conv_k")
+
+
+def declared_fields(declared: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :class:`TrainConfig` fields the ``L_conv`` source keys of one declaration give, ``{}`` when
+    it declares none: ``extra_experiment_config`` holding whichever of :data:`STATE_KEYS` it declares,
+    as :func:`aipf.train.kernel_hinge.declared_fields` keeps the hinge's shape."""
+    keys = {key: declared[key] for key in STATE_KEYS if key in declared}
+    return {"extra_experiment_config": keys} if keys else {}
+
+
+def conv_states(cfg: TrainConfig) -> str:
+    """The declared ``conv_states`` of ``cfg``, ``"trust_domain"`` when it declares none; another
+    value is refused, and so is a ``conv_k`` without the ``"anchors"`` source, which alone reads it."""
+    extra = cfg.extra_experiment_config
+    states = extra.get("conv_states", "trust_domain")
+    if states not in CONV_STATES:
+        raise ValueError(f"conv_states={states!r} is not one of {CONV_STATES}")
+    if states != "anchors" and "conv_k" in extra:
+        raise ValueError(
+            f"conv_k={extra['conv_k']!r} is declared with conv_states={states!r}: the wavenumber "
+            f"line is read by conv_states='anchors' alone, so it would change nothing")
+    return states
 
 
 def _hessian(model, rho: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
@@ -69,6 +106,110 @@ class ConvexityProbe:
         H = _hessian(model, rho.to(device=device, dtype=dtype),
                      T.to(device=device, dtype=dtype))
         return l_conv(H, form=self.form, margin=self.margin)
+
+
+def _active_eigmin(H: torch.Tensor, active: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """``lambda_min`` of each row's active principal block of ``H`` ``(P, K, n, n)``, ``active`` ``(P, n)``
+    bool: ``(lam (R, K), rows (R,))`` in row order, rows grouped by active pattern so that every block is
+    taken at its own size (no padding). A row with fewer than two active channels is left out."""
+    lams, kept = [], []
+    for pattern in torch.unique(active, dim=0):
+        idx = torch.nonzero(pattern).flatten()
+        if idx.numel() < 2:
+            continue
+        rows = torch.nonzero((active == pattern).all(-1)).flatten()
+        block = H[rows][..., idx[:, None], idx]
+        lams.append(torch.linalg.eigvalsh(block)[..., 0])
+        kept.append(rows)
+    rows = torch.cat(kept)
+    order = torch.argsort(rows)
+    return torch.cat(lams)[order], rows[order]
+
+
+@dataclass(frozen=True)
+class StateStability:
+    """``L_conv`` on the anchor tables' single-phase states: ``lambda_min[d2 f_loc + W_hat(k)] >= margin``
+    on each ``anchor_bulk`` row's active principal block, at ``n_k`` wavenumbers ``linspace(0, k_max,
+    n_k)``. ``active`` ``(P, n)`` is the tables' ``bulk_active`` (``bulk_rho > 0`` at two channels).
+
+    The ``k = 0`` slice is the bulk anchor's own ``H0`` (its ``W_hat(0)`` route included) and every other
+    slice is the same curvature plus the ``W_hat(k)`` ``L_S`` reads (the kernel's evaluator), so the
+    penalty evaluates the model nowhere ``AnchorTables.batch`` does not already."""
+
+    n_k: int
+    k_max: float
+    form: str
+    margin: float
+    active: torch.Tensor = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if int(self.n_k) < 2:
+            raise ValueError(
+                f"conv_k n_k={self.n_k!r}: the line runs from k = 0 to k_max, at least two "
+                f"wavenumbers")
+        if not float(self.k_max) > 0.0:
+            raise ValueError(f"conv_k k_max={self.k_max!r}: the line reaches a positive k_max")
+
+    @classmethod
+    def from_tables(cls, tables: AnchorTables, *, n_k: int, k_max: float, form: str,
+                    margin: float) -> "StateStability":
+        """The probe on ``tables``' ``anchor_bulk`` rows; tables with none, or whose every row has
+        fewer than two species present, are refused."""
+        active = (tables.bulk_active if tables.bulk_active is not None
+                  else tables.bulk_rho > 0)
+        if not int((active.sum(-1) >= 2).sum()):
+            raise ValueError(
+                f"conv_states='anchors' reads the anchor_bulk rows and these tables have "
+                f"{int(tables.bulk_rho.shape[0])}, none with two species present: declare "
+                f"conv_states='trust_domain', or tables that keep single-phase bulk rows")
+        return cls(n_k=int(n_k), k_max=float(k_max), form=str(form), margin=float(margin),
+                   active=active.detach().clone())
+
+    def wavenumbers(self, *, dtype: torch.dtype,
+                    device: torch.device | str | None = None) -> torch.Tensor:
+        """``linspace(0, k_max, n_k)``, made in ``dtype``."""
+        return torch.linspace(0.0, self.k_max, int(self.n_k), dtype=dtype, device=device)
+
+    @staticmethod
+    def check(model) -> None:
+        """Refuse a model whose ``W_hat`` the line cannot read: a two-dimensional one, and a kernel
+        evaluated as a lattice sum (it needs a grid and a box, which a wavenumber line has not)."""
+        refuse_two_dimensions(model_ndim(model), "the stability penalty (conv_states='anchors')")
+        if getattr(getattr(getattr(model, "kernel", None), "evaluator", None),
+                   "reads_geometry", False):
+            raise NotImplementedError(
+                "conv_states='anchors' reads W_hat(k) on a wavenumber line, as L_S does, and this "
+                "kernel's W_hat reads a grid and a box: declare conv_states='trust_domain'")
+
+    def eigmin(self, model, bulk: Mapping[str, Any]) -> Tuple[torch.Tensor, torch.Tensor,
+                                                                torch.Tensor]:
+        """``(lam (R, n_k), rows (R,), k (n_k,))`` on one step's ``anchor_bulk`` entry, built with
+        ``AnchorTables.batch(..., curvature=True)``; ``H`` is symmetrised before its blocks are read."""
+        if "curvature" not in bulk:
+            raise KeyError(
+                "conv_states='anchors' reads the bulk anchor's curvature: build the batch with "
+                "AnchorTables.batch(model, kB, curvature=True)")
+        local, H0 = bulk["curvature"], bulk["H0"]
+        if local.shape[0] != self.active.shape[0]:
+            raise ValueError(
+                f"the anchor_bulk entry has {local.shape[0]} rows and this probe was built on "
+                f"{self.active.shape[0]}: build it from the tables the batch came from")
+        k = self.wavenumbers(dtype=local.dtype, device=local.device)
+        W = _w_hat_of(model)(k[1:])                                   # (n_k - 1, n, n)
+        H = torch.cat([H0.unsqueeze(1), local.unsqueeze(1) + W], dim=1)   # (P, n_k, n, n)
+        H = 0.5 * (H + H.transpose(-1, -2))
+        lam, rows = _active_eigmin(H, self.active.to(H.device))
+        return lam, rows, k
+
+    def loss(self, model, bulk: Mapping[str, Any]) -> Tuple[torch.Tensor, dict]:
+        """:func:`~aipf.losses.convexity.l_conv_eigmin` over every row and wavenumber of the line."""
+        lam, _rows, _k = self.eigmin(model, bulk)
+        return l_conv_eigmin(lam, form=self.form, margin=self.margin)
+
+    def provenance(self) -> Dict[str, Any]:
+        """What ``MANIFEST.json`` records under ``penalties["conv_states"]``."""
+        return {"states": "anchors", "n_k": int(self.n_k), "k_max": float(self.k_max),
+                "rows": int((self.active.sum(-1) >= 2).sum())}
 
 
 @dataclass(frozen=True)
@@ -201,45 +342,95 @@ class GammaPaths:
 
 
 class Penalties:
-    """Both probes on one generator seeded by the declared ``penalty_seed``; ``conv`` draws first."""
+    """Both probes on one generator seeded by the declared ``penalty_seed``; ``conv`` draws first.
+    A :class:`StateStability` ``conv`` draws nothing and reads the step's anchor batch instead; with no
+    probe that draws, ``seed`` may be ``None``."""
 
-    def __init__(self, seed: int, conv: Optional[ConvexityProbe],
+    def __init__(self, seed: Optional[int],
+                 conv: Optional[Union[ConvexityProbe, StateStability]],
                  gamma: Optional[GammaPaths]) -> None:
         if conv is None and gamma is None:
             raise ValueError("Penalties with neither probe trains nothing")
-        self.seed = int(seed)
         self.conv = conv
         self.gamma = gamma
-        self.generator = torch.Generator().manual_seed(self.seed)
+        if seed is None and (gamma is not None or isinstance(conv, ConvexityProbe)):
+            raise ValueError("a probe that draws points needs a penalty_seed")
+        self.seed = None if seed is None else int(seed)
+        self.generator = (None if self.seed is None
+                          else torch.Generator().manual_seed(self.seed))
+
+    @property
+    def reads_anchors(self) -> bool:
+        """Whether ``L_conv`` reads the step's anchor batch (``conv_states="anchors"``)."""
+        return isinstance(self.conv, StateStability)
 
     def terms(self) -> Tuple[str, ...]:
         fed = (self.conv is not None, self.gamma is not None)
         return tuple(name for name, on in zip(PENALTY_TERMS, fed) if on)
 
+    def check(self, model) -> None:
+        """Refuse, before training, a model the anchors-sourced ``L_conv`` cannot read."""
+        if self.reads_anchors:
+            self.conv.check(model)
+
     def draw(self):
         """This step's points, ``(conv points or None, PathDraw or None)``."""
-        c = None if self.conv is None else self.conv.draw(self.generator)
+        c = (None if self.conv is None or self.reads_anchors
+             else self.conv.draw(self.generator))
         g = None if self.gamma is None else self.gamma.draw(self.generator)
         return c, g
 
-    def losses(self, model, draws=None):
-        """``(conv pair or None, gamma pair or None)`` on ``draws``, or on a fresh :meth:`draw`."""
+    def losses(self, model, draws=None, *, anchor_batch: Optional[Mapping[str, Any]] = None):
+        """``(conv pair or None, gamma pair or None)`` on ``draws``, or on a fresh :meth:`draw`; an
+        anchors-sourced ``L_conv`` reads ``anchor_batch["anchor_bulk"]``, built with
+        ``curvature=True``."""
         c, g = self.draw() if draws is None else draws
-        return (None if c is None else self.conv.loss(model, c),
-                None if g is None else self.gamma.loss(model, g))
+        if self.reads_anchors:
+            if anchor_batch is None or "anchor_bulk" not in anchor_batch:
+                raise ValueError(
+                    "conv_states='anchors' reads this step's anchor_bulk entry and none was given: "
+                    "pass anchor_batch=AnchorTables.batch(model, kB, curvature=True)")
+            conv = self.conv.loss(model, anchor_batch["anchor_bulk"])
+        else:
+            conv = None if c is None else self.conv.loss(model, c)
+        return conv, None if g is None else self.gamma.loss(model, g)
 
     def provenance(self) -> Dict[str, Any]:
-        return {"penalty_seed": self.seed, "terms": list(self.terms()),
-                "gamma": (None if self.gamma is None
-                          else dict(self.gamma.provenance))}
+        out = {"penalty_seed": self.seed, "terms": list(self.terms()),
+               "gamma": (None if self.gamma is None
+                         else dict(self.gamma.provenance))}
+        if self.reads_anchors:
+            out["conv_states"] = self.conv.provenance()
+        return out
 
 
-def penalties_from_system(system: System, cfg: TrainConfig) -> Optional[Penalties]:
+def penalties_from_system(system: System, cfg: TrainConfig,
+                          anchors: Optional[AnchorTables] = None) -> Optional[Penalties]:
     """The probes this system declares for the weights ``cfg`` carries, or ``None``.
-    ``L_conv`` needs ``system.trust_domain``; ``L_Gamma`` needs ``defaults["training"]["gamma_paths"]``."""
+    ``L_conv`` needs ``system.trust_domain``, or with ``conv_states="anchors"`` the loaded ``anchors``
+    (refused by name when there are none) and ``conv_k``; ``L_Gamma`` needs
+    ``defaults["training"]["gamma_paths"]``."""
     block = system.defaults.get("training") or {}
     conv = None
-    if float(cfg.lambda_conv) != 0.0 and system.trust_domain is not None:
+    states = conv_states(cfg)
+    if float(cfg.lambda_conv) != 0.0 and states == "anchors":
+        extra = cfg.extra_experiment_config
+        if not isinstance(anchors, AnchorTables):
+            raise ValueError(
+                f"system {system.name!r} trains L_conv with conv_states='anchors', which reads the "
+                f"anchor_bulk rows, and this run loads no anchor tables (anchors=NO_ANCHORS, aipf "
+                f"train --anchors none, or no defaults['training']['tables']): load them, or "
+                f"declare conv_states='trust_domain'")
+        if "conv_k" not in extra:
+            raise KeyError(
+                f"system {system.name!r} trains L_conv with conv_states='anchors' and declares no "
+                f"conv_k = (n_k, k_max), the wavenumber line it reads: this package has no "
+                f"default for it")
+        n_k, k_max = extra["conv_k"]
+        conv = StateStability.from_tables(anchors, n_k=n_k, k_max=k_max,
+                                          form=str(cfg.conv_penalty),
+                                          margin=float(cfg.conv_margin))
+    elif float(cfg.lambda_conv) != 0.0 and system.trust_domain is not None:
         if "conv_T_measure" not in block:
             raise KeyError(
                 f"system {system.name!r} trains L_conv on its trust domain and "
@@ -263,8 +454,9 @@ def penalties_from_system(system: System, cfg: TrainConfig) -> Optional[Penaltie
                                 **declared)
     if conv is None and gamma is None:
         return None
-    if cfg.penalty_seed is None:
-        fed = [n for n, probe in zip(PENALTY_TERMS, (conv, gamma)) if probe]
+    drawing = (isinstance(conv, ConvexityProbe), gamma is not None)
+    if cfg.penalty_seed is None and any(drawing):
+        fed = [n for n, probe in zip(PENALTY_TERMS, drawing) if probe]
         raise KeyError(
             f"system {system.name!r} trains {fed} and declares no "
             f"defaults['training']['penalty_seed']: the probe points come "
@@ -272,5 +464,6 @@ def penalties_from_system(system: System, cfg: TrainConfig) -> Optional[Penaltie
     return Penalties(cfg.penalty_seed, conv, gamma)
 
 
-__all__ = ["ConvexityProbe", "GammaPaths", "PathDraw", "Penalties",
-           "PENALTY_TERMS", "penalties_from_system"]
+__all__ = ["CONV_STATES", "ConvexityProbe", "GammaPaths", "PathDraw", "Penalties",
+           "PENALTY_TERMS", "STATE_KEYS", "StateStability", "conv_states", "declared_fields",
+           "penalties_from_system"]

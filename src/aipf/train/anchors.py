@@ -881,11 +881,12 @@ class AnchorTables:
         )
 
     # -- the batch -------------------------------------------------------
-    def batch(self, model, kB: float) -> Dict[str, Dict[str, Any]]:
+    def batch(self, model, kB: float, *, curvature: bool = False) -> Dict[str, Dict[str, Any]]:
         """The entries ``compute_losses`` reads, model side rebuilt with a graph (a per-step object);
         an anchor with no rows is left out. The vector form adds each row's ``active`` mask (and the bulk
         anchor's ``zmask`` and ``target_rootinv``): the losses compare the active principal block of ``H``
-        and ``M`` alone."""
+        and ``M`` alone. ``curvature=True`` also keeps the bulk anchor's ``d2 f_loc / d rho2``, the one
+        its ``H0`` is built from, under ``"curvature"``, for a penalty that reads it at other ``k``."""
         refuse_two_dimensions(model_ndim(model), "the anchor losses")
         w_hat = _w_hat_of(model)
         out: Dict[str, Dict[str, Any]] = {}
@@ -908,7 +909,8 @@ class AnchorTables:
             if self.shell_active is not None:
                 out["anchor_S"]["active"] = self.shell_active
         if self.bulk_rho.shape[0]:
-            H0 = (_curvature(model, self.bulk_rho, self.bulk_T)
+            local = _curvature(model, self.bulk_rho, self.bulk_T)
+            H0 = (local
                   + _w_hat_zero(model, w_hat, self.bulk_rho, self.geometry,
                                 self.w0))
             out["anchor_bulk"] = {
@@ -917,6 +919,8 @@ class AnchorTables:
                 "target": self.bulk_target, "row_weight": self.bulk_weight,
                 "sigma": self.bulk_sigma,
             }
+            if curvature:
+                out["anchor_bulk"]["curvature"] = local
             if self.bulk_active is not None:
                 out["anchor_bulk"].update(
                     active=self.bulk_active, zmask=self.bulk_zmask,

@@ -13,10 +13,13 @@ What is pinned: the declaration validates and builds; ``AnchorTables.load`` keep
 anchor should (a pure row feeds ``L_P`` alone), carries the active masks, warns about no shell of
 the absent-species row and records every file it read with its digest; and one optimiser step with
 ``L_dyn + L_W + L_P + L_S + L_bulk + L_M`` (``bulk_residual = "s_metric"``) has every term finite,
-changes the parameters, and writes a checkpoint that reloads strictly.
+changes the parameters, and writes a checkpoint that reloads strictly. With the number-conserving,
+saturated kernel hinge and ``L_conv`` on the anchor states declared, one step trains both beside the
+anchors and records them.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -326,3 +329,45 @@ def test_the_starting_weights_the_step_test_compares_against_are_the_runs_own(to
     after = reloaded.state_dict()
     assert all(torch.equal(before[k], after[k]) for k in before)
 
+
+
+def test_one_step_with_the_subspace_hinge_and_the_anchor_state_penalty(toy, tmp_path):
+    """``wpsd_subspace``, ``wpsd_k_sat`` and ``conv_states="anchors"`` declared: one step trains
+    ``L_W`` and ``L_conv`` beside the anchors, every term finite, the total the weighted sum, and the
+    run records the new keys where it records the hinge and the penalties."""
+    import yaml
+
+    system, sources = toy
+    declared = {"wpsd_subspace": "number_conserving", "wpsd_k_sat": 1.5,
+                "lambda_conv": 1.0, "conv_penalty": "hinge", "conv_margin": 100.0,
+                "conv_states": "anchors", "conv_k": (8, 3.96)}
+    system = dataclasses.replace(system, defaults={**system.defaults, **declared})
+    run = fit(system, run_name="f_both", sources=sources, steps=1, seed=0,
+              resume_optimizer=False, root=tmp_path / "data", log_every_step=True,
+              config_overrides={"lr": 1e3})
+    terms = {"L_dyn", "L_M", "L_S", "L_bulk", "L_P", "L_W", "L_conv"}
+    man = json.loads((run / "MANIFEST.json").read_text())
+    assert set(man["terms_trained"]) == terms
+    assert man["declared_weights_without_data"] == {}
+    assert man["kernel_hinge"]["subspace"] == "number_conserving"
+    assert man["kernel_hinge"]["k_sat"] == 1.5
+    assert man["penalties"] == {"penalty_seed": None, "terms": ["L_conv"], "gamma": None,
+                                "conv_states": {"states": "anchors", "n_k": 8, "k_max": 3.96,
+                                                "rows": 2}}
+    extra = yaml.safe_load((run / "hparams.yaml").read_text())["extra_experiment_config"]
+    assert extra["wpsd_subspace"] == "number_conserving" and extra["conv_states"] == "anchors"
+    assert extra["conv_k"] == [8, 3.96]
+
+    steps = json.loads((run / "steps.json").read_text())
+    (step,) = steps["terms"]
+    assert terms <= set(step), step
+    assert all(np.isfinite(step[name]) for name in terms), step
+    weights = {**_defaults(), **declared}
+    weighted = {"L_M": weights["lambda_M"], "L_S": weights["lambda_S"],
+                "L_bulk": weights["lambda_bulk"], "L_P": weights["lambda_P"],
+                "L_W": weights["lambda_wpsd"], "L_conv": weights["lambda_conv"]}
+    # a margin of 100 is violated on every row, so the penalty is active
+    assert step["L_conv"] > 0.0
+    contributions = [w * step[name] for name, w in weighted.items() if step[name] > 0.0]
+    expected = step["L_dyn"] + sum(w * step[name] for name, w in weighted.items())
+    assert steps["loss"][0] == pytest.approx(expected, rel=0.0, abs=0.1 * min(contributions))

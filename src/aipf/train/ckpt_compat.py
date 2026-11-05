@@ -60,6 +60,9 @@ NONLOSS_KEY_MAP_LIGHTNING: Mapping[str, str] = MappingProxyType({
     "resid_k_bins": "extra_experiment_config",
     "drift_scale": "extra_experiment_config",
     "conv_domain": "extra_experiment_config",
+    # L_conv's source and its wavenumber line, present only when a run declared them
+    "conv_states": "extra_experiment_config",
+    "conv_k": "extra_experiment_config",
 })
 
 #: Layout B: a much smaller constructor.

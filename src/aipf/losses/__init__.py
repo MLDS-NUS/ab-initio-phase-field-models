@@ -6,7 +6,7 @@ row gating and weighting are declared by the caller (:mod:`aipf.losses.gating`).
 from __future__ import annotations
 
 from aipf.losses.convexity import (gamma_closed_form, gamma_on_path, l_conv,
-                                   l_gamma)
+                                   l_conv_eigmin, l_gamma)
 from aipf.losses.dyn import l_dyn
 from aipf.losses.extras import eigmin_sym2, l_w, number_conserving_basis
 from aipf.losses.gating import gate_rows
@@ -36,6 +36,7 @@ __all__ = [
     "gamma_on_path",
     "l_bulk",
     "l_conv",
+    "l_conv_eigmin",
     "l_dyn",
     "l_gamma",
     "l_m",
