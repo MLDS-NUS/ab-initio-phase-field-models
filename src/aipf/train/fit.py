@@ -904,6 +904,7 @@ def fit(system: System, *, run_name: str, sources: Sequence[SourceSpec],
     hinge = KernelHinge.from_config(cfg)
     if hinge is not None:
         hinge.check(model)
+        hinge.check_subspace(model)
         lit.attach_hinge(hinge)
     window = window or _window_from_system(system)
     weighting = weighting or _weighting_from_system(system,

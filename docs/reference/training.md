@@ -157,11 +157,11 @@ read from the top level of `defaults`, then from `defaults["training"]`, which w
 | `model_type`, `model_kwargs` | `None`, `{}` | a saved checkpoint's model name and constructor arguments; the model itself is built from `System.functional` |
 | `m_table`, `s_table`, `eos_csv`, `eos_csvs`, `eos_pressures`, `mask_dome`, `anchor_T_min_K` | `None`, `None`, `None`, `None`, `None`, `False`, `{}` | a saved checkpoint's anchor settings; the run reads its anchors from `defaults["training"]["tables"]` and `anchor_rules` |
 | `k_fit_stat`, `grid`, `box` | `None` | recorded; the anchors read `defaults["k_fit_stat"]`, the functional's `grid` and `defaults["box"]` directly |
-| `extra_experiment_config` | `{}` | a saved checkpoint's keys with no field of their own, and the kernel hinge's shape (`wpsd_kappa`, `wpsd_k_max`, `wpsd_n_k`, `wpsd_margin`) |
+| `extra_experiment_config` | `{}` | a saved checkpoint's keys with no field of their own, and the kernel hinge's shape (`wpsd_kappa`, `wpsd_k_max`, `wpsd_n_k`, `wpsd_margin`, and when declared `wpsd_subspace`, `wpsd_k_sat`) |
 
 The fields of the last four rows are written to `hparams.yaml` and are filled when a saved
 checkpoint's flat `hparams` are translated (`aipf.train.ckpt_compat.hparams_to_train_config`); `fit`
-does not read them, except the kernel hinge's four shape keys in `extra_experiment_config`.
+does not read them, except the kernel hinge's shape keys in `extra_experiment_config`.
 
 `seed` comes from `--seed`. The model and data streams are `derive_seed(seed, "model")` and
 `derive_seed(seed, "data")`, the first 63 bits of `sha256("<seed>:<stream>")`.
@@ -185,6 +185,31 @@ shape `wpsd_kappa`, `wpsd_k_max`, `wpsd_n_k` and `wpsd_margin`, which it keeps i
 `extra_experiment_config`. A non-zero weight without all four shape keys is refused, and so is a
 model without a pair kernel. `MANIFEST.json` names the terms a run trained, and its `kernel_hinge`
 records the hinge's shape and the `lambda_W` it trained at.
+
+Two optional keys, declared beside the four and kept with them, change what is hinged. Neither appears
+in `hparams.yaml`, `MANIFEST.json` or the checkpoint of a run that does not declare it.
+
+| key | meaning |
+|---|---|
+| `wpsd_subspace` | `None` (absent: the full `n x n` matrix) or `"number_conserving"`: `lambda_min` of the reduced block `B^T (W(k) - W(0)) B` |
+| `wpsd_k_sat` | absent: the floor `kappa k^2`; a positive wavenumber: `kappa min(k, k_sat)^2`, constant from `k_sat` on |
+
+`B` is an orthonormal basis of the number-conserving subspace `1^perp`, `n x (n - 1)`: the Helmert
+columns `b_j = (1, ..., 1, -j, 0, ..., 0) / sqrt(j (j + 1))` (`j` ones), so `(1, -1)/sqrt(2)` at two
+channels and `(1, -1, 0)/sqrt(2)`, `(1, 1, -2)/sqrt(6)` at three. `lambda_min` does not depend on that
+choice: any other orthonormal basis is `B Q` with `Q` orthogonal, and `Q^T (B^T D B) Q` has the same
+eigenvalues. Two channels take the scalar `b^T D b`, three the closed-form smallest eigenvalue of the
+`2 x 2` block, more `eigvalsh`; one channel is refused (`1^perp` is `{0}`). The block is the reduced
+one and not the projector `P D P` (`P = B B^T`), which keeps an `n x n` matrix with a spurious zero
+eigenvalue along `1` and so reads `min(0, ...)`. Why a subspace: a liquid's number-number structure
+factor rises toward its first peak, so `W(k) - W(0)` is negative along the total-number direction at
+every `k` in measured data, and no `kappa >= 0` on the full matrix agrees with it; on `1^perp` the
+same data admit a small positive `kappa`.
+
+`wpsd_k_max` may reach the grid's Nyquist corner (it only needs to be positive). The radial
+transform's `W(k)` (`AnalyticRadialTransform`) is interpolated on its table up to the functional's
+`kernel_k_table_max` and clamps `|k|` there, so a hinge beyond that wavenumber reads one flat `W` and
+gains nothing.
 
 ## Anchor tables
 

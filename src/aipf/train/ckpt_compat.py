@@ -48,6 +48,9 @@ NONLOSS_KEY_MAP_LIGHTNING: Mapping[str, str] = MappingProxyType({
     "wpsd_k_max": "extra_experiment_config",
     "wpsd_n_k": "extra_experiment_config",
     "wpsd_kappa": "extra_experiment_config",
+    # the hinge's optional keys, present only when a run declared them
+    "wpsd_subspace": "extra_experiment_config",
+    "wpsd_k_sat": "extra_experiment_config",
     "m_column": "extra_experiment_config",
     "p_ref_gpa": "extra_experiment_config",
     "eos_overlay": "extra_experiment_config",

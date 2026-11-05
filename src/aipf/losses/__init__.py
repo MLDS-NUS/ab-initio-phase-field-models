@@ -8,7 +8,7 @@ from __future__ import annotations
 from aipf.losses.convexity import (gamma_closed_form, gamma_on_path, l_conv,
                                    l_gamma)
 from aipf.losses.dyn import l_dyn
-from aipf.losses.extras import eigmin_sym2, l_w
+from aipf.losses.extras import eigmin_sym2, l_w, number_conserving_basis
 from aipf.losses.gating import gate_rows
 from aipf.losses.mobility import l_m
 from aipf.losses.names import (
@@ -44,5 +44,6 @@ __all__ = [
     "l_s",
     "l_w",
     "eigmin_sym2",
+    "number_conserving_basis",
     "sinv_rootinv",
 ]
