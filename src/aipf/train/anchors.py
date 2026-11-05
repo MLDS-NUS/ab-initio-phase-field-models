@@ -342,11 +342,15 @@ def _embedded(block: np.ndarray, present: np.ndarray, n: int) -> np.ndarray:
     return out
 
 
-def _rootinv_on_blocks(target: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
-    """:func:`~aipf.losses.static.sinv_rootinv` of each row's active principal block of ``target``
-    ``(P, ..., n, n)`` (``active`` ``(P, n)``), the identity outside it: exactly block-diagonal."""
+def _rootinv_on_blocks(target: torch.Tensor, active: torch.Tensor,
+                       root=None) -> torch.Tensor:
+    """:func:`~aipf.losses.static.sinv_rootinv` (or ``root``, another matrix function) of each row's
+    active principal block of ``target`` ``(P, ..., n, n)`` (``active`` ``(P, n)``), the identity outside
+    it: exactly block-diagonal."""
     from aipf.losses.static import sinv_rootinv
 
+    if root is None:
+        root = sinv_rootinv
     n = target.shape[-1]
     out = torch.eye(n, dtype=target.dtype).expand(target.shape).clone()
     for pattern in torch.unique(active, dim=0):
@@ -354,7 +358,7 @@ def _rootinv_on_blocks(target: torch.Tensor, active: torch.Tensor) -> torch.Tens
         idx = torch.nonzero(pattern).flatten()
         block = target[rows][..., idx[:, None], idx]
         sub = out[rows]
-        sub[..., idx[:, None], idx] = sinv_rootinv(block)
+        sub[..., idx[:, None], idx] = root(block)
         out[rows] = sub
     return out
 
@@ -409,13 +413,14 @@ def _bulk_finish(z, col, keep, target_all, x_channel: int, weight_spec):
 
 def _bulk_block_rows(path: Path, col, t_min: Optional[float], weight_spec):
     """The vector form's zero-wavenumber anchor on the concentration block, per row with ``m + 1 >= 2``
-    present species ``P``: ``(rho, T, Z, rho_tot, target, weight, active, zmask, target_rootinv)``.
+    present species ``P``: ``(rho, T, Z, rho_tot, target, weight, active, zmask, target_rootinv,
+    target_root)``.
 
     The independent species ``I`` are the first ``m`` present ones in channel order, and ``Z`` ``(P, n, n-1)``
     has the columns ``z_i = e_i - x_i a`` (``a`` the row's active indicator), zero beyond ``m``. ``target``
     is the leading ``m x m`` block of the ``(rows, n-1, n-1)`` column, kept when finite (and refused when
     not positive definite), padded by the identity; ``zmask`` marks the ``m`` columns, ``target_rootinv``
-    is its inverse square root on that block."""
+    and ``target_root`` are its inverse square root and its square root on that block."""
     if col["bulk_sigma"] is not None or col["bulk_ok"] is not None:
         raise ValueError(
             f"bulk_sigma={col['bulk_sigma']!r} and bulk_ok={col['bulk_ok']!r} "
@@ -464,9 +469,11 @@ def _bulk_block_rows(path: Path, col, t_min: Optional[float], weight_spec):
         target[r, :m, :m] = block
         zmask[r, :m] = True
     zmask_t = torch.from_numpy(zmask)
+    from aipf.losses.static import spd_root
     return (_f32(rho), _f32(T), _f32(zvec), _f32(rho.sum(-1)), _f32(target),
             weight, torch.from_numpy(active), zmask_t,
-            _f32(_rootinv_on_blocks(torch.from_numpy(target), zmask_t)))
+            _f32(_rootinv_on_blocks(torch.from_numpy(target), zmask_t)),
+            _f32(_rootinv_on_blocks(torch.from_numpy(target), zmask_t, spd_root)))
 
 
 def _channel_one_fraction(x, x_channel: int):
@@ -713,13 +720,14 @@ class AnchorTables:
     #: There ``mobility_target`` is zero and ``shell_target``/``shell_target_rootinv`` the identity outside a
     #: row's active block (a row with no valid shell keeps zeros, behind its False mask, as two channels
     #: do), ``bulk_zvec`` is ``(P, n, n-1)`` and ``bulk_target`` ``(P, n-1, n-1)``, with
-    #: ``bulk_zmask`` ``(P, n-1)`` marking the independent species and ``bulk_target_rootinv`` the target's
-    #: inverse square root on them.
+    #: ``bulk_zmask`` ``(P, n-1)`` marking the independent species, ``bulk_target_rootinv`` the target's
+    #: inverse square root on them and ``bulk_target_root`` its square root (``"s_metric_inverse"``).
     mobility_active: Optional[torch.Tensor] = None
     shell_active: Optional[torch.Tensor] = None
     bulk_active: Optional[torch.Tensor] = None
     bulk_zmask: Optional[torch.Tensor] = None
     bulk_target_rootinv: Optional[torch.Tensor] = None
+    bulk_target_root: Optional[torch.Tensor] = None
 
     # -- loading ---------------------------------------------------------
     @classmethod
@@ -856,7 +864,8 @@ class AnchorTables:
                 shell_active=s_active,
                 bulk_active=torch.cat([p[6] for p in b_parts]),
                 bulk_zmask=torch.cat([p[7] for p in b_parts]),
-                bulk_target_rootinv=torch.cat([p[8] for p in b_parts]))
+                bulk_target_rootinv=torch.cat([p[8] for p in b_parts]),
+                bulk_target_root=torch.cat([p[9] for p in b_parts]))
             s_rootinv = _rootinv_on_blocks(s_target, s_active)
         else:
             s_rootinv = sinv_rootinv(s_target)
@@ -884,9 +893,10 @@ class AnchorTables:
     def batch(self, model, kB: float, *, curvature: bool = False) -> Dict[str, Dict[str, Any]]:
         """The entries ``compute_losses`` reads, model side rebuilt with a graph (a per-step object);
         an anchor with no rows is left out. The vector form adds each row's ``active`` mask (and the bulk
-        anchor's ``zmask`` and ``target_rootinv``): the losses compare the active principal block of ``H``
-        and ``M`` alone. ``curvature=True`` also keeps the bulk anchor's ``d2 f_loc / d rho2``, the one
-        its ``H0`` is built from, under ``"curvature"``, for a penalty that reads it at other ``k``."""
+        anchor's ``zmask``, ``target_rootinv`` and ``target_root``): the losses compare the active
+        principal block of ``H`` and ``M`` alone. ``curvature=True`` also keeps the bulk anchor's
+        ``d2 f_loc / d rho2``, the one its ``H0`` is built from, under ``"curvature"``, for a penalty that
+        reads it at other ``k``."""
         refuse_two_dimensions(model_ndim(model), "the anchor losses")
         w_hat = _w_hat_of(model)
         out: Dict[str, Dict[str, Any]] = {}
@@ -924,7 +934,8 @@ class AnchorTables:
             if self.bulk_active is not None:
                 out["anchor_bulk"].update(
                     active=self.bulk_active, zmask=self.bulk_zmask,
-                    target_rootinv=self.bulk_target_rootinv)
+                    target_rootinv=self.bulk_target_rootinv,
+                    target_root=self.bulk_target_root)
         if self.pressure_rho.shape[0]:
             # the box is irrelevant: each row is a single-point grid, carrying the zero wavevector only
             boxes = torch.ones(self.pressure_rho.shape[0], 3,

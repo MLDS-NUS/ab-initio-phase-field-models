@@ -27,7 +27,7 @@ from aipf.system import Checkpoint, System
 
 from .ckpt_compat import CONFIG_SCHEMA_TAGS, NEW_CONFIG_SCHEMA_TAG
 from .anchors import NO_ANCHORS, AnchorTables, _NoAnchors
-from .config import TrainConfig
+from .config import _BLOCK_RESIDUALS, TrainConfig
 from .datamodule import (LoaderSettings, ModeDataModule, RunWeighting,
                           SourceSpec, SplitSettings)
 from .dataset import ArchiveKeys, WindowSettings
@@ -209,7 +209,8 @@ def _anchors_from_system(system: System, anchors):
 
 def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
     """Before anything is loaded: a trained ``L_bulk`` on vector-form tables (a tuple composition, the
-    concentration block) declares ``bulk_residual="s_metric"``, and scalar tables declare a scalar form."""
+    concentration block) declares a block form, ``bulk_residual="s_metric"`` or ``"s_metric_inverse"``,
+    and scalar tables declare a scalar form."""
     if not cfg.lambda_bulk or anchors is NO_ANCHORS:
         return
     if isinstance(anchors, AnchorTables):
@@ -220,12 +221,12 @@ def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
             return
         vector = isinstance(dict(tables.get("columns") or {}).get("composition"),
                             (tuple, list))
-    if vector != (cfg.bulk_residual == "s_metric"):
+    if vector != (cfg.bulk_residual in _BLOCK_RESIDUALS):
         raise ValueError(
             f"bulk_residual={cfg.bulk_residual!r} on "
             f"{'vector-form' if vector else 'scalar'} anchor tables: the "
             f"concentration block of three or more channels is scored by "
-            f"'s_metric' alone, and one S_cc(0) per row by "
+            f"'s_metric' or 's_metric_inverse' alone, and one S_cc(0) per row by "
             f"'relative_inverse' or 'sigma_chi2'")
 
 

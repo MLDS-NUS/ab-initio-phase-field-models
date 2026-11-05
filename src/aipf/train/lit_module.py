@@ -157,12 +157,14 @@ class LitModule(L.LightningModule):
                    row_weight: Optional[torch.Tensor] = None,
                    target_rootinv: Optional[torch.Tensor] = None,
                    active: Optional[torch.Tensor] = None,
-                   zmask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """``active``, ``zmask`` and ``target_rootinv`` come with a matrix batch (the concentration block)."""
+                   zmask: Optional[torch.Tensor] = None,
+                   target_root: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """``active``, ``zmask``, ``target_rootinv`` and ``target_root`` come with a matrix batch (the
+        concentration block)."""
         return l_bulk(H0, kBT, zvec, rho_tot, target,
                       residual=self.config.bulk_residual, sigma=sigma,
                       row_weight=row_weight, target_rootinv=target_rootinv,
-                      active=active, zmask=zmask)
+                      active=active, zmask=zmask, target_root=target_root)
 
     def pressure_loss(self, P_model: torch.Tensor, *,
                        P_target: Optional[torch.Tensor] = None,
@@ -226,7 +228,8 @@ class LitModule(L.LightningModule):
                 a["H0"], a["kBT"], a["zvec"], a["rho_tot"], a["target"],
                 sigma=a.get("sigma"), row_weight=a.get("row_weight"),
                 target_rootinv=a.get("target_rootinv"),
-                active=a.get("active"), zmask=a.get("zmask"))
+                active=a.get("active"), zmask=a.get("zmask"),
+                target_root=a.get("target_root"))
             parts["L_bulk"] = lB
             total = total + self.config.lambda_bulk * lB
 
