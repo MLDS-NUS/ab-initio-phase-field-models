@@ -435,3 +435,15 @@ def test_a_two_dimensional_model_is_told_it_trains_no_l_conv(tmp_path):
     assert not any("convexity" in line for line in
                    _dimension_refusals(system, 2, TrainConfig(lambda_conv=1.0), (), "mean",
                                        NO_ANCHORS))
+
+
+@pytest.mark.parametrize("value", [("abc", 3.0), (8, "x"), (None, 3.0), (float("nan"), 3.0),
+                                   (float("inf"), 3.0), (8, float("inf")), (8, True), (True, 3.0)])
+def test_a_line_with_an_entry_that_is_not_a_finite_number_is_refused_naming_the_key(value):
+    with pytest.raises(ValueError, match="conv_k"):
+        conv_line(value)
+
+
+def test_a_line_declared_as_an_array_is_read():
+    assert conv_line(np.array([32, 3.96])) == (32, 3.96)
+    assert conv_line(torch.tensor([8.0, 3.0])) == (8, 3.0)

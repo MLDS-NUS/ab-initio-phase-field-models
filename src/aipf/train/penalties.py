@@ -53,15 +53,26 @@ def declared_fields(declared: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def conv_line(value: Any) -> Tuple[int, float]:
-    """A declared ``conv_k`` as ``(n_k, k_max)``: a sequence of two numbers, ``n_k`` a whole one; anything
-    else is refused naming the key (a mapping, a string, a fractional ``n_k``)."""
+    """A declared ``conv_k`` as ``(n_k, k_max)``: two finite numbers (a list, a tuple or a 1-D array),
+    ``n_k`` a whole one; anything else is refused naming the key (a mapping, a string, a fractional
+    ``n_k``, a bool, a non-finite or non-numeric entry)."""
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        value = value.tolist()
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence) \
             or len(value) != 2:
         raise ValueError(f"conv_k={value!r}: declare the line as (n_k, k_max), two numbers")
     n_k, k_max = value
-    if isinstance(n_k, bool) or float(n_k) != int(float(n_k)):
+    try:
+        n, k = float(n_k), float(k_max)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"conv_k={value!r}: declare the line as (n_k, k_max), two numbers") \
+            from error
+    if isinstance(n_k, bool) or isinstance(k_max, bool) or not (math.isfinite(n)
+                                                                and math.isfinite(k)):
+        raise ValueError(f"conv_k={value!r}: declare the line as (n_k, k_max), two finite numbers")
+    if n != int(n):
         raise ValueError(f"conv_k={value!r}: n_k={n_k!r} counts wavenumbers, a whole number")
-    return int(float(n_k)), float(k_max)
+    return int(n), k
 
 
 def conv_states(cfg: TrainConfig) -> str:

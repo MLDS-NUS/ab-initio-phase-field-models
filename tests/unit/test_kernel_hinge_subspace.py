@@ -305,3 +305,5 @@ def test_a_float64_basis_reduces_a_float32_kernel_in_the_kernels_dtype():
     k = torch.linspace(0.5, 2.0, 4)
     loss = l_w(D, k, kappa=0.5, margin=3.0, basis=number_conserving_basis(3))
     assert loss.dtype == torch.float32 and float(loss) > 0.0
+    exact = l_w(D.double(), k.double(), kappa=0.5, margin=3.0, basis=number_conserving_basis(3))
+    assert float(loss) == pytest.approx(float(exact), rel=1e-5)

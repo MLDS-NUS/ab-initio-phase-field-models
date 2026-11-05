@@ -172,6 +172,8 @@ def test_fit_trains_both_penalties_when_they_are_declared(tmp_path):
     assert not (run / "UNTRAINED_TERMS.txt").exists()
     terms = json.loads((run / "steps.json").read_text())["terms"]
     assert all({"L_conv", "L_Gamma"} <= set(t) for t in terms)
+    # the trust-domain probe logs no aux of the anchor-state one
+    assert not any(k.startswith("L_conv/") for t in terms for k in t)
 
 
 def test_a_declared_domain_does_not_open_a_zero_weighted_penalty(tmp_path):

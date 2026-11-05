@@ -540,6 +540,27 @@ def test_a_2d_model_is_refused_a_three_dimensional_only_term(tmp_path, override,
     check_dimensions(system, sources, projection="kz0-areal", anchors=NO_ANCHORS)
 
 
+_ANCHOR_STATE_CONV = {"lambda_conv": 1.0,
+                      "extra_experiment_config": {"conv_states": "anchors", "conv_k": [8, 3.0]}}
+
+
+def test_a_2d_model_is_refused_the_anchor_state_l_conv_before_writing(tmp_path):
+    """No trust domain is declared, so only the anchor-state source names ``L_conv``; the dimension
+    refusal comes first, ahead of the one about the missing anchor tables."""
+    system = dataclasses.replace(_linear_system(tmp_path), trust_domain=None)
+    sources = (SourceSpec("demo_src", str(tmp_path), "run_*", TRAIN_GRID, 1.0, ()),)
+    check_dimensions(system, sources, projection="kz0-areal", anchors=NO_ANCHORS,
+                     config_overrides={"lambda_conv": 1.0})
+    with pytest.raises(DimensionMismatch, match="convexity"):
+        check_dimensions(system, sources, projection="kz0-areal", anchors=NO_ANCHORS,
+                         config_overrides=_ANCHOR_STATE_CONV)
+    with pytest.raises(DimensionMismatch, match="convexity"):
+        fit(system, run_name="r", sources=sources, steps=1, seed=0, resume_optimizer=False,
+            root=tmp_path / "data", device="cpu", anchors=NO_ANCHORS, projection="kz0-areal",
+            config_overrides=_ANCHOR_STATE_CONV)
+    assert not (tmp_path / "data").exists()
+
+
 # ---------------------------------------------------------------------------
 # aipf train --projection
 # ---------------------------------------------------------------------------
