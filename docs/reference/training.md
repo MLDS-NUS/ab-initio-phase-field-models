@@ -95,9 +95,22 @@ is free RAM, and the kernel drops them again under memory pressure.
 - Mapped pages that have been read count in the process's resident set (`VmRSS`, as file-backed
   `RssFile`) although they are cache the kernel can reclaim: a pass over every frame of a 300 MB
   sidecar adds about 300 MB to it. Shared pages are counted in every process that touched them, so
-  with forked loader workers a scheduler that sums the resident sets of a job's processes (PBS can)
-  may report several times the page cache actually used. Check one pilot job's reported memory
-  before sizing a campaign by it.
+  with forked loader workers the summed resident sets of a job's processes can be several times the
+  page cache actually used, and a limit enforced on that sum could kill the job. A memory cgroup
+  charges each cached page once, to the cgroup that first read it, however many processes map it,
+  and at its limit reclaims clean cache before it kills anything.
+- Measured under a PBS memory cgroup (cgroup v1, `mem=110gb`, October 2026): the main process read
+  127.5 GiB of mapped sidecars twice, then four forked workers read them once more between them,
+  and the job kept running. The main process's `VmRSS` reached 125 GiB and the process tree's
+  summed RSS 241 GiB; neither was enforced. The cgroup's charged usage peaked at 41 GiB with no
+  failed charge, and PBS's `resources_used.mem` reported under 30 MB. A child then allocating
+  120 GiB of anonymous memory in the same job drove the cgroup to its limit: the kernel reclaimed
+  the sidecar cache from about 40 GiB to about 2 GiB while the main process kept its mappings, then
+  killed the child. Under such a limit, what has to fit in `mem` is memory the kernel cannot
+  reclaim: anonymous memory (model, optimizer, batches, pinned buffers, projected runs) and the
+  shared memory forked workers pass batches through, not the sidecars' clean pages. Where `mem` is
+  enforced otherwise (a scheduler, or a PBS site, that polls per-process memory instead of a
+  cgroup), check one pilot job before sizing a campaign by its reported memory.
 - The `inverse_band_power` run weighting reads its probe windows at setup, which pages those frames
   in. A run read through `--projection` is held in memory: `project_kz0` copies the `n_z = 0` modes
   of the mapped run.
