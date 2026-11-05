@@ -193,7 +193,7 @@ in `hparams.yaml`, `MANIFEST.json` or the checkpoint of a run that does not decl
 | key | meaning |
 |---|---|
 | `wpsd_subspace` | `None` (absent: the full `n x n` matrix) or `"number_conserving"`: `lambda_min` of the reduced block `B^T (W(k) - W(0)) B` |
-| `wpsd_k_sat` | absent: the floor `kappa k^2`; a positive wavenumber: `kappa min(k, k_sat)^2`, constant from `k_sat` on |
+| `wpsd_k_sat` | absent: the floor `kappa k^2`; a positive, finite wavenumber (not a bool): `kappa min(k, k_sat)^2`, constant from `k_sat` on |
 
 `B` is an orthonormal basis of the number-conserving subspace `1^perp`, `n x (n - 1)`: the Helmert
 columns `b_j = (1, ..., 1, -j, 0, ..., 0) / sqrt(j (j + 1))` (`j` ones), so `(1, -1)/sqrt(2)` at two
@@ -302,7 +302,7 @@ anchor tables measured single phase:
 | key | meaning |
 |---|---|
 | `conv_states` | `"trust_domain"` (absent: the points drawn above) or `"anchors"` |
-| `conv_k` | `(n_k, k_max)`, required with `"anchors"`: the line `linspace(0, k_max, n_k)`, `n_k >= 2` a whole number, kept as a list; refused with `"trust_domain"` |
+| `conv_k` | `(n_k, k_max)`, required with `"anchors"`: the line `linspace(0, k_max, n_k)`, `n_k >= 2` a whole number and `k_max > 0`, both finite and not bool, kept as a list; refused with `"trust_domain"` |
 
 With `"anchors"`, on every `anchor_bulk` row (the rows the phase gate kept; rows with fewer than two
 species present are not bulk rows) and every `k` of the line, `k = 0` included,
@@ -311,6 +311,9 @@ species present are not bulk rows) and every `k` of the line, `k = 0` included,
 
 scored by `conv_penalty` exactly as on the trust domain (`hinge`, `hinge0`, `softplus`, the same
 `viol_frac` and `lam_worst`, `viol_frac` counting `lambda_min < 0`), the mean over rows and wavenumbers.
+The mean is unweighted: the bulk anchor's `row_weight` measures how precisely a row's `S_cc(0)` is
+known, and stability is not a fit to that number but a condition every gated single-phase state meets
+alike.
 `PP` is the row's active principal block: rows are grouped by active pattern and each block is taken at
 its own size, never padded, since an exactly absent channel carries no ideal stiffness in the model
 (`rho_eps` clamps its density) and a full-matrix minimum would read that channel. Tables without an
@@ -323,16 +326,21 @@ Nothing is evaluated beyond what the anchors already evaluate. The `k = 0` slice
 own `H(0)` (so its declared `w0` route); every other slice adds the `W(k)` that `L_S` reads, the
 kernel's evaluator, to the same curvature, which `AnchorTables.batch(..., curvature=True)` hands over
 once a step. Under the `radial` route the `k = 0` slice therefore carries the quadrature `W(0)` and the
-next ones the evaluator's table, as `L_bulk` and `L_S` do. A kernel evaluated as a lattice sum, which
-has no `W(k)` on a bare wavenumber, is refused, and so is a run that loads no anchor tables
-(`anchors=NO_ANCHORS`, `aipf train --anchors none`, no `tables` declared, before the run directory
-exists) or tables without a bulk row. No point is drawn, so `penalty_seed` is needed only for
+next ones the evaluator's table, as `L_bulk` and `L_S` do.
+
+The refusals that need nothing but the declaration are made before the run directory exists, and by
+`aipf train --pbs` before it submits a job: an unknown `conv_states`, `conv_k` with
+`"trust_domain"`, a missing or malformed `conv_k`, and a trained anchors-sourced `L_conv` on a run that
+loads no anchor tables (`anchors=NO_ANCHORS`, `aipf train --anchors none`, no `tables` declared); a
+two-dimensional model is refused first, as for the trust-domain `L_conv`. Two need the loaded tables or
+the model and are made when those are built: tables without a bulk row of two or more species, and a
+kernel evaluated as a lattice sum, which has no `W(k)` on a bare wavenumber. No point is drawn, so
+`penalty_seed` is needed only for
 `L_Gamma`; `conv_samples` and `conv_T_measure` are not read. As for the kernel hinge, `W(k)` is flat
 beyond `kernel_k_table_max`, so a line past it repeats its last slice. `MANIFEST.json` records the line
 and the row count under `penalties["conv_states"]`, and each step logs `train/L_conv_viol_frac` and
-`train/L_conv_lam_worst` (in `steps.json`, `L_conv/viol_frac` and `L_conv/lam_worst`). A
-two-dimensional model is refused as for the trust-domain `L_conv`. The trust-domain `L_conv` and
-`L_Gamma` are as above.
+`train/L_conv_lam_worst` (in `steps.json`, `L_conv/viol_frac` and `L_conv/lam_worst`). The
+trust-domain `L_conv` and `L_Gamma` are as above.
 
 ## Starting weights
 

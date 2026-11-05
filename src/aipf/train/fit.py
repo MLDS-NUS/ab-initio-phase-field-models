@@ -35,12 +35,13 @@ from .checkpoint_formats import (kmodes_model_state_dict, load_kmodes_into,
                                  load_lightning_hparams_into)
 from .kernel_hinge import HINGE_TERM, KernelHinge, declared_fields as _hinge_fields
 from .lit_module import LitModule, seeded_rng
-from .penalties import (PENALTY_TERMS, conv_states, declared_fields as _conv_fields,
-                        penalties_from_system)
+from .penalties import (PENALTY_TERMS, anchor_line, conv_states,
+                        declared_fields as _conv_fields, penalties_from_system)
 from .projection import PROJECTIONS, archive_cells, check_projection, common_lz
 
 __all__ = ["DEVICES", "DeviceUnavailable", "DimensionMismatch", "OptimizerLayoutMismatch",
-           "ReservedRunName", "check_dimensions", "check_optimizer_resumable", "fit",
+           "ReservedRunName", "check_declaration", "check_dimensions", "check_optimizer_resumable",
+           "fit",
            "pre_run_checks", "resolve_device", "sample_system"]
 
 #: Where a run trains: ``auto`` is ``cuda`` when torch sees one, else ``cpu``.
@@ -229,9 +230,12 @@ def _check_bulk_residual(system: System, cfg: TrainConfig, anchors) -> None:
 
 
 def _check_conv_states(system: System, cfg: TrainConfig, anchors) -> None:
-    """Before anything is loaded: a trained ``L_conv`` with ``conv_states="anchors"`` reads the anchor
-    tables, so a run that loads none (``NO_ANCHORS``, or a system that declares none) is refused."""
-    if not cfg.lambda_conv or conv_states(cfg) != "anchors":
+    """Before anything is loaded, every refusal of ``L_conv``'s source that needs no table: the source's
+    value, ``conv_k`` without ``conv_states="anchors"``, ``conv_k`` missing or malformed
+    (:func:`aipf.train.penalties.anchor_line`), and a trained anchors-sourced ``L_conv`` on a run that
+    loads no anchor tables (``NO_ANCHORS``, or a system that declares none). The refusals that need the
+    loaded tables or the model come later (a table with no two-species bulk row, a lattice-sum kernel)."""
+    if anchor_line(cfg) is None:
         return
     if anchors is NO_ANCHORS or (anchors is None and _training(system).get(_TABLES_KEY) is None):
         raise ValueError(
@@ -239,6 +243,17 @@ def _check_conv_states(system: System, cfg: TrainConfig, anchors) -> None:
             f"and this run loads no anchor tables (anchors=NO_ANCHORS, aipf train --anchors none, or "
             f"no defaults[{_TRAINING_KEY!r}][{_TABLES_KEY!r}]): load them, or declare "
             f"conv_states='trust_domain'")
+
+
+def check_declaration(system: System, *, anchors=None,
+                      config_overrides: Optional[Mapping[str, Any]] = None) -> None:
+    """The refusals of the declaration ``fit`` makes before anything is loaded, without training:
+    the bulk residual against the tables' form, ``L_conv``'s source (:func:`_check_conv_states`) and
+    the kernel hinge's shape. ``aipf train --pbs`` makes them before it submits a job."""
+    cfg = TrainConfig(**{**_config_from_system(system), **dict(config_overrides or {})})
+    _check_bulk_residual(system, cfg, anchors)
+    _check_conv_states(system, cfg, anchors)
+    KernelHinge.from_config(cfg)
 
 
 def _archive_keys(system: System) -> ArchiveKeys:

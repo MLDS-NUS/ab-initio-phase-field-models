@@ -410,6 +410,12 @@ def run(args: argparse.Namespace) -> int:
             except DimensionMismatch as refused:
                 print(f"aipf train: {refused}", file=sys.stderr)
                 return 2
+        from aipf.train.fit import check_declaration
+        try:
+            check_declaration(system, anchors=_anchors_of(args))
+        except (KeyError, ValueError) as refused:
+            print(f"aipf train: {str(refused.args[0]).rstrip('.')}.", file=sys.stderr)
+            return 2
         if resume_optimizer:
             from aipf.train.fit import OptimizerLayoutMismatch, check_optimizer_resumable
             try:

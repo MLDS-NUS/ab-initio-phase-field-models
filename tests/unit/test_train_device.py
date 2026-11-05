@@ -212,3 +212,19 @@ def test_cli_pbs_refuses_starting_weights_nothing_holds(tmp_path, monkeypatch, c
     assert main(_ARGS + ["--init-from-published", "--pbs", "--dry-run"]) == 2
     assert "--init-from-published" in capsys.readouterr().err
     assert not (tmp_path / "data" / "demo" / "ckpt").exists()
+
+
+def test_cli_pbs_refuses_a_bad_l_conv_source_before_submitting(tmp_path, monkeypatch, capsys):
+    """``conv_states="anchors"`` under ``--anchors none`` would fail in the job: refused at submit."""
+    import dataclasses
+    import aipf.system as system_mod
+    from aipf.cli.main import main
+    _cli_system(tmp_path, monkeypatch)
+    _pbs_site(monkeypatch)
+    system = system_mod.load("demo")
+    declared = dataclasses.replace(system, defaults={
+        **system.defaults, "lambda_conv": 1.0, "conv_states": "anchors", "conv_k": (8, 3.0)})
+    monkeypatch.setattr("aipf.system.load", lambda name: declared)
+    assert main(_ARGS + ["--pbs", "--dry-run"]) == 2
+    assert "--anchors none" in capsys.readouterr().err
+    assert not (tmp_path / "data" / "demo" / "ckpt").exists()

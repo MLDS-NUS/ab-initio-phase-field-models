@@ -447,3 +447,82 @@ def test_a_line_with_an_entry_that_is_not_a_finite_number_is_refused_naming_the_
 def test_a_line_declared_as_an_array_is_read():
     assert conv_line(np.array([32, 3.96])) == (32, 3.96)
     assert conv_line(torch.tensor([8.0, 3.0])) == (8, 3.0)
+
+
+# ---------------------------------------------------------------------------
+# the refusals that need no table come first; the cached groups
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [(1, 3.0), (8, 0.0), (8, -1.0)])
+def test_a_line_too_short_is_refused_where_it_is_declared(value):
+    with pytest.raises(ValueError, match="conv_k"):
+        conv_line(value)
+    with pytest.raises(ValueError, match="conv_k"):
+        declared_fields({"conv_k": value})
+
+
+@pytest.mark.parametrize("extra, error, match", [
+    ({"conv_states": "anchors"}, KeyError, "conv_k"),
+    ({"conv_states": "anchors", "conv_k": [1, 3.0]}, ValueError, "conv_k"),
+    ({"conv_states": "anchors", "conv_k": [8, True]}, ValueError, "conv_k"),
+    ({"conv_states": "somewhere"}, ValueError, "conv_states"),
+    ({"conv_k": [8, 3.0]}, ValueError, "conv_k"),
+])
+def test_fit_refuses_a_bad_source_declaration_before_the_run_directory(tmp_path, extra, error,
+                                                                       match):
+    """Through ``config_overrides``, past ``declared_fields``: still refused before anything is
+    written, with the tables declared (so the refusal is the key's, not the missing tables')."""
+    t3._write_tables(tmp_path / "tier")
+    tree = tmp_path / "fields" / "modes_toy"
+    t3._write_modes(tree / "run_a", np.random.default_rng(0))
+    sources = (SourceSpec(name="toy", root=str(tree), pattern="run_*", grid=t3._GRID,
+                          loss_weight=1.0, exclude_tags=()),)
+    with pytest.raises(error, match=match):
+        fit(t3._system(tmp_path), run_name="refused", sources=sources, steps=1, seed=0,
+            resume_optimizer=False, root=tmp_path / "data",
+            config_overrides={"lambda_conv": 1.0, "extra_experiment_config": extra})
+    assert not (tmp_path / "data").exists()
+
+
+def test_check_declaration_makes_the_early_refusals_without_training(tmp_path):
+    from aipf.train.fit import check_declaration
+
+    t3._write_tables(tmp_path / "tier")
+    system = t3._system(tmp_path)
+    system = dataclasses.replace(system, defaults={**system.defaults, **_ANCHORS,
+                                                   "lambda_conv": 1.0})
+    check_declaration(system)
+    with pytest.raises(ValueError, match="--anchors none"):
+        check_declaration(system, anchors=NO_ANCHORS)
+    with pytest.raises(ValueError, match="wpsd_k_sat"):
+        check_declaration(system, config_overrides={"extra_experiment_config": {
+            **TrainConfig(**_config_from_system(system)).extra_experiment_config,
+            "wpsd_k_sat": True}})
+
+
+def _ungrouped_eigmin(H, active):
+    """The grouping of the first version, recomputed every call, as the reference."""
+    lams, kept = [], []
+    for pattern in torch.unique(active, dim=0):
+        idx = torch.nonzero(pattern).flatten()
+        if idx.numel() < 2:
+            continue
+        rows = torch.nonzero((active == pattern).all(-1)).flatten()
+        lams.append(torch.linalg.eigvalsh(H[rows][..., idx[:, None], idx])[..., 0])
+        kept.append(rows)
+    rows = torch.cat(kept)
+    order = torch.argsort(rows)
+    return torch.cat(lams)[order], rows[order]
+
+
+def test_the_cached_groups_give_the_ungrouped_result_bit_for_bit():
+    model, bulk, *_ = _toy()
+    probe = _probe()
+    lam, rows, k = probe.eigmin(model, bulk)
+    W = model.kernel.w_hat(k[1:])
+    H = torch.cat([bulk["H0"].unsqueeze(1), bulk["curvature"].unsqueeze(1) + W], dim=1)
+    H = 0.5 * (H + H.transpose(-1, -2))
+    ref_lam, ref_rows = _ungrouped_eigmin(H, _ACTIVE)
+    assert torch.equal(rows, ref_rows) and torch.equal(lam, ref_lam)
+    again, _, _ = probe.eigmin(model, bulk)               # the second step reads the cache
+    assert torch.equal(again, lam) and list(probe._groups) == ["cpu"]

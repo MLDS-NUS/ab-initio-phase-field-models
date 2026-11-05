@@ -239,7 +239,10 @@ def test_the_optional_keys_reach_the_hinge_and_its_record():
 
 
 @pytest.mark.parametrize("bad, match", [({"wpsd_subspace": "concentration"}, "wpsd_subspace"),
-                                        ({"wpsd_k_sat": 0.0}, "wpsd_k_sat")])
+                                        ({"wpsd_subspace": True}, "wpsd_subspace"),
+                                        ({"wpsd_k_sat": 0.0}, "wpsd_k_sat"),
+                                        ({"wpsd_k_sat": True}, "wpsd_k_sat"),
+                                        ({"wpsd_k_sat": float("inf")}, "wpsd_k_sat")])
 def test_an_unknown_subspace_and_a_non_positive_saturation_are_refused(bad, match):
     cfg = TrainConfig(lambda_W=0.3, extra_experiment_config={
         **{k: _DECLARED[k] for k in SHAPE_KEYS}, **bad})

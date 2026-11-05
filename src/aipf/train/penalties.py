@@ -54,8 +54,9 @@ def declared_fields(declared: Mapping[str, Any]) -> Dict[str, Any]:
 
 def conv_line(value: Any) -> Tuple[int, float]:
     """A declared ``conv_k`` as ``(n_k, k_max)``: two finite numbers (a list, a tuple or a 1-D array),
-    ``n_k`` a whole one; anything else is refused naming the key (a mapping, a string, a fractional
-    ``n_k``, a bool, a non-finite or non-numeric entry)."""
+    ``n_k >= 2`` a whole one (the line holds ``k = 0`` and ``k_max``) and ``k_max > 0``; anything else
+    is refused naming the key (a mapping, a string, a fractional ``n_k``, a bool, a non-finite or
+    non-numeric entry, a line too short)."""
     if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
         value = value.tolist()
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence) \
@@ -72,7 +73,27 @@ def conv_line(value: Any) -> Tuple[int, float]:
         raise ValueError(f"conv_k={value!r}: declare the line as (n_k, k_max), two finite numbers")
     if n != int(n):
         raise ValueError(f"conv_k={value!r}: n_k={n_k!r} counts wavenumbers, a whole number")
+    if n < 2:
+        raise ValueError(
+            f"conv_k={value!r}: the line runs from k = 0 to k_max, at least two wavenumbers")
+    if not k > 0.0:
+        raise ValueError(f"conv_k={value!r}: the line reaches a positive k_max")
     return int(n), k
+
+
+def anchor_line(cfg: TrainConfig) -> Optional[Tuple[int, float]]:
+    """The ``(n_k, k_max)`` an anchors-sourced ``L_conv`` of ``cfg`` reads, ``None`` when ``cfg`` trains
+    no such term. Every refusal that needs no table is made here (the source's value, ``conv_k``
+    without it, ``conv_k`` missing or malformed), so a caller can make them before anything is loaded."""
+    states = conv_states(cfg)
+    if float(cfg.lambda_conv) == 0.0 or states != "anchors":
+        return None
+    extra = cfg.extra_experiment_config
+    if "conv_k" not in extra:
+        raise KeyError(
+            f"lambda_conv={cfg.lambda_conv!r} with conv_states='anchors' and no conv_k = "
+            f"(n_k, k_max), the wavenumber line it reads: this package has no default for it")
+    return conv_line(extra["conv_k"])
 
 
 def conv_states(cfg: TrainConfig) -> str:
@@ -133,22 +154,35 @@ class ConvexityProbe:
         return l_conv(H, form=self.form, margin=self.margin)
 
 
-def _active_eigmin(H: torch.Tensor, active: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """``lambda_min`` of each row's active principal block of ``H`` ``(P, K, n, n)``, ``active`` ``(P, n)``
-    bool: ``(lam (R, K), rows (R,))`` in row order, rows grouped by active pattern so that every block is
-    taken at its own size (no padding). A row with fewer than two active channels is left out."""
-    lams, kept = [], []
+#: One active pattern's rows: the active channels ``idx``, the rows that share them.
+_Group = Tuple[torch.Tensor, torch.Tensor]
+
+
+def _active_groups(active: torch.Tensor) -> Tuple[Tuple[_Group, ...], torch.Tensor, torch.Tensor]:
+    """``active`` ``(P, n)`` bool grouped by pattern: ``(groups, rows, order)``, each group the active
+    channels and the rows sharing them, ``rows`` ``(R,)`` the kept rows in row order and ``order`` the
+    permutation from the groups' concatenation to it. A pattern with fewer than two active channels is
+    left out. Computed once: the tables' masks never change."""
+    groups, kept = [], []
     for pattern in torch.unique(active, dim=0):
         idx = torch.nonzero(pattern).flatten()
         if idx.numel() < 2:
             continue
         rows = torch.nonzero((active == pattern).all(-1)).flatten()
-        block = H[rows][..., idx[:, None], idx]
-        lams.append(torch.linalg.eigvalsh(block)[..., 0])
+        groups.append((idx, rows))
         kept.append(rows)
+    if not groups:
+        return (), torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long)
     rows = torch.cat(kept)
     order = torch.argsort(rows)
-    return torch.cat(lams)[order], rows[order]
+    return tuple(groups), rows[order], order
+
+
+def _active_eigmin(H: torch.Tensor, groups: Sequence[_Group], order: torch.Tensor) -> torch.Tensor:
+    """``lambda_min`` of each kept row's active principal block of ``H`` ``(P, K, n, n)``, ``(R, K)`` in
+    row order: every block is taken at its own size (no padding)."""
+    lams = [torch.linalg.eigvalsh(H[rows][..., idx[:, None], idx])[..., 0] for idx, rows in groups]
+    return torch.cat(lams)[order]
 
 
 @dataclass(frozen=True)
@@ -166,8 +200,11 @@ class StateStability:
     form: str
     margin: float
     active: torch.Tensor = field(repr=False, compare=False)
+    #: The active-pattern groups of ``active`` per device, built once (:func:`_active_groups`).
+    _groups: Dict[str, Any] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        self._groups["cpu"] = _active_groups(self.active.detach().cpu())
         if int(self.n_k) < 2:
             raise ValueError(
                 f"conv_k n_k={self.n_k!r}: the line runs from k = 0 to k_max, at least two "
@@ -183,6 +220,7 @@ class StateStability:
         active = (tables.bulk_active if tables.bulk_active is not None
                   else tables.bulk_rho > 0)
         if not int((active.sum(-1) >= 2).sum()):
+            # a table-dependent refusal: made when the tables are loaded
             raise ValueError(
                 f"conv_states='anchors' reads the anchor_bulk rows and these tables have "
                 f"{int(tables.bulk_rho.shape[0])}, none with two species present: declare "
@@ -223,8 +261,18 @@ class StateStability:
         W = _w_hat_of(model)(k[1:])                                   # (n_k - 1, n, n)
         H = torch.cat([H0.unsqueeze(1), local.unsqueeze(1) + W], dim=1)   # (P, n_k, n, n)
         H = 0.5 * (H + H.transpose(-1, -2))
-        lam, rows = _active_eigmin(H, self.active.to(H.device))
-        return lam, rows, k
+        groups, rows, order = self.groups(H.device)
+        return _active_eigmin(H, groups, order), rows, k
+
+    def groups(self, device: torch.device | str) -> Tuple[Tuple[_Group, ...], torch.Tensor,
+                                                          torch.Tensor]:
+        """:func:`_active_groups` of ``active`` with every index on ``device``, moved there once."""
+        key = str(torch.device(device))
+        if key not in self._groups:
+            groups, rows, order = self._groups["cpu"]
+            self._groups[key] = (tuple((i.to(device), r.to(device)) for i, r in groups),
+                                 rows.to(device), order.to(device))
+        return self._groups[key]
 
     def loss(self, model, bulk: Mapping[str, Any]) -> Tuple[torch.Tensor, dict]:
         """:func:`~aipf.losses.convexity.l_conv_eigmin` over every row and wavenumber of the line."""
@@ -234,7 +282,7 @@ class StateStability:
     def provenance(self) -> Dict[str, Any]:
         """What ``MANIFEST.json`` records under ``penalties["conv_states"]``."""
         return {"states": "anchors", "n_k": int(self.n_k), "k_max": float(self.k_max),
-                "rows": int((self.active.sum(-1) >= 2).sum())}
+                "rows": int(self._groups["cpu"][1].numel())}
 
 
 @dataclass(frozen=True)
@@ -437,21 +485,15 @@ def penalties_from_system(system: System, cfg: TrainConfig,
     ``defaults["training"]["gamma_paths"]``."""
     block = system.defaults.get("training") or {}
     conv = None
-    states = conv_states(cfg)
-    if float(cfg.lambda_conv) != 0.0 and states == "anchors":
-        extra = cfg.extra_experiment_config
+    line = anchor_line(cfg)
+    if line is not None:
         if not isinstance(anchors, AnchorTables):
             raise ValueError(
                 f"system {system.name!r} trains L_conv with conv_states='anchors', which reads the "
                 f"anchor_bulk rows, and this run loads no anchor tables (anchors=NO_ANCHORS, aipf "
                 f"train --anchors none, or no defaults['training']['tables']): load them, or "
                 f"declare conv_states='trust_domain'")
-        if "conv_k" not in extra:
-            raise KeyError(
-                f"system {system.name!r} trains L_conv with conv_states='anchors' and declares no "
-                f"conv_k = (n_k, k_max), the wavenumber line it reads: this package has no "
-                f"default for it")
-        n_k, k_max = conv_line(extra["conv_k"])
+        n_k, k_max = line
         conv = StateStability.from_tables(anchors, n_k=n_k, k_max=k_max,
                                           form=str(cfg.conv_penalty),
                                           margin=float(cfg.conv_margin))
@@ -490,5 +532,5 @@ def penalties_from_system(system: System, cfg: TrainConfig,
 
 
 __all__ = ["CONV_STATES", "ConvexityProbe", "GammaPaths", "PathDraw", "Penalties",
-           "PENALTY_TERMS", "STATE_KEYS", "StateStability", "conv_line", "conv_states", "declared_fields",
-           "penalties_from_system"]
+           "PENALTY_TERMS", "STATE_KEYS", "StateStability", "anchor_line", "conv_line",
+           "conv_states", "declared_fields", "penalties_from_system"]

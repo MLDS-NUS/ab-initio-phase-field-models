@@ -23,6 +23,7 @@ reaching the grid's corner does not demand an ever larger stiffness there. ``W_h
 beyond the radial transform's ``kernel_k_table_max`` (``AnalyticRadialTransform`` clamps ``|k|``)."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -92,8 +93,10 @@ class KernelHinge:
             raise ValueError(f"wpsd_k_max={self.k_max!r}: the wavenumbers reach a positive k_max")
         if self.subspace not in SUBSPACES:
             raise ValueError(f"wpsd_subspace={self.subspace!r} is not one of {SUBSPACES}")
-        if self.k_sat is not None and not float(self.k_sat) > 0.0:
-            raise ValueError(f"wpsd_k_sat={self.k_sat!r}: the floor saturates at a positive k")
+        if self.k_sat is not None and (isinstance(self.k_sat, bool)
+                                       or not math.isfinite(float(self.k_sat))
+                                       or not float(self.k_sat) > 0.0):
+            raise ValueError(f"wpsd_k_sat={self.k_sat!r}: the floor saturates at a positive, finite k")
 
     @classmethod
     def from_config(cls, cfg: TrainConfig) -> Optional["KernelHinge"]:
@@ -109,6 +112,8 @@ class KernelHinge:
                 f"lambda_W={cfg.lambda_W!r} trains the kernel hinge, and its shape {missing} "
                 f"is not declared: this package has no default for any of {list(SHAPE_KEYS)}")
         k_sat = extra.get("wpsd_k_sat")
+        if isinstance(k_sat, bool):
+            raise ValueError(f"wpsd_k_sat={k_sat!r}: the floor saturates at a positive, finite k")
         return cls(kappa=float(extra["wpsd_kappa"]), k_max=float(extra["wpsd_k_max"]),
                    n_k=int(extra["wpsd_n_k"]), margin=float(extra["wpsd_margin"]),
                    weight=float(cfg.lambda_W), subspace=extra.get("wpsd_subspace"),
